@@ -522,9 +522,6 @@ class PolicyTrainer:
 
         from torch.distributed.tensor import DTensor
 
-        from molt.utils.utils import convert_to_torch_dtype
-
-        sync_dtype = convert_to_torch_dtype(self.strategy.args.fsdp.param_dtype)
         ep_size = getattr(self.strategy.args.fsdp, "ep_size", 1) or 1
         parameter_trainability = state_dict_parameter_trainability(model)
 
@@ -573,8 +570,8 @@ class PolicyTrainer:
             # DTensors, so this holds; but the TE GroupedLinear layout
             # (BackendConfig experts="te") keeps only this rank's local experts
             # as plain tensors, which would silently broadcast just rank-0's
-            # slice. nemo-rl relies on the same DTensor invariant — enforce it
-            # loudly rather than diverge train/rollout policies.
+            # slice. The train and rollout engines must share this DTensor
+            # invariant — enforce it loudly rather than let their policies diverge.
             if ep_size > 1 and "expert" in name and not isinstance(tensor, DTensor):
                 raise RuntimeError(
                     f"Refit: expert weight {name!r} is not a DTensor under ep_size={ep_size}; "
@@ -605,12 +602,20 @@ class PolicyTrainer:
             for hf_name, hf_weight in hf_pairs:
                 if not torch.is_tensor(hf_weight) or not hf_weight.is_floating_point():
                     continue
+                # Dtype-faithful refit: keep each param in its native/compute dtype
+                # instead of force-casting everything to a single `param_dtype`. vLLM's
+                # `load_weights` casts each tensor to *that param's own* target dtype via
+                # `param.data.copy_()`, so an fp32-kept weight (e.g. a fp32 MoE
+                # router/gate) round-trips as fp32 rather than being silently
+                # bf16-downcast (which previously corrupted routing). For bf16-target
+                # params the final vLLM value is identical to the old forced-bf16 path
+                # (the cast just happens on the receiver); the only cost is ~2x transfer
+                # bytes for fp32 masters — negligible next to the broadcast lock-wait.
                 hf_weight = hf_weight.to(
                     device=torch.device("cuda", torch.cuda.current_device()),
-                    dtype=sync_dtype,
                     non_blocking=True,
                 ).contiguous()
-                pending_metas.append((hf_name, sync_dtype, tuple(hf_weight.shape)))
+                pending_metas.append((hf_name, hf_weight.dtype, tuple(hf_weight.shape)))
                 pending_tensors.append(hf_weight)
                 pending_bytes += hf_weight.numel() * hf_weight.element_size()
                 if pending_bytes >= packed_threshold_bytes:
