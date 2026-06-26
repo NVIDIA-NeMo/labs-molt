@@ -340,6 +340,9 @@ class CheckpointManager:
                 planner=DefaultLoadPlanner(allow_partial_load=True),
             )
             optimizer_state.load_state_dict(optim_state_dict)
+            # With --fsdp.offload optimizer the Adam moments must live on CPU; DCP
+            # restores them onto the model param's GPU device, so page them back.
+            self.strategy.offload_moments_to_cpu(optimizer)
 
         # Resumable client state (consumed_samples, dataloader/RNG state, RL
         # bookkeeping), torch.save'd in save_ckpt.

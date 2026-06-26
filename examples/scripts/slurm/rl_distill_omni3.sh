@@ -361,9 +361,12 @@ if [ "$VLLM_ENFORCE_EAGER" = "1" ]; then
 fi
 
 # Raise MAX_LENGTH to 32K under the colocated teacher by streaming optimizer+grads to CPU.
-if [ "${FSDP_CPU_OFFLOAD:-0}" = "1" ]; then
-  RL_ARGS+=(--fsdp.cpu_offload)
-fi
+# --fsdp.offload level: FSDP_CPU_OFFLOAD=1 -> full (params to CPU; breaks MoE),
+# OFFLOAD_OPTIMIZER=1 -> optimizer (AdamW step on CPU, params stay on GPU; MoE-safe).
+FSDP_OFFLOAD=none
+[ "${FSDP_CPU_OFFLOAD:-0}" = "1" ] && FSDP_OFFLOAD=full
+[ "${OFFLOAD_OPTIMIZER:-0}" = "1" ] && FSDP_OFFLOAD=optimizer
+[ "$FSDP_OFFLOAD" != "none" ] && RL_ARGS+=(--fsdp.offload "$FSDP_OFFLOAD")
 
 if [ "$VLLM_ENABLE_EXPERT_PARALLEL" = "1" ]; then
   RL_ARGS+=(--vllm.enable_expert_parallel)

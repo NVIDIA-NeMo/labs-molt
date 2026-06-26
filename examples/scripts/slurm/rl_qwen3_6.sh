@@ -418,12 +418,17 @@ if [ "${PARTIAL_ROLLOUT:-0}" = "1" ]; then
   RL_ARGS+=(--train.partial_rollout_enable)
 fi
 
-# FSDP2 CPUOffloadPolicy: streams optimizer + grads to CPU per layer. Saves
-# ~15GB / rank for 30B MoE in bf16 — required to fit MAX_LENGTH=32k under
-# colocated actor/ref with EP=8 CP=2.
-if [ "${FSDP_CPU_OFFLOAD:-0}" = "1" ]; then
-  RL_ARGS+=(--fsdp.cpu_offload)
-fi
+# CPU-offload level (--fsdp.offload). Resolved from the env knobs:
+#   OFFLOAD_OPTIMIZER=1 -> 'optimizer': run the AdamW step on CPU (fp32 master + Adam
+#     moments off-GPU during the step, shrinking the optimizer-step peak); params stay on
+#     GPU for the forward, so it's safe on Qwen3.6 MoE. AdamW only.
+#   FSDP_CPU_OFFLOAD=1  -> 'full': FSDP2 CPUOffloadPolicy also streams the params to CPU
+#     (~15GB/rank for 30B MoE in bf16, but breaks Qwen3.6 MoE and slows the forward).
+# They are a nested progression, so at most one level applies (optimizer takes priority).
+FSDP_OFFLOAD=none
+[ "${FSDP_CPU_OFFLOAD:-0}" = "1" ] && FSDP_OFFLOAD=full
+[ "${OFFLOAD_OPTIMIZER:-0}" = "1" ] && FSDP_OFFLOAD=optimizer
+[ "$FSDP_OFFLOAD" != "none" ] && RL_ARGS+=(--fsdp.offload "$FSDP_OFFLOAD")
 
 # Sequence parallelism within the TP region is OFF by default (matches AutoModel's
 # omni / Qwen3.5-MoE recipes; SP gives norm weights a _NormPartial placement that

@@ -15,6 +15,7 @@ from transformers.optimization import get_scheduler
 
 from molt.models.utils import resolve_ac_mode
 from molt.trainer.fsdp.checkpoint import CheckpointManager
+from molt.trainer.fsdp.optimizer_offload import CpuOptimizerOffloader, local_shard
 from molt.utils.distributed_sampler import DistributedSampler
 
 try:
@@ -64,7 +65,17 @@ class FsdpStrategy:
         self.ep_size = getattr(fsdp, "ep_size", 1)
         self.pp_size = getattr(fsdp, "pp_size", 1)
         self.param_dtype = getattr(fsdp, "param_dtype", "bf16")
-        self.cpu_offload = getattr(fsdp, "cpu_offload", False)
+        # CPU-offload level (--fsdp.offload): none / optimizer / full. A nested
+        # progression, not orthogonal — 'full' (FSDP2 CPUOffloadPolicy) streams params to
+        # CPU and the optimizer follows; 'optimizer' keeps params on GPU and runs only the
+        # AdamW step on CPU (MoE-safe; see optimizer_offload.py). So a single level picks
+        # at most one, and there is nothing to exclude.
+        offload = getattr(fsdp, "offload", "none")
+        self.cpu_offload = offload == "full"
+        self.offload_optimizer = offload == "optimizer"
+        # The 'optimizer' level runs the AdamW step on CPU (params stay on GPU); see
+        # molt/trainer/fsdp/optimizer_offload.py. 'full' is FSDP2 CPUOffloadPolicy below.
+        self._optimizer_offloader = CpuOptimizerOffloader() if self.offload_optimizer else None
         # SP is OFF by default (opt in via --fsdp.sequence_parallel) — matches the
         # AutoModel omni / Qwen3.5-MoE recipes, and avoids the _NormPartial 2D
         # TP+FSDP weight-load hang on the HF-fallback path.
@@ -161,7 +172,7 @@ class FsdpStrategy:
         if self.world_size == 1 and self.cpu_offload:
             raise NotImplementedError(
                 "CPU offload is not supported by AutoModel/FSDP2 on a single rank; "
-                "disable --fsdp.cpu_offload or launch with more than one rank."
+                "set --fsdp.offload to none/optimizer or launch with more than one rank."
             )
         if self.pp_size > 1:
             raise NotImplementedError("Molt trainers are not pipeline-parallel aware yet; set --fsdp.pp_size 1")
@@ -351,6 +362,11 @@ class FsdpStrategy:
         kind = cfg["optim"]
         adam = cfg["adam"]
         if kind == "muon":
+            if self.offload_optimizer:
+                raise NotImplementedError(
+                    "--fsdp.offload optimizer supports AdamW only; Muon's Newton-Schulz "
+                    "iterations are impractical on CPU. Use --optim adam, or --fsdp.offload none."
+                )
             from molt.trainer.fsdp.muon import build_automodel_muon_optimizer
 
             optimizer = build_automodel_muon_optimizer(train_model, cfg["muon"], adam, self.device_mesh)
@@ -492,10 +508,20 @@ class FsdpStrategy:
                         dp_group_size=getattr(self, "dp_cp_size", self.dp_size),
                     )
                 )
-        optimizer.step()
+        if self._optimizer_offloader is not None:
+            self._optimizer_offloader.step(optimizer, params)  # CPU AdamW (params stay on GPU)
+        else:
+            optimizer.step()
         if scheduler is not None:
             scheduler.step()
         optimizer.zero_grad(set_to_none=True)
+
+    def offload_moments_to_cpu(self, optimizer: optim.Optimizer) -> None:
+        """Page the Adam moments back to CPU after a checkpoint resume (DCP restores them
+        onto the model param's GPU device). Called from load_ckpt before the first
+        forward; a no-op unless the optimizer is CPU-offloaded."""
+        if self._optimizer_offloader is not None:
+            self._optimizer_offloader.moments_to_cpu(optimizer)
 
     def sync_replicated_grads(self, params) -> None:
         """Mean-all-reduce gradients of replicated (non-FSDP-wrapped) params over the
@@ -524,16 +550,12 @@ class FsdpStrategy:
         for p in params:
             if p.grad is None:
                 continue
-            grad = self._local_grad_tensor(p.grad)
+            grad = local_shard(p.grad)
             dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=group)
             grad.div_(world)
 
     def get_grad_norm(self, model: nn.Module) -> float:
         return self._last_grad_norm
-
-    @staticmethod
-    def _local_grad_tensor(grad: torch.Tensor) -> torch.Tensor:
-        return grad.to_local() if isinstance(grad, DTensor) else grad
 
     def _maybe_debug_grad_stats(self, model: nn.Module, optim_name: str) -> None:
         debug = os.environ.get("MOLT_FSDP_DEBUG_GRADS", "")
@@ -565,7 +587,7 @@ class FsdpStrategy:
             if patterns and not any(pattern in param_name for pattern in patterns):
                 continue
             total_tensors += 1
-            local_grad = self._local_grad_tensor(grad).detach()
+            local_grad = local_shard(grad).detach()
             total_elems += local_grad.numel()
             finite = torch.isfinite(local_grad)
             bad = local_grad.numel() - int(finite.sum().item())
