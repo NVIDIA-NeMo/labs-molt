@@ -136,6 +136,35 @@ def test_generate_samples_pool_persists_across_calls(monkeypatch):
     assert [handle.group_id for handle in generator._inflight_rollouts] == ["p6", "p7", "p8", "p9"]
 
 
+def test_checkpoint_restores_prompts_consumed_by_prefetch(monkeypatch):
+    generator = object.__new__(SamplesGenerator)
+    generator.args = SimpleNamespace(
+        rollout=SimpleNamespace(batch_size=3, n_samples_per_prompt=1, vllm_generate_batch_size=5),
+        algo=SimpleNamespace(dynamic_filtering_enable=False),
+    )
+    generator.prompts_dataloader = _prompt_loader(10)
+    _wire_fake_vllm(generator, monkeypatch, _sample)
+
+    first, *_ = generator.generate_samples()
+    checkpoint_state = generator.state_dict()
+
+    assert [sample.group_ids[0] for sample in first] == ["p0", "p1", "p2"]
+    assert [payload[0] for payload in checkpoint_state["pending_prompts"]] == ["p3", "p4", "p5", "p6"]
+
+    restored = object.__new__(SamplesGenerator)
+    restored.args = generator.args
+    # Mirrors the dataloader cursor in the checkpoint: p0-p6 were already read.
+    restored.prompts_dataloader = [(i, [f"p{i}"], [f"l{i}"], [None]) for i in range(7, 10)]
+    _wire_fake_vllm(restored, monkeypatch, _sample)
+    restored.load_state_dict(checkpoint_state)
+
+    second, _, newly_dispatched, _ = restored.generate_samples()
+
+    assert [sample.group_ids[0] for sample in second] == ["p3", "p4", "p5"]
+    assert newly_dispatched == 3
+    assert [handle.group_id for handle in restored._inflight_rollouts] == ["p6", "p7", "p8", "p9"]
+
+
 def test_generate_samples_drops_filtered_groups_and_refills_their_slots(monkeypatch):
     generator = object.__new__(SamplesGenerator)
     generator.args = SimpleNamespace(

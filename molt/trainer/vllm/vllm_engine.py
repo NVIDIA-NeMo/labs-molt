@@ -139,8 +139,8 @@ class RolloutRayActor:
         self._mm_image_start_ids = mm_image_start_ids
         # Bumped on every weight broadcast; generate() reads it to detect a swap
         # that lands mid-generation (partial rollout) and report the off-policy
-        # token boundary. Stays effectively unused when partial_rollout is off
-        # (the lock serializes broadcasts against rollout, so no generate spans one).
+        # token boundary. Streaming requests may span a refit in either rollout
+        # mode because generate_samples returns before its slow tail finishes.
         self._weight_version = 0
 
     async def ready(self) -> bool:
@@ -249,8 +249,7 @@ class RolloutRayActor:
         # Trajectory.append_action, which drops [:off_policy_len] from the action
         # mask (slime's mask_offpolicy_in_partial_rollout — zero gradient AND out of
         # the token-mean denominator). off_policy_len stays 0 when no swap spans
-        # this call, which is always the case with partial_rollout off (the
-        # vllm_lock serializes the broadcast against generation).
+        # this call.
         start_version = self._weight_version
         off_policy_len = 0
         final_output = None

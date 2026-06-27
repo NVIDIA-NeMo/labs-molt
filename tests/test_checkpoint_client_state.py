@@ -71,6 +71,9 @@ def _realistic_client_state():
             "epoch_seed_pairs": [(0, 1234), (1, 5678)],
             "by_int_key": {0: "a", 1: "b"},
         },
+        "rollout_generator_state_dict": {
+            "pending_prompts": [("prompt", "label", ["image.png"])],
+        },
     }
 
 

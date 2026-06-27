@@ -540,8 +540,9 @@ class GenerateSamplesActor:
     def get_max_steps(self):
         return self.max_steps
 
-    def load_dataloader_state_dict(self, state_dict):
+    def load_dataloader_state_dict(self, state_dict, rollout_generator_state_dict=None):
         self.prompts_dataloader.load_state_dict(state_dict)
+        self.samples_generator.load_state_dict(rollout_generator_state_dict)
 
     def fit(self, episode: int, total_consumed_prompts: int) -> None:
         eval_steps = self.args.eval.steps
@@ -649,6 +650,7 @@ class GenerateSamplesActor:
                         "episode": ep,
                         "total_consumed_prompts": total_consumed_prompts,
                         "data_loader_state_dict": self.prompts_dataloader.state_dict(),
+                        "rollout_generator_state_dict": self.samples_generator.state_dict(),
                     }
                     self.rollout_queue.put(
                         (rollout_samples, client_states, rollout_metrics, generation_time, vllm_idle_wait),
@@ -695,7 +697,6 @@ class TrainingActor(BaseRLTrainer):
         )
 
         self.vllm_lock = vllm_lock
-        self._partial_rollout = getattr(strategy.args.train, "partial_rollout_enable", False)
         self._prefix_caching_enabled = getattr(strategy.args.vllm, "enable_prefix_caching", False)
         self.rollout_queue = rollout_queue
         self.rollout_slots = rollout_slots
@@ -760,38 +761,19 @@ class TrainingActor(BaseRLTrainer):
             self.tensorboard_logger.close()
 
     def broadcast_to_vllm(self):
-        # Lock prevents weight broadcast from overlapping with eval generation.
-        # Nest the acquire/pause/resume/release so the lock is released even if
-        # pause_generation or resume_generation raises: a leaked lock would
-        # silently hang the next broadcast AND eval (both acquire it). pause is
-        # inside the outer try so a failure there still hits the release.
-        #
-        # Split the timing into lock-wait vs transfer (train_step logs both):
-        # the vllm_lock is held by the in-flight rollout generation, so the
-        # acquire below BLOCKS until that ~rollout-length generation drains.
-        # That wait dwarfs the actual NCCL weight transfer and overlaps the
-        # generation in wall-clock, so reporting it merged into timing/broadcast
-        # makes the weight sync look like a multi-minute transfer bottleneck
-        # when it is really the trainer idling on the lock.
+        # Keep new generation calls out while existing requests are paused and
+        # refitted. Report lock wait separately from the weight transfer.
         _t0 = time.time()
         ray.get(self.vllm_lock.acquire.remote())
         self._broadcast_lock_wait_s = time.time() - _t0
         _t0 = time.time()
-        try:
-            if self._partial_rollout:
-                batch_vllm_engine_call(self.vllm_engines, "pause_generation")
-            try:
-                super().broadcast_to_vllm()
-                # Prefix cache holds activations from the previous weights; invalidate so
-                # the next rollout re-prefills with the updated policy. No-op when off.
-                if self._prefix_caching_enabled:
-                    batch_vllm_engine_call(self.vllm_engines, "reset_prefix_cache")
-            finally:
-                if self._partial_rollout:
-                    batch_vllm_engine_call(self.vllm_engines, "resume_generation")
-        finally:
-            ray.get(self.vllm_lock.release.remote())
-            self._broadcast_transfer_s = time.time() - _t0
+        batch_vllm_engine_call(self.vllm_engines, "pause_generation")
+        super().broadcast_to_vllm()
+        if self._prefix_caching_enabled:
+            batch_vllm_engine_call(self.vllm_engines, "reset_prefix_cache")
+        batch_vllm_engine_call(self.vllm_engines, "resume_generation")
+        ray.get(self.vllm_lock.release.remote())
+        self._broadcast_transfer_s = time.time() - _t0
 
 
 @ray.remote
@@ -858,7 +840,8 @@ class RLTrainer:
             ray.get(
                 [
                     self.generator_actor.load_dataloader_state_dict.remote(
-                        checkpoint_states["data_loader_state_dict"]
+                        checkpoint_states["data_loader_state_dict"],
+                        checkpoint_states.get("rollout_generator_state_dict"),
                     ),
                     self.trainer_actor.broadcast_to_vllm.remote(),
                 ]
