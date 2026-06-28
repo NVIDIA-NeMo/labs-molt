@@ -767,18 +767,23 @@ class TrainingActor(BaseRLTrainer):
 
     def broadcast_to_vllm(self):
         # Keep new generation calls out while existing requests are paused and
-        # refitted. Report lock wait separately from the weight transfer.
+        # refitted. Report lock wait separately from the weight transfer. The lock
+        # release sits in finally so a failed refit (NCCL errors do happen mid-run)
+        # crashes cleanly instead of leaving vllm_lock held, which would silently
+        # hang the trainer and eval (both acquire it).
         _t0 = time.time()
         ray.get(self.vllm_lock.acquire.remote())
         self._broadcast_lock_wait_s = time.time() - _t0
         _t0 = time.time()
-        batch_vllm_engine_call(self.vllm_engines, "pause_generation")
-        super().broadcast_to_vllm()
-        if self._prefix_caching_enabled:
-            batch_vllm_engine_call(self.vllm_engines, "reset_prefix_cache")
-        batch_vllm_engine_call(self.vllm_engines, "resume_generation")
-        ray.get(self.vllm_lock.release.remote())
-        self._broadcast_transfer_s = time.time() - _t0
+        try:
+            batch_vllm_engine_call(self.vllm_engines, "pause_generation")
+            super().broadcast_to_vllm()
+            if self._prefix_caching_enabled:
+                batch_vllm_engine_call(self.vllm_engines, "reset_prefix_cache")
+            batch_vllm_engine_call(self.vllm_engines, "resume_generation")
+        finally:
+            ray.get(self.vllm_lock.release.remote())
+            self._broadcast_transfer_s = time.time() - _t0
 
 
 @ray.remote
