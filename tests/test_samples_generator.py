@@ -136,7 +136,16 @@ def test_generate_samples_pool_persists_across_calls(monkeypatch):
     assert [handle.group_id for handle in generator._inflight_rollouts] == ["p6", "p7", "p8", "p9"]
 
 
-def test_checkpoint_restores_prompts_consumed_by_prefetch(monkeypatch):
+def test_generator_keeps_no_checkpoint_state_and_resumes_from_dataloader(monkeypatch):
+    """The in-flight pool is intentionally NOT persisted.
+
+    Persisting the in-flight (prompt, label, images) payloads bloated checkpoints
+    ~1000x (22-78 MB vs ~7 KB) and crashed the driver on resume, so the generator
+    is stateless across checkpoints: state_dict() is empty and load_state_dict is a
+    no-op tolerant of None/{}. The StatefulDataLoader cursor already points past the
+    in-flight prefetch, so on resume those few prompts are skipped (a bounded loss,
+    negligible for multi-epoch RL) rather than redispatched.
+    """
     generator = object.__new__(SamplesGenerator)
     generator.args = SimpleNamespace(
         rollout=SimpleNamespace(batch_size=3, n_samples_per_prompt=1, vllm_generate_batch_size=5),
@@ -146,23 +155,23 @@ def test_checkpoint_restores_prompts_consumed_by_prefetch(monkeypatch):
     _wire_fake_vllm(generator, monkeypatch, _sample)
 
     first, *_ = generator.generate_samples()
-    checkpoint_state = generator.state_dict()
-
     assert [sample.group_ids[0] for sample in first] == ["p0", "p1", "p2"]
-    assert [payload[0] for payload in checkpoint_state["pending_prompts"]] == ["p3", "p4", "p5", "p6"]
+    # p3-p6 are in flight at the checkpoint; the generator carries no state for them.
+    assert generator.state_dict() == {}
 
     restored = object.__new__(SamplesGenerator)
     restored.args = generator.args
-    # Mirrors the dataloader cursor in the checkpoint: p0-p6 were already read.
+    # The StatefulDataLoader cursor in the checkpoint already points past the
+    # prefetched prompts (p0-p6 were read), so resume starts at p7.
     restored.prompts_dataloader = [(i, [f"p{i}"], [f"l{i}"], [None]) for i in range(7, 10)]
     _wire_fake_vllm(restored, monkeypatch, _sample)
-    restored.load_state_dict(checkpoint_state)
+    restored.load_state_dict(None)  # tolerate a missing payload
+    restored.load_state_dict({})  # and an empty one
 
     second, _, newly_dispatched, _ = restored.generate_samples()
-
-    assert [sample.group_ids[0] for sample in second] == ["p3", "p4", "p5"]
+    # Resume continues from the dataloader cursor; the in-flight p3-p6 are not retrained.
+    assert [sample.group_ids[0] for sample in second] == ["p7", "p8", "p9"]
     assert newly_dispatched == 3
-    assert [handle.group_id for handle in restored._inflight_rollouts] == ["p6", "p7", "p8", "p9"]
 
 
 def test_generate_samples_drops_filtered_groups_and_refills_their_slots(monkeypatch):

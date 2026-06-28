@@ -86,10 +86,11 @@ class SamplesGenerator:
         self.prompts_dataloader = prompts_dataloader
         self.eval_dataloader = eval_dataloader
 
-    # The in-flight rollout pool is rebuilt from the dataloader position on resume,
-    # so the generator carries no checkpoint state. (Persisting the in-flight prompt
-    # payloads here previously bloated the checkpoint ~1000x — 22-78 MB vs ~7 KB —
-    # and crashed the driver on resume; the dataloader state alone is sufficient.)
+    # The generator is stateless across checkpoints. Persisting the in-flight prompt
+    # payloads here previously bloated the checkpoint ~1000x (22-78 MB vs ~7 KB) and
+    # crashed the driver on resume. The StatefulDataLoader cursor already points past
+    # the in-flight prefetch, so on resume those few prompts are skipped rather than
+    # redispatched — a bounded loss that is negligible for multi-epoch RL.
     def state_dict(self) -> Dict:
         return {}
 
