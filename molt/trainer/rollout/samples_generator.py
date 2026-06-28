@@ -86,18 +86,15 @@ class SamplesGenerator:
         self.prompts_dataloader = prompts_dataloader
         self.eval_dataloader = eval_dataloader
 
+    # The in-flight rollout pool is rebuilt from the dataloader position on resume,
+    # so the generator carries no checkpoint state. (Persisting the in-flight prompt
+    # payloads here previously bloated the checkpoint ~1000x — 22-78 MB vs ~7 KB —
+    # and crashed the driver on resume; the dataloader state alone is sufficient.)
     def state_dict(self) -> Dict:
-        """Return the prompt payloads consumed by the loader but not trained yet."""
-        return {"pending_prompts": list(getattr(self, "_inflight_prompt_payloads", []))}
+        return {}
 
     def load_state_dict(self, state_dict: Optional[Dict]) -> None:
-        """Stage checkpointed prompts for redispatch on the next generation call."""
-        self._restored_pending_prompts = list((state_dict or {}).get("pending_prompts", []))
-
-    def _track_dispatched_prompts(self, prompts, labels, images, **generate_kwargs) -> None:
-        refs = self._dispatch_prompts_to_vllm(prompts, labels, images=images, **generate_kwargs)
-        self._inflight_rollouts.extend(refs)
-        self._inflight_prompt_payloads.extend(zip(prompts, labels, images))
+        return
 
     @torch.no_grad()
     def generate_eval_samples(self, **generate_kwargs) -> List[Experience]:
@@ -143,15 +140,6 @@ class SamplesGenerator:
             self._dataloader_iter = iter(self.prompts_dataloader)
             self._finished_samples: List[Experience] = []
             self._inflight_rollouts: List = []
-            self._inflight_prompt_payloads: List[Tuple] = []
-
-            # The dataloader checkpoint points past these prompts. Redispatch them
-            # before consuming new rows so a restart cannot skip prefetched work.
-            pending = getattr(self, "_restored_pending_prompts", [])
-            if pending:
-                prompts, labels, images = map(list, zip(*pending))
-                self._track_dispatched_prompts(prompts, labels, images, **generate_kwargs)
-                self._restored_pending_prompts = []
 
         groups_per_batch = self.args.rollout.batch_size
         inflight_capacity = getattr(self.args.rollout, "vllm_generate_batch_size", None) or groups_per_batch
@@ -177,7 +165,9 @@ class SamplesGenerator:
                 )
                 prompts_dispatched += len(prompts)
                 if prompts:
-                    self._track_dispatched_prompts(prompts, labels, images, **generate_kwargs)
+                    self._inflight_rollouts.extend(
+                        self._dispatch_prompts_to_vllm(prompts, labels, images=images, **generate_kwargs)
+                    )
                 if dataloader_exhausted:
                     self._dataloader_iter = None
                     logger.info("Prompt dataloader is exhausted.")
@@ -186,9 +176,7 @@ class SamplesGenerator:
                 break  # dataloader drained and pool empty — emit whatever finished
 
             # Take the first rollout to finish; the slow ones keep generating in vLLM.
-            inflight = self._inflight_rollouts
-            ready, self._inflight_rollouts = ray.wait(inflight, num_returns=1)
-            self._inflight_prompt_payloads.pop(inflight.index(ready[0]))
+            ready, self._inflight_rollouts = ray.wait(self._inflight_rollouts, num_returns=1)
             for finished_rollout in ready:
                 # Dropped groups (filtered or all-unusable) come back empty; their
                 # slot is refilled with a fresh prompt on the next iteration.

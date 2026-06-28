@@ -471,7 +471,12 @@ class BaseRLTrainer:
             checkpoint_states = ray.get(self.actor_model_group.async_run_method(method_name="get_checkpoint_states"))[
                 0
             ]
-            logger.info(f"checkpoint_states: {checkpoint_states}")
+            # Log scalars only; never f-string the whole dict (a legacy checkpoint
+            # can carry a multi-MB sub-dict that would OOM the driver on resume).
+            logger.info(
+                "checkpoint_states: %s",
+                {k: v for k, v in checkpoint_states.items() if not isinstance(v, (dict, list))},
+            )
             return checkpoint_states
         return {
             "episode": 0,
