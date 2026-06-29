@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 from molt.models import Actor
 from molt.trainer.fsdp import FsdpStrategy
-from molt.trainer.placement import ray_noset_visible_devices
+from molt.trainer.placement import get_bundle_indices, ray_noset_visible_devices
 
 
 class BaseDistributedActor:
@@ -203,11 +203,20 @@ class RayActorGroup:
                 for i in range(len(bundles)):
                     bundles[i][resources_name] = self._num_resources_per_node
 
-            # PACK (node-contiguous), not SPREAD: rank i is bound to bundle i
-            # directly below, so SPREAD would interleave the actor's ranks across
-            # nodes and scatter the EP/CP group cross-node (deep_ep NVLink crash).
+            # PACK (not SPREAD) packs the actor's GPUs onto as few nodes as possible.
             pg = placement_group(bundles, strategy="PACK")
             ray.get(pg.ready())
+
+        # Ray PACK does NOT guarantee bundle index == node order (ray #51117): at
+        # >2 nodes Ray can interleave bundle indices across nodes, so rank i -> bundle i
+        # scatters the EP=8/CP=8 group across a node boundary and deep_ep's intra-node
+        # NVLink dispatch hits a cross-node peer (illegal memory access, deep_ep.cpp:278;
+        # 2 nodes happened to pack contiguously, 4 nodes did not). Map rank i -> the i-th
+        # bundle in NODE-SORTED order so each EP/CP group stays within one node.
+        bundle_order = list(range(world_size))
+        if pg is not None:
+            ray.get(pg.ready())
+            bundle_order = get_bundle_indices(pg, 0, world_size)
 
         def _spawn(rank, master_addr, master_port):
             options = {
@@ -217,7 +226,7 @@ class RayActorGroup:
             }
             if pg:
                 options["scheduling_strategy"] = PlacementGroupSchedulingStrategy(
-                    placement_group=pg, placement_group_bundle_index=rank
+                    placement_group=pg, placement_group_bundle_index=bundle_order[rank]
                 )
             return self.ray_actor_type.options(**options).remote(world_size, rank, master_addr, master_port)
 
