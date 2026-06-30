@@ -575,7 +575,14 @@ class BaseModel(nn.Module):
                 # so qwen3.6 VLM runs at cp=1 with TP/EP for memory (see rl_qwen3_6.sh).
                 # Hooked models pre-embed here via `_pre_embed_only`; `torch.no_grad()`
                 # keeps the embeds grad-free (PyTorch CP resize_s the sharded buffer).
-                if mm_inputs and getattr(self, "is_vlm", False):
+                #
+                # Pre-embed UNCONDITIONALLY under VLM+CP (do not gate on `mm_inputs`): the
+                # pre-embed fires an FSDP all-gather of embed_tokens over the dp_cp group, so
+                # gating it on whether this rank's microbatch had images let image-free ranks
+                # skip the all-gather while image-bearing ranks ran it -> divergent collective
+                # -> NCCL deadlock. A text-only microbatch just embeds its tokens (numerically
+                # identical to the normal forward), keeping every dp_cp rank in lockstep.
+                if getattr(self, "is_vlm", False):
                     if not hasattr(self.model, "prepare_model_inputs_for_cp"):
                         raise RuntimeError(
                             "VLM + CP requires the model's AutoModel pre-embed hook "
