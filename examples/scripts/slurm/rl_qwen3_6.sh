@@ -395,6 +395,7 @@ RL_ARGS=(
   --ckpt.output_dir "$SAVE_ROOT/hf"
   --ckpt.path "$SAVE_ROOT/state"
   --ckpt.save_steps "${SAVE_STEPS:-5}"
+  --ckpt.max_num "${CKPT_MAX_NUM:-50}"
   --logger.logging_steps 1
   --logger.wandb.project "${WANDB_PROJECT:-molt_async_visual_rl}"
   --logger.wandb.run_name "${WANDB_RUN_NAME:-visual_rl_$SLURM_JOB_ID}"
