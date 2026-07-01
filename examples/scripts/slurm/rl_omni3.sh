@@ -30,7 +30,7 @@ export MOLT_PATH="$REPO_ROOT"
 # checkout so the architecture re-registers.
 export MODEL_PATH="${MODEL_PATH:-$REPO_ROOT/.tmp/nemotron_omni_v3_shim/iter_0001926_mcore_to_hf}"
 export TP_SIZE="${TP_SIZE:-1}"        # AutoModel custom MoE asserts TP=1
-export EP_SIZE="${EP_SIZE:-16}"       # only model-state shard knob for this MoE (16-way = distill infra)
+export EP_SIZE="${EP_SIZE:-8}"        # only model-state shard knob for this MoE
 export CP_SIZE="${CP_SIZE:-8}"        # CP8 fits 32K on the 2-node DP2 actor (omni3 SFT-validated 4679193); hybrid-SSM CP fix is in
 export GRAD_CHECKPOINT="${GRAD_CHECKPOINT-full}"   # all blocks activation-checkpointed
 # Custom AutoModel models reject flash_attention_2 (it silently falls to sdpa);
