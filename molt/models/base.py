@@ -453,11 +453,28 @@ class BaseModel(nn.Module):
 
             from nemo_automodel.components.moe.router_replay import RouterReplay
 
+            # molt's _build_routing_targets marks positions with no captured rollout
+            # routing (a multimodal prompt the engine didn't route, feedback, CP pad)
+            # with a -1 sentinel meaning "keep the live selection here". Stock
+            # RouterReplay.apply() returns the target verbatim in REPLAY mode, so -1
+            # reaches the expert gather (torch.gather forbids negative indices) -> a
+            # device-side assert (crashed distill step-1, job 5023211, on the baked
+            # automodel). super().apply() still records / replays / shape-checks; we only
+            # keep the live selection at the sentinels. Outside REPLAY, super() returns the
+            # live indices (all >= 0), so the where is a plain no-op -- no mode check needed.
+            # Mirrors the upstream where-guard entirely in molt: R3 runs on a baked automodel
+            # with no source patch / external worktree, and it no-ops once automodel upstreams
+            # the same guard (result then already carries no -1).
+            class _SentinelRouterReplay(RouterReplay):
+                def apply(self, indices: torch.Tensor) -> torch.Tensor:
+                    result = super().apply(indices)
+                    return torch.where(result >= 0, result, indices)
+
             RouterReplay.clear_registry()
             gate_layer_ids: list[int] = []
             for name, module in self.model.named_modules():
                 if hasattr(module, "router_replay"):  # an AutoModel MoE gate
-                    module.router_replay = RouterReplay()
+                    module.router_replay = _SentinelRouterReplay()
                     m = re.search(r"layers\.(\d+)\b", name)
                     gate_layer_ids.append(int(m.group(1)) if m else len(gate_layer_ids))
             if not gate_layer_ids:
