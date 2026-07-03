@@ -539,7 +539,7 @@ class GenerateSamplesActor:
 
         # Rollout runs on a list of runner actors -> the shared vllm-router (generation),
         # grading in-process. Weight sync goes straight to the engines (bypasses the router).
-        from molt.rollout.router import AgentRunnerActor
+        from molt.trainer.rollout.router import AgentRunnerActor
 
         num_runners = max(1, getattr(strategy.args.rollout, "num_runners", 2))
         agent_runners = [

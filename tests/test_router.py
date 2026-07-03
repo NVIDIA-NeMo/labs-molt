@@ -7,7 +7,7 @@ import aiohttp
 import numpy as np
 import pytest
 
-from molt.rollout.router import (
+from molt.trainer.rollout.router import (
     RouterGenerateClient,
     _align_features_to_canonical,
     _decode_routed_experts,
@@ -154,7 +154,7 @@ def test_post_retries_transient_then_succeeds(monkeypatch):
     async def _no_sleep(*_a, **_k):
         pass
 
-    monkeypatch.setattr("molt.rollout.router.asyncio.sleep", _no_sleep)
+    monkeypatch.setattr("molt.trainer.rollout.router.asyncio.sleep", _no_sleep)
     http = _FlakyHttp(_gen_resp([90]), aiohttp.ClientConnectionError("engine warming up"), fail_times=2)
     ro, off = asyncio.run(RouterGenerateClient(http).generate([1, 2], _sp()))
     assert http.attempts == 3 and ro.outputs[0].token_ids == [90]  # 2 transient failures, 3rd succeeds
@@ -165,7 +165,7 @@ def test_post_fails_fast_on_4xx(monkeypatch):
     async def _no_sleep(*_a, **_k):
         pass
 
-    monkeypatch.setattr("molt.rollout.router.asyncio.sleep", _no_sleep)
+    monkeypatch.setattr("molt.trainer.rollout.router.asyncio.sleep", _no_sleep)
     http = _FlakyHttp(_gen_resp([90]), aiohttp.ClientResponseError(None, (), status=400), fail_times=10)
     with pytest.raises(aiohttp.ClientResponseError):
         asyncio.run(RouterGenerateClient(http).generate([1, 2], _sp()))

@@ -170,7 +170,7 @@ def train(args):
     router_url = None
     vllm_router = None  # MUST stay in scope for the whole run — the router actor dies if GC'd
     if vllm_engines:
-        from molt.rollout.router import create_vllm_router
+        from molt.trainer.rollout.router import create_vllm_router
 
         vllm_router, router_url = create_vllm_router(
             vllm_engines, policy=getattr(args.vllm, "router_policy", "consistent_hash")
