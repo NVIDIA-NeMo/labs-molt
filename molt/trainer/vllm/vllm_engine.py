@@ -254,6 +254,7 @@ def create_vllm_engines(
     # alignment on their recipe (broadcast_to_vllm calls reset_prefix_cache).
     enable_prefix_caching: bool = False,
     enable_chunked_prefill: Optional[bool] = None,
+    max_num_batched_tokens: Optional[int] = None,
     async_scheduling: Optional[bool] = None,
     decode_context_parallel_size: int = 1,
     dtype: str = "bfloat16",
@@ -349,6 +350,11 @@ def create_vllm_engines(
         # for the unset case.
         if enable_chunked_prefill is not None:
             actor_kwargs["enable_chunked_prefill"] = enable_chunked_prefill
+        if max_num_batched_tokens is not None:
+            # >= max_model_len ⇒ every prefill fits in one scheduler chunk, so a
+            # recurrent-state model (Mamba2/GDN) never hands its state across chunk
+            # boundaries mid-prefill (a rollout-vs-training logprob drift source).
+            actor_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
         if async_scheduling is not None:
             actor_kwargs["async_scheduling"] = async_scheduling
 

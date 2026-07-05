@@ -73,6 +73,7 @@ def train(args):
             enable_expert_parallel=args.vllm.enable_expert_parallel,
             enable_prefix_caching=args.vllm.enable_prefix_caching,
             enable_chunked_prefill=args.vllm.enable_chunked_prefill,
+            max_num_batched_tokens=args.vllm.max_num_batched_tokens,
             async_scheduling=args.vllm.async_scheduling,
             decode_context_parallel_size=args.vllm.decode_context_parallel_size,
             dtype=args.vllm.dtype,
@@ -538,6 +539,14 @@ if __name__ == "__main__":
         help="vLLM chunked prefill (default: vLLM auto — True for non-encoder-decoder models).",
     )
     parser.add_argument(
+        "--vllm.max_num_batched_tokens",
+        type=int,
+        default=None,
+        help="vLLM scheduler token budget per iteration (default: vLLM auto, ~2048 with chunked "
+        "prefill). Set >= max_model_len so every prefill fits in one chunk and a recurrent-state "
+        "model (Mamba2/GDN) never hands its state across chunk boundaries.",
+    )
+    parser.add_argument(
         "--vllm.async_scheduling",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -556,6 +565,15 @@ if __name__ == "__main__":
         type=int,
         default=2,
         help="Router path: number of runner-pool actors (rollouts + in-process reward grading)",
+    )
+    parser.add_argument(
+        "--rollout.rescore_logprobs",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Re-read each finished rollout's action logprobs (+R3 routing) through one extra prefill "
+        "pass. Recurrent linear-attention models (Qwen3.x GDN) have decode-vs-prefill kernel numerics "
+        "gaps; the training recompute is prefill-like, so decode-time logprobs leak engine kernel "
+        "noise into vllm_kl / the TIS ratio. Costs one prefill per trajectory.",
     )
     parser.add_argument(
         "--rollout.vllm_generate_batch_size", type=int, default=None, help="Batch size for vLLM generating samples"
