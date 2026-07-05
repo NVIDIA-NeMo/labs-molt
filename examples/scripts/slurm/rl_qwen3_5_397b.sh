@@ -22,21 +22,22 @@ export MOLT_PATH="$REPO_ROOT"
 # AutoModel's custom MoE parallelizer asserts TP=1. 12-node split: 8 actor/ref
 # nodes (64 GPUs) + 4 vLLM rollout nodes (32 GPUs). vLLM 0.23 natively serves it.
 export MODEL_PATH="${MODEL_PATH:-/lustre/fs1/portfolios/nvr/projects/nvr_lpr_agentic/users/jianh/models/Qwen3.5-397B-A17B}"
-# TP MUST be 1 (custom MoE parallelizer). EP=64 = full non-PP world (dp8*cp8*tp1=64);
+# TP MUST be 1 (custom MoE parallelizer). EP=64 = full non-PP world (dp4*cp16*tp1=64);
 # 512 experts / 64 = 8 experts/rank (512 % 64 == 0).
 export TP_SIZE="${TP_SIZE:-1}"
 export EP_SIZE="${EP_SIZE:-64}"
 # Activation checkpointing ON (safe under the hybridep MoE dispatcher; deterministic
 # recompute).
 export GRAD_CHECKPOINT="${GRAD_CHECKPOINT-full}"
-# CP=8, te-native CP path (attn=te) — the sweet spot for this 12-node run:
-#  * dp = world 64 / cp8 = 8, and train.batch_size=8 must be >= dp, so CP=1 (dp=64)
-#    fails the "num sample batches >= actor processes" assert; CP=8 is the largest CP.
-#  * cp is the innermost mesh axis, so cp8 = 8 adjacent ranks = 1 node: the GDN
-#    linear-attn full-seq all-gather stays on NVLink (CP=32 cross-node hung on it).
-#  * Official qwen3_5_moe validates CP up to 2, so CP=8 is aggressive but intra-node;
-#    drop to CP=2 if it OOMs. 2*cp=16 divides MAX_LENGTH.
-export CP_SIZE="${CP_SIZE:-8}"
+# CP=16, te-native CP path (attn=te) for this 12-node run at 32K context:
+#  * dp = world 64 / cp16 = 4, and train.batch_size=8 >= dp=4 passes the
+#    "num sample batches >= actor processes" assert (CP=1 → dp=64 would fail it).
+#  * CP=16 shards 32K to 2048 tok/rank — more activation headroom than CP=8 for the
+#    397B at 32K. cp is the innermost mesh axis, so cp16 = 16 ranks = 2 nodes: the
+#    GDN linear-attn full-seq all-gather now crosses one node boundary. If it hangs
+#    on that all-gather (as CP=32 across 4 nodes did), drop to CP=8 (intra-node/NVLink).
+#  * 2*cp=32 divides MAX_LENGTH (32768/32 = 1024).
+export CP_SIZE="${CP_SIZE:-16}"
 # 32K context. CP=8 shards non-GDN activations to 32768/8=4096 tok/rank
 # (GDN layers all-gather the full sequence intra-node).
 export MAX_LENGTH="${MAX_LENGTH:-32768}"
@@ -132,8 +133,8 @@ set -x
 
 REPO_ROOT="${MOLT_PATH:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}}"
 # molt-cu13.sqsh = vLLM 0.23 (+vllm_router, deep_ep, TE) — natively serves
-# qwen3_5_moe. Default points at the sibling images dir.
-CONTAINER_IMAGE="${CONTAINER_IMAGE:-$REPO_ROOT/../OpenRLHF/images/molt-cu13.sqsh}"
+# qwen3_5_moe. Default points at $REPO_ROOT/images (override CONTAINER_IMAGE).
+CONTAINER_IMAGE="${CONTAINER_IMAGE:-$REPO_ROOT/images/molt-cu13.sqsh}"
 MODEL_PATH="${MODEL_PATH:?Set MODEL_PATH to the VLM checkpoint to train.}"
 
 # Default to the prepared geo3k VLM subset (math multi-turn).
@@ -194,27 +195,25 @@ VLLM_TP_SIZE="${VLLM_TP_SIZE:-8}"
 VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.95}"
 VLLM_MM_ENCODER_ATTN_BACKEND="${VLLM_MM_ENCODER_ATTN_BACKEND:-TORCH_SDPA}"
 VLLM_GDN_PREFILL_BACKEND="${VLLM_GDN_PREFILL_BACKEND:-triton}"
-# Default to Triton attention to avoid AOT-compiled FA2 PTX kernels that can
-# fail on older drivers (cudaErrorUnsupportedPtxVersion). Set to FLASH_ATTN
-# explicitly on machines whose driver supports the bundled vLLM FA2 PTX.
-VLLM_ATTENTION_BACKEND="${VLLM_ATTENTION_BACKEND:-TRITON_ATTN}"
+# Leave unset so vLLM auto-selects the fastest backend for the arch/driver
+# (FlashAttention-3 / FlashInfer on Hopper) — matches verl (attention_backend=auto).
+# Pin TRITON_ATTN on older drivers whose AOT-compiled FA2 PTX fails
+# (cudaErrorUnsupportedPtxVersion), or FLASH_ATTN to force FA.
+VLLM_ATTENTION_BACKEND="${VLLM_ATTENTION_BACKEND:-}"
 VLLM_ENFORCE_EAGER="${VLLM_ENFORCE_EAGER:-1}"
 VLLM_DISTRIBUTED_EXECUTOR_BACKEND="${VLLM_DISTRIBUTED_EXECUTOR_BACKEND:-mp}"
 VLLM_ENABLE_EXPERT_PARALLEL="${VLLM_ENABLE_EXPERT_PARALLEL:-1}"
-# AutoModel actor side: 1 dedicated node, TP+EP+CP for MoE actors.
-ACTOR_NODES="${ACTOR_NODES:-1}"
 ACTOR_GPUS_PER_NODE="${ACTOR_GPUS_PER_NODE:-8}"
-# Backend constraints with current Automodel pin:
-#   TP>1  → "Tensor parallelism not supported for custom MoE models"
-#   CP>1  → upstream cp_linear_attn dense-positions invariant bug
-# EP is the only model-state shard knob. TE attention path is preferred
-# (faster than FA2 for the Automodel custom MoE layers).
-TP_SIZE="${TP_SIZE:-1}"
-EP_SIZE="${EP_SIZE:-8}"
-CP_SIZE="${CP_SIZE:-1}"
-FSDP_ATTN_IMPLEMENTATION="${FSDP_ATTN_IMPLEMENTATION:-sdpa}"
-FREEZE_VISUAL_ENCODER="${FREEZE_VISUAL_ENCODER:-1}"
-FREEZE_MOE_ROUTER="${FREEZE_MOE_ROUTER:-1}"
+# TP_SIZE / EP_SIZE / CP_SIZE / FSDP_ATTN_IMPLEMENTATION / ACTOR_NODES /
+# FREEZE_VISUAL_ENCODER are the model-specific values set at the top of this file
+# (TP=1, EP=64, CP=8, attn=te, 8 actor nodes). TP=1 is mandatory (the custom MoE
+# parallelizer asserts it); CP=8 uses the te-native CP path (validated intra-node —
+# cp is the innermost mesh axis, so cp8 = 8 adjacent ranks = 1 node on NVLink).
+# Router NOT frozen: R3 (routing_replay) already keeps rollout/train routing
+# consistent by replaying the top-k SELECTION, while the router logits stay live
+# so the gradient keeps flowing (the router keeps learning). Freezing is the
+# heavier hammer that halts that learning — redundant with R3. Set =1 to freeze.
+FREEZE_MOE_ROUTER="${FREEZE_MOE_ROUTER:-0}"
 # Algo — defaults tuned for geo3k VLM math multi-turn.
 KL_COEF="${KL_COEF:-0.0}"
 MOE_AUX_LOSS_COEF="${MOE_AUX_LOSS_COEF:-0.000}"

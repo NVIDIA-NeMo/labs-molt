@@ -18,13 +18,11 @@ REPO_ROOT="${MOLT_PATH:-${SLURM_SUBMIT_DIR:-$(cd "$SCRIPT_DIR/../../.." && pwd)}
 export MOLT_PATH="$REPO_ROOT"
 
 # Qwen3.6-35B-A3B (Qwen3.5-MoE family). AutoModel's custom MoE parallelizer
-# asserts TP=1. CP=2 + linear-attn is supported by PR #1560 in principle
-# but our adapter currently triggers
-# "Qwen3.5 CP linear-attn layer 0 requires dense global token positions
-#  covering 0..S-1 after gathering CP shards" (qwen3_5_moe/cp_linear_attn.py:320)
-# even when letting make_cp_batch_and_ctx auto-inject position_ids. Until
-# we root-cause that, run with CP=1 — DP=16 + EP=8 is enough on 2 nodes
-# for a 35B-A3B model with 16K context.
+# asserts TP=1; EP shards the experts. CP uses the te-native CP path (attn=te):
+# the qwen3_5_moe VLM+CP pre-embed hook (automodel-r3) captures the image
+# embeddings before the CP shard, so VLM+CP works. cp is the innermost mesh axis,
+# so cp8 = 8 adjacent ranks = 1 node — the GDN linear-attn full-seq all-gather
+# stays on NVLink. Mesh: dp2 × cp8 × tp1 = 16 (2 nodes), EP8 over the cp group.
 export MODEL_PATH="${MODEL_PATH:-/path/to/models/Qwen3.6-35B-A3B}"
 export TP_SIZE="${TP_SIZE:-1}"
 export EP_SIZE="${EP_SIZE:-8}"
@@ -33,21 +31,17 @@ export EP_SIZE="${EP_SIZE:-8}"
 # deterministic. The legacy torch dispatcher could drift the recomputed MoE
 # tensors and raise `CheckpointError: Recomputed values ... different metadata`.
 export GRAD_CHECKPOINT="${GRAD_CHECKPOINT-full}"
-# CP=1 — matches AutoModel's qwen3.5-moe VLM recipe (examples/vlm_finetune/
-# qwen3_5_moe/qwen3_6_35b.yaml: cp=1/tp=1/ep=8/attn=sdpa). AutoModel does NOT
-# support qwen3.5-moe VLM+CP (the pre-embed hook exists only for omni3/step3p7/
-# gemma4), so we stay cp=1; geo3k sequences run well under the 32K cap. Real
-# 32K/64K VLM long-context will need CP — that's an upstream ask to AutoModel
-# (a PR#2125-style qwen3.5-moe hook), NOT a local hack. The MoE token dispatcher
-# defaults to deepep in code (actor.py) for deterministic AC + correct RL grads.
-export CP_SIZE="${CP_SIZE:-1}"
-# 32K context (CP=2 shards it). Big-batch on-policy: batch=512, async=1,
-# force_on_policy, seq-mask-tis. Keep CPU offload OFF (Qwen3.5-MoE has upstream
-# device-mismatch bugs under offload); control memory via EP + CP + context.
+# CP=8 (te-native CP path). dp = world 16 / cp8 = 2, and train.batch_size >= dp
+# holds. CP shards the 32K sequence to 4096 tok/rank (non-GDN; GDN layers all-gather
+# the full sequence intra-node) — CP is for activation memory / long context; te
+# works at any cp, including cp=1.
+export CP_SIZE="${CP_SIZE:-8}"
 export MAX_LENGTH="${MAX_LENGTH:-32768}"
-# Qwen3.5-MoE under FSDP CPU offload hits two upstream device-mismatch bugs
-# (e_score_correction_bias and rotary cos/sin stay on CPU while activations
-# are on GPU). Keep offload OFF; control memory via EP and context length.
+# Offload OFF — fit te+CP8 via EP + CP + activation checkpointing (and, if it OOMs,
+# MOLT_MOE_RESHARD_AFTER_FWD=1, which reshards MoE experts after the forward). Adam
+# offload (OFFLOAD_OPTIMIZER) is available but off by default; full FSDP param
+# offload (FSDP_CPU_OFFLOAD) hits Qwen3.5-MoE upstream device-mismatch bugs.
+export OFFLOAD_OPTIMIZER="${OFFLOAD_OPTIMIZER:-0}"
 export FSDP_CPU_OFFLOAD="${FSDP_CPU_OFFLOAD:-0}"
 export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-512}"
 export ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-64}"
@@ -58,11 +52,9 @@ export ASYNC_QUEUE_SIZE="${ASYNC_QUEUE_SIZE:-1}"
 # (smaller KV cache) is acceptable for a 35B-A3B model on 16K context.
 export VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.95}"
 
-# sdpa — matches AutoModel's qwen3.5-moe VLM recipe (qwen3_6_35b.yaml: attn=sdpa).
-# At CP=1, TE's fused RoPE breaks on Qwen3-Next layers ("expected 4D tensor"); sdpa
-# is the native VLM backend. (TE is only AutoModel's CP path, which qwen3.5-moe VLM
-# doesn't support — see the CP_SIZE comment.)
-export FSDP_ATTN_IMPLEMENTATION="${FSDP_ATTN_IMPLEMENTATION:-sdpa}"
+# te — the native MoE attention backend for qwen3_5_moe; enables the te-native CP
+# path and works at any cp (including cp=1). Override to sdpa to fall back.
+export FSDP_ATTN_IMPLEMENTATION="${FSDP_ATTN_IMPLEMENTATION:-te}"
 
 # Dynamic filtering OFF: uniformly-correct/incorrect groups still pass through
 # with zero advantage (= zero gradient) rather than getting dropped, which keeps
@@ -189,27 +181,26 @@ VLLM_TP_SIZE="${VLLM_TP_SIZE:-8}"
 VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.95}"
 VLLM_MM_ENCODER_ATTN_BACKEND="${VLLM_MM_ENCODER_ATTN_BACKEND:-TORCH_SDPA}"
 VLLM_GDN_PREFILL_BACKEND="${VLLM_GDN_PREFILL_BACKEND:-triton}"
-# Default to Triton attention to avoid AOT-compiled FA2 PTX kernels that can
-# fail on older drivers (cudaErrorUnsupportedPtxVersion). Set to FLASH_ATTN
-# explicitly on machines whose driver supports the bundled vLLM FA2 PTX.
-VLLM_ATTENTION_BACKEND="${VLLM_ATTENTION_BACKEND:-TRITON_ATTN}"
+# Leave unset so vLLM auto-selects the fastest backend for the arch/driver
+# (FlashAttention-3 / FlashInfer on Hopper) — matches verl (attention_backend=auto).
+# Pin TRITON_ATTN on older drivers whose AOT-compiled FA2 PTX fails
+# (cudaErrorUnsupportedPtxVersion), or FLASH_ATTN to force FA.
+VLLM_ATTENTION_BACKEND="${VLLM_ATTENTION_BACKEND:-}"
 VLLM_ENFORCE_EAGER="${VLLM_ENFORCE_EAGER:-1}"
 VLLM_DISTRIBUTED_EXECUTOR_BACKEND="${VLLM_DISTRIBUTED_EXECUTOR_BACKEND:-mp}"
 VLLM_ENABLE_EXPERT_PARALLEL="${VLLM_ENABLE_EXPERT_PARALLEL:-1}"
 # AutoModel actor side: 1 dedicated node, TP+EP+CP for MoE actors.
 ACTOR_NODES="${ACTOR_NODES:-1}"
 ACTOR_GPUS_PER_NODE="${ACTOR_GPUS_PER_NODE:-8}"
-# Backend constraints with current Automodel pin:
-#   TP>1  → "Tensor parallelism not supported for custom MoE models"
-#   CP>1  → upstream cp_linear_attn dense-positions invariant bug
-# EP is the only model-state shard knob. TE attention path is preferred
-# (faster than FA2 for the Automodel custom MoE layers).
-TP_SIZE="${TP_SIZE:-1}"
-EP_SIZE="${EP_SIZE:-8}"
-CP_SIZE="${CP_SIZE:-1}"
-FSDP_ATTN_IMPLEMENTATION="${FSDP_ATTN_IMPLEMENTATION:-sdpa}"
+# TP_SIZE / EP_SIZE / CP_SIZE / FSDP_ATTN_IMPLEMENTATION are the model-specific
+# values set at the top of this file (TP=1, EP=8, CP=8, attn=te). TP=1 is mandatory
+# (the custom MoE parallelizer asserts it).
 FREEZE_VISUAL_ENCODER="${FREEZE_VISUAL_ENCODER:-1}"
-FREEZE_MOE_ROUTER="${FREEZE_MOE_ROUTER:-1}"
+# Router NOT frozen: R3 (routing_replay) already keeps rollout/train routing
+# consistent by replaying the top-k SELECTION, while the router logits stay live
+# so the gradient keeps flowing (the router keeps learning). Freezing is the
+# heavier hammer that halts that learning — redundant with R3. Set =1 to freeze.
+FREEZE_MOE_ROUTER="${FREEZE_MOE_ROUTER:-0}"
 # Algo — defaults tuned for geo3k VLM math multi-turn.
 KL_COEF="${KL_COEF:-0.0}"
 MOE_AUX_LOSS_COEF="${MOE_AUX_LOSS_COEF:-0.000}"

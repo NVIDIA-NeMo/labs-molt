@@ -360,6 +360,16 @@ Quick-start single-node usage:
 MODEL_PATH=/path/to/Qwen3-4B bash examples/scripts/quick_start/rl_qwen3_4b.sh
 ```
 
+The geo3k VLM scripts (`rl_qwen3_6_35b.sh` / `sft_qwen3_6_35b.sh`) auto-prepare the
+dataset on first run via `examples/python/utils/prepare_geo3k.py`. To pre-stage it
+manually (or refresh it), run:
+
+```bash
+python3 examples/python/utils/prepare_geo3k.py --num-proc 8 --out-dir .tmp/geo3k
+```
+
+Or point `PROMPT_DATASET` / `EVAL_DATASET` at your own data.
+
 Slurm usage:
 
 ```bash
@@ -487,39 +497,42 @@ MoE RL is unstable because the rollout (vLLM) and training (FSDP) routers pick
 experts **independently** — even at identical weights, numerical differences
 flip a fraction of the top-k per layer, compounding until most tokens route to
 different experts than they did during rollout. That breaks the importance-
-sampling assumption behind GRPO/GSPO. Molt ships two ways to close that gap:
+sampling assumption behind GRPO/GSPO. Molt closes the gap at three levels — the
+first two are on by default in the qwen3.5-moe recipes, the third is an optional
+heavier alternative to R3:
 
-**1. Rollout Routing Replay (R3)** — fix it at the source
+**fp32 router precision (default).** The gate linear + expert-output combine run in
+fp32 (matching vLLM's fp32 router) so the two sides agree on the gate *weights* to
+begin with. A bf16 router silently drifts from vLLM and makes `vllm_kl` climb with
+training. Override with `MOLT_GATE_PRECISION=bfloat16`.
+
+**Rollout Routing Replay (R3, default)** — fix the top-k *selection* at the source
 ([arXiv:2510.11370](https://arxiv.org/abs/2510.11370)): vLLM returns the per-token
 expert ids it chose, and the training forward replays that exact selection.
 
 ```bash
---train.routing_replay   # off by default
+--train.routing_replay   # default in the qwen3.5-moe recipes
 ```
 
 - **Freezes the routing, not the router.** Only the discrete top-k *selection* is
   replayed; the router logits are still recomputed from the live weights, so the
-  gradient keeps flowing into the router (it keeps learning) — a lighter touch
-  than freezing the router weights outright.
-- **Full-sequence, absolute-position aligned**: the prompt+response routing is laid
-  down by token position; positions the engine returns no routing for keep their
-  natural (live) selection.
+  gradient keeps flowing into the router (it keeps learning).
+- **Full-sequence, absolute-position aligned**: routing is laid down by token
+  position; positions the engine returns no routing for keep their natural selection.
 - Needs AutoModel `RouterReplay` (`nemo_automodel.components.moe.router_replay`,
-  PR #2797). Opt-in; incompatible with `--train.partial_rollout_enable` (vLLM
-  frees routing on preemption).
+  PR #2797). Incompatible with `--train.partial_rollout_enable` (vLLM frees routing
+  on preemption).
 
-**2. Router freeze** — the blunter route: hold the gate/router weights fixed so the
-routing function can't drift between refits at all.
+**Router freeze (optional, blunter).** Hold the gate/router weights fixed so the
+routing can't drift at all — excludes the router from the optimizer *and* the refit,
+so vLLM and the actor route to the same experts **by construction**, no engine
+support needed. The trade-off: the router stops learning, so it's **redundant with
+R3** and off by default; reach for it only if routing drift still dominates and a
+fixed router is acceptable.
 
 ```bash
---actor.freeze_moe_router   # off by default
+--actor.freeze_moe_router   # off by default; redundant with R3
 ```
-
-- Excludes the router from the optimizer (and the refit), so vLLM and the actor
-  route to the same experts **by construction** — no engine support needed.
-- The trade-off vs R3: the router stops learning. Prefer **router freeze** when
-  routing drift dominates the rollout-vs-train logprob gap and a fixed router is
-  acceptable; prefer **R3** when you want the router to keep training.
 
 ## ✅ Validation
 

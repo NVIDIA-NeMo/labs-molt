@@ -84,23 +84,24 @@ python3 -u -m molt.cli.train_rl_ray \
   --vllm.distributed_executor_backend mp \
   --vllm.enable_expert_parallel \
   --fsdp.param_dtype bf16 \
-  --fsdp.attn_implementation flash_attention_2 \
+  --fsdp.attn_implementation te \
   --fsdp.tp_size 1 \
   --fsdp.ep_size 4 \
-  --fsdp.cp_size 1 \
+  --fsdp.cp_size 2 \
   --actor.gradient_checkpoint full \
   --actor.freeze_visual_encoder \
-  --actor.adam.lr 1e-6 \
-  --actor.eps_clip_low_high 0.2 0.27 \
+  --actor.adam.lr 2e-6 \
+  --actor.eps_clip_low_high 0.2 0.28 \
   --actor.dual_clip 10.0 \
-  --actor.aux_loss_coef 0.001 \
+  --actor.aux_loss_coef 0.000 \
   --algo.advantage.estimator reinforce_baseline \
   --algo.advantage.is_correction_enable \
   --algo.advantage.is_correction_type seq-mask-tis \
+  --algo.advantage.is_correction_threshold 0.99 1.01 \
   --algo.kl.use_loss \
   --algo.kl.estimator k2 \
-  --algo.kl.init_coef 0.001 \
-  --reward.clip_range -1 1 \
+  --algo.kl.init_coef 0.0 \
+  --reward.clip_range -10 10 \
   --train.agent_path "$REPO_ROOT/examples/python/agents/geo3k.py" \
   --eval.dataset "$EVAL_DATASET" \
   --eval.steps 5 \
