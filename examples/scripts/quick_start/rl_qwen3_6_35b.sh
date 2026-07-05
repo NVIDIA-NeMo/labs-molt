@@ -83,6 +83,7 @@ python3 -u -m molt.cli.train_rl_ray \
   --vllm.gpu_memory_utilization 0.7 \
   --vllm.distributed_executor_backend mp \
   --vllm.enable_expert_parallel \
+  --vllm.mamba_ssm_cache_dtype float32 \
   --fsdp.param_dtype bf16 \
   --fsdp.attn_implementation te \
   --fsdp.tp_size 1 \
