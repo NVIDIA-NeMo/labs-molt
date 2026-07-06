@@ -84,12 +84,13 @@ python3 -u -m molt.cli.train_rl_ray \
   --algo.advantage.estimator reinforce_baseline \
   --algo.advantage.is_correction_enable \
   --algo.advantage.is_correction_type seq-mask-tis \
+  --algo.advantage.is_correction_threshold 0.99 1.01 \
   --algo.kl.use_loss \
   --algo.kl.estimator k2 \
   --algo.kl.init_coef 0.001 \
   --algo.dynamic_filtering_enable \
   --algo.dynamic_filtering_range 0.01 0.99 \
-  --reward.clip_range -1 1 \
+  --reward.clip_range -10 10 \
   --train.agent_path "$REPO_ROOT/examples/python/agents/math.py" \
   --eval.dataset "$EVAL_DATASET" \
   --eval.steps 5 \

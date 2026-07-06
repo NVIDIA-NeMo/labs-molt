@@ -105,10 +105,12 @@ if [ "$CHAIN_DEPTH" -lt "$CHAIN_MAX" ]; then
   NEXT_DEPTH=$((CHAIN_DEPTH + 1))
   next_jobid=$(CHAIN_DEPTH="$NEXT_DEPTH" LOAD_ENABLE=1 \
     sbatch --parsable --dependency=afterany:"$SLURM_JOB_ID" \
+    --account="$SLURM_JOB_ACCOUNT" \
     --partition="$SLURM_JOB_PARTITION" \
-    --qos="$SLURM_JOB_QOS" \
+    ${SLURM_JOB_QOS:+--qos="$SLURM_JOB_QOS"} \
     ${SLURM_JOB_RESERVATION:+--reservation="$SLURM_JOB_RESERVATION"} \
     --nodes="$SLURM_JOB_NUM_NODES" \
+    --comment='{"IdleGpuReaper":{"exemptIdleTimeMins":"120","reason":"other","description":"Async on-policy distillation; GPUs idle as train/rollout alternate"}}' \
     "$REPO_ROOT/examples/scripts/slurm/rl_distill_omni3_30b.sh")
   echo "[chain] depth=$NEXT_DEPTH/$CHAIN_MAX next_jobid=$next_jobid"
 fi

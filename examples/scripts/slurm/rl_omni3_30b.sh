@@ -27,7 +27,7 @@ export MOLT_PATH="$REPO_ROOT"
 # ... falling back to HuggingFace" line appears, bump requirements.txt / the
 # sibling Automodel checkout so the architecture re-registers.
 # Use the omni3 GA checkpoint (the aligned release), not an mcore->hf shim.
-export MODEL_PATH="${MODEL_PATH:-/lustre/fs1/portfolios/coreai/projects/coreai_tensorrt_ci/llm-models/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16}"
+export MODEL_PATH="${MODEL_PATH:-/path/to/models/NVIDIA-Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16}"
 export TP_SIZE="${TP_SIZE:-1}"        # AutoModel custom MoE asserts TP=1
 export EP_SIZE="${EP_SIZE:-8}"        # only model-state shard knob for this MoE
 export CP_SIZE="${CP_SIZE:-8}"        # CP8 fits 32K on the 2-node DP2 actor (omni3 SFT-validated); hybrid-SSM CP fix is in

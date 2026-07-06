@@ -1,7 +1,7 @@
 #!/bin/bash
 
 #SBATCH --account=your_slurm_account
-#SBATCH --partition=batch_block1
+#SBATCH --partition=interactive
 #SBATCH --time=04:00:00
 #SBATCH --nodes=12
 #SBATCH --gpus-per-node=8
@@ -21,7 +21,7 @@ export MOLT_PATH="$REPO_ROOT"
 # ~397B VLM MoE, same family as Qwen3.6-35B-A3B (rl_qwen3_6_35b.sh) but far larger.
 # AutoModel's custom MoE parallelizer asserts TP=1. 12-node split: 8 actor/ref
 # nodes (64 GPUs) + 4 vLLM rollout nodes (32 GPUs). vLLM 0.23 natively serves it.
-export MODEL_PATH="${MODEL_PATH:-/lustre/fs1/portfolios/nvr/projects/nvr_lpr_agentic/users/jianh/models/Qwen3.5-397B-A17B}"
+export MODEL_PATH="${MODEL_PATH:-/path/to/models/Qwen3.5-397B-A17B}"
 # TP MUST be 1 (custom MoE parallelizer). EP=64 = full non-PP world (dp4*cp16*tp1=64);
 # 512 experts / 64 = 8 experts/rank (512 % 64 == 0).
 export TP_SIZE="${TP_SIZE:-1}"
@@ -38,8 +38,8 @@ export GRAD_CHECKPOINT="${GRAD_CHECKPOINT-full}"
 #    on that all-gather (as CP=32 across 4 nodes did), drop to CP=8 (intra-node/NVLink).
 #  * 2*cp=32 divides MAX_LENGTH (32768/32 = 1024).
 export CP_SIZE="${CP_SIZE:-16}"
-# 32K context. CP=8 shards non-GDN activations to 32768/8=4096 tok/rank
-# (GDN layers all-gather the full sequence intra-node).
+# 32K context. CP=16 shards non-GDN activations to 32768/16=2048 tok/rank
+# (GDN layers all-gather the full sequence).
 export MAX_LENGTH="${MAX_LENGTH:-32768}"
 # Adam optimizer offload (fp32 master + Adam moments on CPU during the step).
 # Essential to fit a 397B optimizer state off-GPU on 64 GPUs without PP.
@@ -154,7 +154,7 @@ AGENT_PATH="${AGENT_PATH:-/molt/examples/python/agents/geo3k.py}"
 # R3 (rollout routing replay, PR#2797) + qwen3_5_moe te-native CP live on the
 # automodel-r3 checkout — point PYTHONPATH there so it wins over the container's
 # baked AutoModel. (molt-cu13 already ships vllm_router, so no extra pylib needed.)
-DEFAULT_AUTOMODEL_PATH=/lustre/fs1/portfolios/nvr/projects/nvr_lpr_agentic/users/jianh/projects/automodel-r3
+DEFAULT_AUTOMODEL_PATH=/path/to/Automodel
 if [ -z "${EXTRA_PYTHONPATH:-}" ] && [ -d "$DEFAULT_AUTOMODEL_PATH" ]; then
   EXTRA_PYTHONPATH="$DEFAULT_AUTOMODEL_PATH"
 fi
@@ -211,9 +211,9 @@ VLLM_ENABLE_EXPERT_PARALLEL="${VLLM_ENABLE_EXPERT_PARALLEL:-1}"
 ACTOR_GPUS_PER_NODE="${ACTOR_GPUS_PER_NODE:-8}"
 # TP_SIZE / EP_SIZE / CP_SIZE / FSDP_ATTN_IMPLEMENTATION / ACTOR_NODES /
 # FREEZE_VISUAL_ENCODER are the model-specific values set at the top of this file
-# (TP=1, EP=64, CP=8, attn=te, 8 actor nodes). TP=1 is mandatory (the custom MoE
-# parallelizer asserts it); CP=8 uses the te-native CP path (validated intra-node —
-# cp is the innermost mesh axis, so cp8 = 8 adjacent ranks = 1 node on NVLink).
+# (TP=1, EP=64, CP=16, attn=te, 8 actor nodes). TP=1 is mandatory (the custom MoE
+# parallelizer asserts it); CP=16 uses the te-native CP path — cp is the innermost
+# mesh axis, so the CP group spans two adjacent nodes.
 # Router NOT frozen: R3 (routing_replay) already keeps rollout/train routing
 # consistent by replaying the top-k SELECTION, while the router logits stay live
 # so the gradient keeps flowing (the router keeps learning). Freezing is the

@@ -121,7 +121,6 @@ TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-128}"
 MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-1}"
 # Pure async + partial rollout: queue depth >= 2 so train overlaps next rollout.
 ASYNC_QUEUE_SIZE="${ASYNC_QUEUE_SIZE:-1}"
-MAX_IMAGES_PER_PROMPT="${MAX_IMAGES_PER_PROMPT:-1}"
 # vLLM rollout side: dedicated full node, TP+EP hybrid for MoE.
 VLLM_NUM_ENGINES="${VLLM_NUM_ENGINES:-1}"
 VLLM_TP_SIZE="${VLLM_TP_SIZE:-8}"
@@ -262,7 +261,6 @@ RL_ARGS=(
   --data.label_key "${LABEL_KEY:-reward_model}"
   --data.apply_chat_template
   --data.image_key "${IMAGE_KEY:-images}"
-  --data.max_images_per_prompt "$MAX_IMAGES_PER_PROMPT"
   --data.max_samples "$MAX_SAMPLES"
   --data.max_len "$MAX_LENGTH"
   ${MAX_NEW_TOKENS:+--rollout.max_new_tokens=$MAX_NEW_TOKENS}
