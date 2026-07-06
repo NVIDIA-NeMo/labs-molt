@@ -37,10 +37,10 @@ the trainer is a single actor; reward is any Python you write inside an `Env`
 or `ChatAgent` — graders, multi-turn tools, VLM environments, LLM-as-judge.
 Three components carry the rest — **Ray** for placement and async queues,
 **vLLM** for rollout, **NVIDIA AutoModel + FSDP2** for training in pure
-PyTorch. That is the whole stack: **~8.2K lines of RL code that run
-700B-class MoE** (H200) on vLLM with TP / EP / CP — one agent API, one trainable
-actor, clean enough to read end-to-end. (Pipeline parallelism — and with it
-1T+ — lands once AutoModel's `AutoPipeline` interface is wired in.)
+PyTorch. That is the whole stack: **~8.2K lines of RL code that scale to
+1T-class MoE** on vLLM with TP / EP / CP — think DeepSeek-V3 at
+`--fsdp.ep_size 256`, Adam CPU offload for the largest actors. One agent
+API, one trainable actor, clean enough to read end-to-end.
 
 ## 🧩 Architecture
 
@@ -83,10 +83,10 @@ rollout.
 | | What you get | Why it matters for research |
 |---|---|---|
 | 🤖 **Agentic-first** | One Gymnasium-aligned API — `Env.step()` or `ChatAgent.run()` — covers graders, multi-turn tools, VLM environments, and OpenAI/Anthropic-compatible servers | The agent *is* the program — iterate on environments in plain Python, the trainer stays untouched |
-| ⚙️ **Fully-async runtime** | Ray placement, async rollout queues, vLLM engines, partial rollout, weight sync | Rollout, training, and weight sync overlap — a 700B actor stays fed without bespoke infra |
+| ⚙️ **Fully-async runtime** | Ray placement, async rollout queues, vLLM engines, partial rollout, weight sync | Rollout, training, and weight sync overlap — a DeepSeek-V3-class actor stays fed without bespoke infra |
 | 🔥 **PyTorch-native, AutoModel-first** | FSDP2 + NVIDIA AutoModel, pure PyTorch end-to-end | Hack the model in the language you already write; no backend ceremony |
 | 🎯 **Single-actor simplicity** | One actor, optional KL reference — the whole RL graph fits on a page | Every gradient is explicit; every loss term is one file away |
-| 🚀 **700B-class out of the box (H200)** | AutoModel + FSDP2 + TP / EP / CP, MoE-native | The same script that trains 8B scales to 700B-class MoE on H200 — no rewrite between scales |
+| 🚀 **Frontier-scale MoE** | AutoModel + FSDP2 + TP / EP / CP + Adam CPU offload, MoE-native — e.g. DeepSeek-V3 with `--fsdp.ep_size 256` | The same script that trains 8B scales to 1T-class MoE — no rewrite between scales |
 | 🔗 **Token-first contract** | Aligned token ids, logprobs, action ranges, rewards, multimodal tensors | Multi-turn, VLM, and tool-call traces share one format end-to-end |
 | 🪶 **Small, hackable surface** | ~8.2K LOC of RL code across 3 thin layers | Fork one layer without touching the others — read it in an afternoon |
 
@@ -94,7 +94,7 @@ rollout.
 
 The RL ecosystem optimizes for breadth. Molt optimizes for
 **agentic research velocity at scale** — the smallest PyTorch-native stack
-that still drives a 700B fully-async agentic RL run on vLLM (H200).
+that still drives fully-async agentic RL at frontier MoE scale on vLLM.
 
 |  | **🦋 Molt** | OpenRLHF | verl | slime |
 |---|:-:|:-:|:-:|:-:|
@@ -109,8 +109,8 @@ that still drives a 700B fully-async agentic RL run on vLLM (H200).
 | Design center | **agentic-first research** | RLHF coverage | production breadth | Megatron throughput |
 
 **One framework, one job.** Molt is the smallest PyTorch-native
-stack that takes an NVIDIA AutoModel from SFT to 700B-class agentic RL on
-vLLM (H200). Read every line that touches your gradients, in plain PyTorch.
+stack that takes an NVIDIA AutoModel from SFT to frontier-scale agentic
+RL on vLLM. Read every line that touches your gradients, in plain PyTorch.
 
 > ¹ RL code = every Python file the framework's RL path uses — online
 > trainer, rollout, Ray orchestration, experience/advantage/reward/KL/loss,
@@ -129,24 +129,42 @@ vLLM (H200). Read every line that touches your gradients, in plain PyTorch.
 
 ## 🎯 Supported Scope
 
+### Training & runtime
+
 | Area | Support |
 |---|---|
 | SFT | `molt.cli.train_sft` |
 | RL | vLLM-backed online RL via `molt.cli.train_rl_ray` |
+| Runtime | Ray placement, async rollout queues, vLLM engines, partial rollout sync |
+| Model scale | AutoModel + FSDP2 with TP / EP / CP, MoE-native — e.g. DeepSeek-V3 at `--fsdp.ep_size 256` |
+| Model backend | **NVIDIA AutoModel is the primary path** — native CP / EP / TP, custom MoE+EP parallelizer, TE fused attention; everything model-side aligns with AutoModel's own recipes. The HF transformers path is a **non-preferred fallback** (AutoModel drops to it only when a model has no native class) supporting **text + flash_attention_2 + packing only — no CP / EP / TP** |
+| Optimizer | `adam` (default), with CPU offload for the largest actors (`--fsdp.offload optimizer`). `muon` (Newton–Schulz, 2D-weight group) is **experimental and currently unavailable** — its distributed (FSDP / EP) path does not yet work; use `adam` |
+
+### Agents & rewards
+
+| Area | Support |
+|---|---|
 | Agent interface | `--train.agent_path` with `Env` or `ChatAgent` subclass + an `AgentRunner` |
 | Reward source | `Result(reward=...)` returned from `Env.step` or `ChatAgent.run` |
 | Modalities | Text and VLM prompts, including image payloads |
-| Runtime | Ray placement, async rollout queues, vLLM engines, partial rollout sync |
-| Model scale | AutoModel + FSDP2 with TP / EP / CP, MoE-native |
-| Model backend | **NVIDIA AutoModel is the primary path** — native CP / EP / TP, custom MoE+EP parallelizer, TE fused attention; everything model-side aligns with AutoModel's own recipes. The HF transformers path is a **non-preferred fallback** (AutoModel drops to it only when a model has no native class) supporting **text + flash_attention_2 + packing only — no CP / EP / TP** |
 | Chat templates | Assistant spans (SFT loss mask + multi-turn rollout stitching) are derived from the model's own chat template — no hard-coded markers. Verified on ChatML (Qwen3.x, Nemotron omni3), Kimi-K2.6, GLM, Gemma and DeepSeek |
+
+### Algorithms
+
+| Area | Support |
+|---|---|
 | Estimators | `reinforce`, `reinforce_baseline`, `rloo`, `grpo`, `dr_grpo`, `gae` (PPO), `on_policy_distill` |
 | PPO critic | `--algo.advantage.estimator gae` adds a value model: its own Ray group (`CriticModelActor`), colocated on the actor's GPUs by default or disaggregatable, GAE advantages (`--algo.advantage.lam`) + clipped value loss (`--critic.value_clip`), own optimizer/LR (`--critic.adam.lr`) and resumable `_critic` checkpoint. Built on `NeMoAutoModelForCausalLM` + a scalar value head, so it keeps the native TP / EP / CP path |
 | Distillation | On-policy distillation — per-token reverse KL to a frozen teacher, via `--algo.advantage.estimator on_policy_distill` + `--ref.model_name_or_path` |
 | IS correction | `tis`, `icepop`, `seq-mask-tis` (off-policy / async rollout) |
-| MoE router freeze | `--actor.freeze_moe_router` holds the gate/router weights fixed so vLLM and the actor keep routing tokens to the same experts. Stabilizes MoE RL / distillation and shrinks the same rollout-vs-train logprob gap the IS-correction filters address — a router that drifts between refits is a large source of that gap |
-| Optimizer | `adam` (default). `muon` (Newton–Schulz, 2D-weight group) is **experimental and currently unavailable** — its distributed (FSDP / EP) path does not yet work; use `adam` |
 | KL | Optional reference workers when `--algo.kl.init_coef > 0` (the reference doubles as the distillation teacher) |
+
+### MoE routing stability
+
+| Area | Support |
+|---|---|
+| Router replay (R3) | `--train.routing_replay` — vLLM's per-token top-k selection replayed in the training forward; details in the *MoE routing stability* section under Scaling Knobs |
+| Router freeze | `--actor.freeze_moe_router` holds the gate/router weights fixed so vLLM and the actor keep routing tokens to the same experts. Stabilizes MoE RL / distillation and shrinks the same rollout-vs-train logprob gap the IS-correction filters address — a router that drifts between refits is a large source of that gap |
 
 ## 📦 Installation
 
@@ -449,16 +467,18 @@ EP8 / CP8 / TE / DeepEP recipe.
 
 Molt targets AutoModel custom models with FSDP2:
 
-| Mode | Flag |
-|---|---|
-| Actor tensor parallel | `--fsdp.tp_size 2` |
-| Actor expert parallel | `--fsdp.ep_size 2` |
-| Actor context parallel | `--fsdp.cp_size 2` |
-| vLLM tensor parallel | `--vllm.tensor_parallel_size 2` |
-| vLLM expert parallel | `--vllm.enable_expert_parallel` |
-| MTP rollout spec-decode | `--vllm.mtp_num_speculative_tokens 1` |
-| MoE router replay (R3) | `--train.routing_replay` |
-| MoE router freeze | `--actor.freeze_moe_router` |
+| | Mode | Flag |
+|---|---|---|
+| **Actor** | Tensor parallel | `--fsdp.tp_size 2` |
+| | Expert parallel | `--fsdp.ep_size 8` (e.g. `256` for DeepSeek-V3-class MoE) |
+| | Context parallel | `--fsdp.cp_size 8` (32K+ sequences) |
+| | Optimizer CPU offload | `--fsdp.offload optimizer` (frees VRAM for the largest actors) |
+| **vLLM rollout** | Tensor parallel | `--vllm.tensor_parallel_size 2` |
+| | Expert parallel | `--vllm.enable_expert_parallel` |
+| | Scheduler token budget | `--vllm.max_num_batched_tokens 32768` |
+| | MTP spec-decode | `--vllm.mtp_num_speculative_tokens 1` |
+| **MoE stability** | Router replay (R3) | `--train.routing_replay` |
+| | Router freeze | `--actor.freeze_moe_router` |
 
 For CP training, packed RL batches are currently disabled. Packing is off by
 default, and CP rejects `--fsdp.packing_samples`.
