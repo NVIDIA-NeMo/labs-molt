@@ -48,8 +48,7 @@ runs:
           --env COVERAGE_FILE=/opt/labs-molt/.coverage \
           --volume "${{ github.workspace }}:/opt/labs-molt" \
           "${{ inputs.image }}" \
-          timeout "$(( ${{ inputs.timeout }} * 60 ))s" \
-          bash "${{ inputs.script-dir }}/${{ inputs.script }}.sh"
+          bash -lc 'cd /opt/labs-molt && timeout "$(( ${{ inputs.timeout }} * 60 ))s" bash "${{ inputs.script-dir }}/${{ inputs.script }}.sh"'
 
     - name: Upload coverage artifact
       uses: actions/upload-artifact@v4
