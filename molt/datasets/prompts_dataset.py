@@ -5,52 +5,48 @@ from molt.utils.vlm_utils import should_expand_image_placeholder, split_image_pl
 
 def preprocess_data(
     data,
-    input_template=None,
     input_key="input",
     label_key=None,
     apply_chat_template=None,
+    prerender=True,
     expand_image_placeholder: bool = False,
     tools=None,
-) -> str:
-    if apply_chat_template:
-        chat = data[input_key]
-        if isinstance(chat, str):
-            chat = [{"role": "user", "content": chat}]
-        if expand_image_placeholder:
-            # Qwen2.5-VL / Qwen3.6-VL chat templates iterate over structured
-            # content lists `[{"type": "image"}, {"type": "text", "text": ...}]`
-            # and emit a model-specific placeholder (e.g. `<|image_pad|>`) that
-            # vLLM's multimodal processor recognizes for prompt replacement.
-            # Datasets store user content as a single string `"<image>\nproblem"`,
-            # so split on each `<image>` and convert to the structured form.
-            chat = [split_image_placeholder(msg) for msg in chat]
-        # Otherwise: pass content through verbatim. Chat templates that emit
-        # `message.content | string` won't iterate structured content; the
-        # literal `<image>` in the text is what the processor matches on.
-        # `tools` (OpenAI function-call schemas) are rendered by Qwen / Llama
-        # chat templates into a system-side preamble that teaches the model
-        # the `<tool_call>{...}</tool_call>` emission format natively.
-        kwargs = {}
-        if tools:
-            kwargs["tools"] = tools
-        prompt = apply_chat_template(chat, tokenize=False, add_generation_prompt=True, **kwargs)
-    else:
-        # apply_chat_template OFF = feed RAW content (the CHAT path: the chat server renders once via
-        # the model's own processor, so a pre-rendered prompt would double-template + drop the image
-        # for structured-content VLMs). If the dataset stores the prompt as a chat message list, take
-        # the raw user-turn text so the chat agent builds OpenAI messages from it. Model-agnostic —
-        # no per-model branching (kimi2.6 / glm5.x / minimax / qwen3.x / omni3 all handled the same).
-        prompt = data[input_key]
-        if isinstance(prompt, list):
-            user_text = [
-                m.get("content") for m in prompt if m.get("role") == "user" and isinstance(m.get("content"), str)
-            ]
-            prompt = user_text[-1] if user_text else prompt
-        if input_template:
-            prompt = input_template.format(prompt)
-
+):
     # Verifier ground-truth answer for RL reward computation (empty if no label_key).
     label = "" if label_key is None else data[label_key]
+    prompt = data[input_key]
+
+    if not apply_chat_template:
+        # Completion-style data: a plain pre-rendered string, fed verbatim (step runner only —
+        # chat agents require --data.apply_chat_template). A messages list here means chat data
+        # without the flag: refuse loudly instead of training on untemplated text.
+        if isinstance(prompt, list):
+            raise ValueError("Dataset rows are chat messages: pass --data.apply_chat_template.")
+        return prompt, label
+
+    chat = [{"role": "user", "content": prompt}] if isinstance(prompt, str) else prompt
+    if not prerender:
+        # Chat-agent path: hand the messages through untouched. The chat server renders them
+        # exactly once with the model's own template (ChatAgentRunner attaches this row's
+        # images/tools at the OpenAI wire), so step and chat runners consume the SAME dataset.
+        return chat, label
+
+    if expand_image_placeholder:
+        # Qwen2.5-VL / Qwen3.6-VL chat templates iterate over structured
+        # content lists `[{"type": "image"}, {"type": "text", "text": ...}]`
+        # and emit a model-specific placeholder (e.g. `<|image_pad|>`) that
+        # vLLM's multimodal processor recognizes for prompt replacement.
+        # Datasets store user content as a single string `"<image>\nproblem"`,
+        # so split on each `<image>` and convert to the structured form.
+        chat = [split_image_placeholder(msg) for msg in chat]
+    # Otherwise: pass content through verbatim. Chat templates that emit
+    # `message.content | string` won't iterate structured content; the
+    # literal `<image>` in the text is what the processor matches on.
+    # `tools` (OpenAI function-call schemas) are rendered by Qwen / Llama
+    # chat templates into a system-side preamble that teaches the model
+    # the `<tool_call>{...}</tool_call>` emission format natively.
+    kwargs = {"tools": tools} if tools else {}
+    prompt = apply_chat_template(chat, tokenize=False, add_generation_prompt=True, **kwargs)
     return prompt, label
 
 
@@ -62,7 +58,9 @@ class PromptDataset(Dataset):
         dataset: prompt dataset
         tokenizer: tokenizer for the actor model
         strategy: training strategy; supplies the ``args.data`` column keys
-        input_template: optional ``str.format`` template applied to each prompt
+        prerender: render the chat template here (step runner) or hand the raw
+            messages through for the chat server to render (chat runner);
+            derived from ``Runner.PRERENDER_PROMPT``
     """
 
     def __init__(
@@ -70,12 +68,12 @@ class PromptDataset(Dataset):
         dataset,
         tokenizer,
         strategy,
-        input_template=None,
+        prerender=True,
     ) -> None:
         super().__init__()
         self.strategy = strategy
         self.tokenizer = tokenizer
-        self.input_template = input_template
+        self.prerender = prerender
 
         # LAZY rendering: keep the (memory-mapped Arrow) dataset and apply_chat_template each row
         # ON DEMAND in __getitem__, instead of eagerly rendering EVERY row into Python lists here.
@@ -99,26 +97,29 @@ class PromptDataset(Dataset):
         # Render this row's prompt on demand (lazy). The Arrow-backed dataset is memory-mapped,
         # so indexing reads a single row without materializing the corpus.
         data = self.dataset[idx]
+        tools = data.get(self.tools_key) if self.tools_key else None
         prompt, label = preprocess_data(
             data,
-            self.input_template,
             self.input_key,
             self.label_key,
             self.apply_chat_template,
+            prerender=self.prerender,
             expand_image_placeholder=self.expand_image_placeholder,
-            tools=data.get(self.tools_key) if self.tools_key else None,
+            tools=tools,
         )
-        return data.get("datasource", "default"), prompt, label, data.get(self.image_key, None)
+        return data.get("datasource", "default"), prompt, label, data.get(self.image_key, None), tools
 
     def collate_fn(self, item_list):
         datasources = []
         prompts = []
         labels = []
         images = []
-        for datasource, prompt, label, img in item_list:
+        tools = []
+        for datasource, prompt, label, img, tool in item_list:
             datasources.append(datasource)
             prompts.append(prompt)
             labels.append(label)
             images.append(img)
+            tools.append(tool)
 
-        return datasources, prompts, labels, images
+        return datasources, prompts, labels, images, tools

@@ -28,21 +28,23 @@ logger = init_logger(__name__)
 def prepare_datasets(strategy, tokenizer):
     args = strategy.args
 
-    # The CHAT runner feeds RAW content (the chat server renders it ONCE via the model's own template);
-    # the STEP runner needs a pre-rendered prompt. Auto-derive from the runner (Runner.PRERENDER_PROMPT)
-    # so the dataset never double-renders + drops the image on structured-content VLMs. Model-agnostic.
+    # BOTH runner types consume the SAME chat-format dataset (--data.apply_chat_template);
+    # Runner.PRERENDER_PROMPT only decides WHERE the template is applied. The step runner needs the
+    # dataset to pre-render; the chat runner hands the raw messages to the chat server, which renders
+    # them exactly once with the model's own template (a dataset pre-render would double-template and
+    # drop the image on structured-content VLMs) — so for chat agents the flag is required, never
+    # applied dataset-side.
     from molt.agents.base import load_agent_runner
 
-    if getattr(args.train, "agent_path", None) and not getattr(
-        load_agent_runner(args.train.agent_path), "PRERENDER_PROMPT", True
-    ):
-        if args.data.apply_chat_template:
-            logger.warning(
-                "chat runner feeds RAW content: forcing --data.apply_chat_template OFF. A pre-rendered "
-                "prompt would be double-templated by the chat server and drop the image on "
-                "structured-content VLMs (qwen3.6/kimi2.6/glm5.x/minimax/gemma4). Remove the flag for chat runners."
-            )
-        args.data.apply_chat_template = False
+    prerender = True
+    if getattr(args.train, "agent_path", None):
+        prerender = getattr(load_agent_runner(args.train.agent_path), "PRERENDER_PROMPT", True)
+    if not prerender and not args.data.apply_chat_template:
+        raise ValueError(
+            "Chat agents consume the same chat-format dataset as step agents: pass "
+            "--data.apply_chat_template. The dataset hands the messages through raw; the chat "
+            "server renders them once with the model's own template."
+        )
 
     # prepare datasets
     train_data = blending_datasets(
@@ -56,7 +58,7 @@ def prepare_datasets(strategy, tokenizer):
 
     # Create train dataset
     train_data = train_data.select(range(min(args.data.max_samples, len(train_data))))
-    prompts_dataset = PromptDataset(train_data, tokenizer, strategy, input_template=args.data.input_template)
+    prompts_dataset = PromptDataset(train_data, tokenizer, strategy, prerender=prerender)
     prompts_dataloader = strategy.setup_dataloader(
         prompts_dataset,
         batch_size=1,
@@ -75,7 +77,7 @@ def prepare_datasets(strategy, tokenizer):
             dataset_split=args.eval.split,
         )
         eval_data = eval_data.select(range(min(args.data.max_samples, len(eval_data))))
-        eval_dataset = PromptDataset(eval_data, tokenizer, strategy, input_template=args.data.input_template)
+        eval_dataset = PromptDataset(eval_data, tokenizer, strategy, prerender=prerender)
         eval_dataloader = strategy.setup_dataloader(
             eval_dataset,
             batch_size=1,
@@ -119,8 +121,15 @@ def compute_eval_metrics(eval_dataloader, samples_list, n_samples_per_prompt):
         return {}
 
     prompt_to_datasource = {}
-    for datasources, prompts, labels, _images in eval_dataloader:
+    for datasources, prompts, labels, _images, _tools in eval_dataloader:
         for prompt, datasource in zip(prompts, datasources):
+            if isinstance(prompt, list):
+                # Chat rows pass through as messages; key on the last user turn's text —
+                # the same scalar ChatAgentRunner stores as Trajectory.prompt.
+                texts = [
+                    m.get("content") for m in prompt if m.get("role") == "user" and isinstance(m.get("content"), str)
+                ]
+                prompt = texts[-1] if texts else str(prompt)
             prompt_to_datasource[prompt] = datasource
 
     # Each Experience here is a single rollout sample (B=1). Group the per-sample

@@ -6,16 +6,14 @@ the session-prefixed `ctx.base_url`). The agent owns the turn loop; the
 server stitches the per-turn token traces into the training trajectory.
 
 Tool-call format: Qwen3 Hermes XML (same as geo3k.py); swap via
-``VLLM_TOOL_PARSER_CLS``. Image (single PIL per prompt) is passed inline as
-an OpenAI ``image_url`` content item in the first user message.
+``VLLM_TOOL_PARSER_CLS``. ``ctx.messages`` arrives ready to send — the runner
+already inlined the row's image(s) as OpenAI ``image_url`` content items.
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
 import importlib.util
-import io
 import json
 import os
 import re
@@ -25,7 +23,6 @@ import torch
 from openai import AsyncOpenAI
 
 from molt.agents import ChatAgent, ChatAgentRunner, ChatContext, Result
-from molt.utils.vlm_utils import load_images
 
 
 def _load_module(name: str, path: Path):
@@ -39,10 +36,9 @@ _PROJECT_DIR = Path(__file__).resolve().parent.parent
 _GRADER = _load_module("math_grader", _PROJECT_DIR / "utils" / "math_grader.py")
 _PYTHON_EXECUTOR = _load_module("python_executor", _PROJECT_DIR / "tools" / "python_executor.py").TOOL
 _TOOLS = {_PYTHON_EXECUTOR.schema["function"]["name"]: _PYTHON_EXECUTOR}
-# Sent on every chat call so the chat server renders the `# Tools` Hermes preamble into the
-# prompt (server forwards body["tools"] -> apply_chat_template(tools=...)). Without this the
-# chat path drops the tool schema entirely, diverging from the step-runner geo3k.py which gets
-# it from the dataset `tools` field via --data.apply_chat_template + --data.tools_key.
+# Fallback when the dataset has no `tools` column: ctx.tools (--data.tools_key, the same
+# schemas the step-runner geo3k.py renders) takes precedence. Sent on every chat call so the
+# chat server renders the `# Tools` Hermes preamble (body["tools"] -> apply_chat_template).
 _TOOL_SCHEMAS = [tool.schema for tool in _TOOLS.values()]
 
 _MAX_TURNS = int(os.environ.get("MAX_AGENT_TURNS", "5"))
@@ -110,36 +106,6 @@ def _grade_answer(text: str, label) -> tuple[float, str]:
         return 0.0, answer
 
 
-def _pil_to_data_url(pil) -> str:
-    buf = io.BytesIO()
-    pil.convert("RGB").save(buf, format="PNG")
-    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
-
-
-def _build_first_user_content(prompt_text: str, images) -> list | str:
-    """Build a ChatML user content list, interleaving image_url items at the
-    positions where ``<image>`` appears in ``prompt_text``. Each ``<image>``
-    consumes the next image in order — preserves ordering when prompts mix
-    text and multiple images.
-    """
-    pil_images = load_images(images) if images else []
-    if not pil_images:
-        return prompt_text
-    parts: list = []
-    remaining = prompt_text
-    for im in pil_images:
-        before, sep, remaining = remaining.partition("<image>")
-        if before:
-            parts.append({"type": "text", "text": before})
-        if not sep:  # ran out of placeholders — prepend remaining images
-            remaining = sep + remaining
-            break
-        parts.append({"type": "image_url", "image_url": {"url": _pil_to_data_url(im)}})
-    if remaining:
-        parts.append({"type": "text", "text": remaining})
-    return parts
-
-
 class Geo3kAgent(ChatAgent):
     async def run(self, ctx: ChatContext) -> Result:
         # Retries ride out a transient loopback stall (e.g. a weight broadcast briefly freezes the
@@ -147,7 +113,11 @@ class Geo3kAgent(ChatAgent):
         # an already-recorded turn idempotently (same messages -> cached reply, no second sample),
         # so a retry can't double-count. Generous timeout so slow cold-start generations don't fail.
         client = AsyncOpenAI(base_url=ctx.base_url, api_key=ctx.api_key, max_retries=3, timeout=3600)
-        messages: list = [{"role": "user", "content": _build_first_user_content(ctx.prompt, ctx.images)}]
+        # The dataset row, ready to send: images are already inlined as image_url items.
+        # Tools come from the dataset's tools column when present (the same schemas the
+        # step-runner geo3k.py renders), else this agent's local ones.
+        messages: list = list(ctx.messages)
+        tools = ctx.tools or _TOOL_SCHEMAS
         assistant_history: list[str] = []
         tool_call_count = 0
         turn = 0
@@ -158,7 +128,7 @@ class Geo3kAgent(ChatAgent):
                 messages=messages,
                 max_tokens=ctx.sampling_params.max_tokens,
                 temperature=ctx.sampling_params.temperature,
-                tools=_TOOL_SCHEMAS,
+                tools=tools,
             )
             action = resp.choices[0].message.content or ""
             assistant_history.append(action)

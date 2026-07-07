@@ -31,7 +31,7 @@ class MathAgent(ChatAgent):
         client = AsyncOpenAI(base_url=ctx.base_url, api_key=ctx.api_key)
         resp = await client.chat.completions.create(
             model=ctx.model_name,
-            messages=[{"role": "user", "content": ctx.prompt}],
+            messages=list(ctx.messages),  # the dataset row, ready to send
             max_tokens=ctx.sampling_params.max_tokens,
             temperature=ctx.sampling_params.temperature,
         )

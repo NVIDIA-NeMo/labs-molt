@@ -21,21 +21,22 @@ def _collect_prompt_batch(dataloader_iter, num_prompts: int):
     collecting the returned prompts. Callers should still process any partial
     batch that was collected before exhaustion.
     """
-    prompts, labels, images = [], [], []
+    prompts, labels, images, tools = [], [], [], []
     exhausted = False
 
     while len(prompts) < num_prompts:
         try:
-            _, batch_prompts, batch_labels, batch_images = next(dataloader_iter)
+            _, batch_prompts, batch_labels, batch_images, batch_tools = next(dataloader_iter)
             remaining = num_prompts - len(prompts)
             prompts.extend(batch_prompts[:remaining])
             labels.extend(batch_labels[:remaining])
             images.extend(batch_images[:remaining])
+            tools.extend(batch_tools[:remaining])
         except StopIteration:
             exhausted = True
             break
 
-    return prompts, labels, images, exhausted
+    return prompts, labels, images, tools, exhausted
 
 
 def _build_action_token_mask(
@@ -194,13 +195,13 @@ class SamplesGenerator:
             # Refill so the runner pool keeps `inflight_capacity` rollouts in flight (engines stay saturated).
             free_slots = inflight_capacity - len(self._inflight_rollouts)
             if free_slots > 0 and self._dataloader_iter is not None:
-                prompts, labels, images, dataloader_exhausted = _collect_prompt_batch(
+                prompts, labels, images, tools, dataloader_exhausted = _collect_prompt_batch(
                     self._dataloader_iter, free_slots
                 )
                 prompts_dispatched += len(prompts)
                 if prompts:
                     self._inflight_rollouts.extend(
-                        self._dispatch_to_agent_runners(prompts, labels, images=images, **generate_kwargs)
+                        self._dispatch_to_agent_runners(prompts, labels, images=images, tools=tools, **generate_kwargs)
                     )
                 if dataloader_exhausted:
                     self._dataloader_iter = None
@@ -347,12 +348,12 @@ class SamplesGenerator:
         accepted_experiences: List[Experience] = []
         drop_counts: Dict[str, int] = defaultdict(int)
 
-        prompts, labels, images, exhausted = _collect_prompt_batch(dataloader_iter, num_prompts)
+        prompts, labels, images, tools, exhausted = _collect_prompt_batch(dataloader_iter, num_prompts)
         if not prompts:
             return [], prompts_consumed, True
 
         target_num_prompts = len(prompts)
-        pending_refs = self._dispatch_to_agent_runners(prompts, labels, images=images, **generate_kwargs)
+        pending_refs = self._dispatch_to_agent_runners(prompts, labels, images=images, tools=tools, **generate_kwargs)
         prompts_consumed += target_num_prompts
 
         pbar = tqdm(range(target_num_prompts), desc="Generate samples")
@@ -376,11 +377,13 @@ class SamplesGenerator:
                     # already-generated valid experiences (and an accurate
                     # prompts_consumed count) instead of discarding work at the
                     # dataloader boundary.
-                    new_prompts, new_labels, new_images, exhausted = _collect_prompt_batch(dataloader_iter, 1)
+                    new_prompts, new_labels, new_images, new_tools, exhausted = _collect_prompt_batch(
+                        dataloader_iter, 1
+                    )
                     prompts_consumed += len(new_prompts)
                     if new_prompts:
                         new_refs = self._dispatch_to_agent_runners(
-                            new_prompts, new_labels, images=new_images, **generate_kwargs
+                            new_prompts, new_labels, images=new_images, tools=new_tools, **generate_kwargs
                         )
                         pending_refs.extend(new_refs)
 
@@ -389,7 +392,7 @@ class SamplesGenerator:
         return accepted_experiences, prompts_consumed, exhausted
 
     def _dispatch_to_agent_runners(
-        self, prompts: List[str], labels: List[str], *, images: List = None, **generate_kwargs
+        self, prompts: List[str], labels: List[str], *, images: List = None, tools: List = None, **generate_kwargs
     ) -> List:
         """Round-robin each prompt group onto the runner actors; each ``run_group`` returns a
         Ray ref of that group's Trajectories, consumed by the streaming loop / filtering /
@@ -407,12 +410,16 @@ class SamplesGenerator:
         n_samples = generate_kwargs.get("n_samples_per_prompt", self.args.rollout.n_samples_per_prompt)
         if images is None:
             images = [None] * len(prompts)
+        if tools is None:
+            tools = [None] * len(prompts)
 
         refs = []
-        for prompt, label, img in zip(prompts, labels, images):
+        for prompt, label, img, tool in zip(prompts, labels, images, tools):
             actor = self.agent_runners[self._rr % len(self.agent_runners)]
             self._rr += 1
-            refs.append(actor.run_group.remote(prompt, label, img, sampling_params, truncate_length, n_samples))
+            refs.append(
+                actor.run_group.remote(prompt, label, img, sampling_params, truncate_length, n_samples, tools=tool)
+            )
         return refs
 
     def _media_token_ids(self) -> set:

@@ -222,12 +222,12 @@ class Env(ABC):
 # (ChatAgentRunner). The trainer consumes the Trajectory dataclass directly.
 # ---------------------------------------------------------------------------
 class Runner(ABC):
-    # Does this runner want the dataset to hand it a chat-template-RENDERED prompt?
-    # StepEnvRunner does (it appends raw env-feedback tokens after a rendered first turn).
-    # ChatAgentRunner does NOT (it feeds RAW content to the chat server, which renders exactly
-    # once via the model's own template). The trainer reads this to auto-set
-    # --data.apply_chat_template, so a chat runner never double-renders (dropping the image on
-    # structured-content VLMs). Model-agnostic: keyed on the runner, never on the model.
+    # WHERE the chat template is applied. Both runners consume the SAME chat-format dataset
+    # (--data.apply_chat_template): StepEnvRunner wants the dataset to pre-render (it appends raw
+    # env-feedback tokens after a rendered first turn); ChatAgentRunner does NOT — the dataset hands
+    # the messages through raw and the chat server renders them exactly once via the model's own
+    # template (a pre-render would double-template + drop the image on structured-content VLMs).
+    # Model-agnostic: keyed on the runner, never on the model.
     PRERENDER_PROMPT = True
 
     @abstractmethod
@@ -240,6 +240,7 @@ class Runner(ABC):
         hf_tokenizer,
         llm_engine,
         images=None,
+        tools=None,
     ) -> Trajectory:
         raise NotImplementedError
 
@@ -272,7 +273,11 @@ class StepEnvRunner(Runner):
         assert issubclass(env_cls, Env), "env_cls must inherit from Env"
         self.env_cls = env_cls
 
-    async def execute(self, prompt, label, sampling_params, max_length, hf_tokenizer, llm_engine, images=None):
+    async def execute(
+        self, prompt, label, sampling_params, max_length, hf_tokenizer, llm_engine, images=None, tools=None
+    ):
+        # tools are already rendered into the pre-rendered prompt (dataset chat template);
+        # the kwarg exists only for Runner signature parity with the chat path.
         sampling_params = deepcopy(sampling_params)
         env = self.env_cls()  # fresh env instance per episode
         # One session id for the whole rollout: consistent_hash routes every turn (and each turn's

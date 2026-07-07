@@ -289,7 +289,7 @@ class AgentRunnerActor:
     async def ready(self):
         return True
 
-    async def run_group(self, prompt, label, images, sampling_params, max_length, n_samples):
+    async def run_group(self, prompt, label, images, sampling_params, max_length, n_samples, tools=None):
         """N rollouts of one prompt (unchanged runner) -> flattened Trajectories, tagged
         group_id (per prompt; GRPO baseline) + rollout_id (per rollout; multi-turn
         step-samples share it). A failed rollout is dropped, never sinks the group."""
@@ -303,6 +303,7 @@ class AgentRunnerActor:
                 hf_tokenizer=self._tokenizer,
                 llm_engine=self._client,
                 images=images,
+                tools=tools,
             )
             for _ in range(n_samples)
         ]

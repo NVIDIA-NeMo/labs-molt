@@ -55,8 +55,8 @@ def _sample(group_id):
 
 
 def _prompt_loader(num_prompts):
-    """A dataloader yielding one prompt per item, as (index, prompts, labels, images)."""
-    return [(i, [f"p{i}"], [f"l{i}"], [None]) for i in range(num_prompts)]
+    """A dataloader yielding one prompt per item, as (index, prompts, labels, images, tools)."""
+    return [(i, [f"p{i}"], [f"l{i}"], [None], [None]) for i in range(num_prompts)]
 
 
 def _wire_fake_vllm(generator, monkeypatch, to_sample):

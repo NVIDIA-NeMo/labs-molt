@@ -330,9 +330,9 @@ while True:
     time.sleep(5)
 PY"
 
-# --data.apply_chat_template: the STEP runner needs a pre-rendered prompt; the CHAT runner
-# feeds RAW content (the chat server renders once via the model's own template), so the trainer
-# AUTO-DISABLES this for chat runners (Runner.PRERENDER_PROMPT) — model-agnostic, no shell branch.
+# --data.apply_chat_template: the dataset rows are chat messages — one format for BOTH runner
+# types. The STEP runner renders them dataset-side; a CHAT runner hands them through raw and the
+# chat server renders once with the model's own template (Runner.PRERENDER_PROMPT decides).
 RL_ARGS=(
   --actor.model_name_or_path "$MODEL_PATH"
   --data.prompt_dataset "$PROMPT_DATASET"

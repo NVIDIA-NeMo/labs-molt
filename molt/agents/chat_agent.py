@@ -15,7 +15,7 @@ no auth/session plumbing leaks into agent code.
             client = AsyncOpenAI(base_url=ctx.base_url, api_key=ctx.api_key)
             resp = await client.chat.completions.create(
                 model=ctx.model_name,
-                messages=[{"role": "user", "content": ctx.prompt}],
+                messages=list(ctx.messages),  # the dataset row, ready to send
                 max_tokens=ctx.sampling_params.max_tokens,
             )
             return Result(reward=grade(resp.choices[0].message.content, ctx.label))
@@ -32,7 +32,7 @@ Same server, Anthropic wire — point `AsyncAnthropic` at `ctx.session_url`
     client = AsyncAnthropic(base_url=ctx.session_url, api_key=ctx.api_key)
     msg = await client.messages.create(
         model=ctx.model_name,
-        messages=[{"role": "user", "content": ctx.prompt}],
+        messages=list(ctx.messages),
         max_tokens=ctx.sampling_params.max_tokens,
     )
     text = msg.content[0].text
@@ -45,6 +45,8 @@ speak either the OpenAI or the Anthropic HTTP wire protocol).
 from __future__ import annotations
 
 import asyncio
+import base64
+import io
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Any
@@ -71,7 +73,15 @@ logger = init_logger(__name__)
 # ---------------------------------------------------------------------------
 @dataclass
 class ChatContext:
-    prompt: str
+    # The dataset row as OpenAI wire-format messages: system/multi-turn structure preserved,
+    # `<image>` placeholders inlined as image_url data URIs. Send them verbatim
+    # (`messages=list(ctx.messages)`) — the chat server renders them once with the model's own
+    # template, so step and chat runners consume the SAME chat-format dataset.
+    messages: list
+    # The dataset row's `tools` column (--data.tools_key): OpenAI function-call schemas, the
+    # same ones the step runner renders into its prompt. None when the dataset has none.
+    tools: list | None
+    prompt: str  # the last user turn's text — a scalar view of the task (grading/logging)
     label: Any
     images: list | None
     # Session-scoped base_url WITH the "/v1" suffix, e.g.
@@ -102,9 +112,10 @@ class ChatAgent(ABC):
 
         Point ``openai.AsyncOpenAI(base_url=ctx.base_url, api_key=ctx.api_key)``
         at the session URL; every call through it is traced and stitched into a
-        single training Trajectory automatically. Use ``ctx.prompt`` /
-        ``ctx.label`` / ``ctx.images`` for the task and ``ctx.sampling_params`` /
-        ``ctx.max_length`` for the generation budget.
+        single training Trajectory automatically. Start from ``ctx.messages`` /
+        ``ctx.tools`` (the dataset row, ready to send verbatim), grade against
+        ``ctx.label``, and respect ``ctx.sampling_params`` / ``ctx.max_length``
+        for the generation budget.
 
         Returns:
             Result with a scalar ``reward`` (required); ``score`` and ``info``
@@ -113,14 +124,54 @@ class ChatAgent(ABC):
         raise NotImplementedError
 
 
+def _pil_data_uri(pil) -> str:
+    buf = io.BytesIO()
+    pil.convert("RGB").save(buf, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+
+
+def _wire_messages(prompt, images) -> list:
+    """Dataset row -> OpenAI wire-format messages, ready to send verbatim.
+
+    Each ``<image>`` in a user turn's text consumes the next image of the row's images
+    column (in order) as an ``image_url`` data URI — the wire analogue of the step
+    path's placeholder expansion, so both runners read the dataset identically.
+    Structured (list) content and images the text never references pass through on
+    ``ctx.images`` untouched."""
+    messages = prompt if isinstance(prompt, list) else [{"role": "user", "content": str(prompt)}]
+    from molt.utils.vlm_utils import load_images  # lazy: PIL/vision deps only on VLM rows
+
+    pil_images = list(load_images(images)) if images else []
+    out = []
+    for msg in messages:
+        content = msg.get("content")
+        if pil_images and msg.get("role") == "user" and isinstance(content, str) and "<image>" in content:
+            parts = []
+            for i, chunk in enumerate(content.split("<image>")):
+                if i:
+                    # More markers than images: keep the literal marker so the mismatch
+                    # surfaces at the processor's count check instead of vanishing here.
+                    parts.append(
+                        {"type": "image_url", "image_url": {"url": _pil_data_uri(pil_images.pop(0))}}
+                        if pil_images
+                        else {"type": "text", "text": "<image>"}
+                    )
+                if chunk:
+                    parts.append({"type": "text", "text": chunk})
+            msg = {**msg, "content": parts}
+        out.append(msg)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # ChatAgentRunner — drives a ChatAgent subclass; stitches its chat traces into
 # a list of Trajectory step-samples the trainer consumes.
 # ---------------------------------------------------------------------------
 class ChatAgentRunner(Runner):
-    # Feeds RAW user content to the chat server, which renders exactly once via the model's own
-    # chat template. So the dataset must NOT pre-render (that would double-template and drop the
-    # image on structured-content VLMs). The trainer reads this to auto-disable --data.apply_chat_template.
+    # The dataset hands the chat messages through raw (--data.apply_chat_template is required —
+    # asserted at startup); the chat server renders them exactly once via the model's own chat
+    # template. A dataset pre-render would double-template and drop the image on
+    # structured-content VLMs.
     PRERENDER_PROMPT = False
 
     def __init__(self, agent_cls: type[ChatAgent]):
@@ -157,15 +208,25 @@ class ChatAgentRunner(Runner):
             self._state = state
             logger.info(f"Chat server ready at {self._server_root} (model={_SERVED_MODEL_NAME})")
 
-    async def execute(self, prompt, label, sampling_params, max_length, hf_tokenizer, llm_engine, images=None):
+    async def execute(
+        self, prompt, label, sampling_params, max_length, hf_tokenizer, llm_engine, images=None, tools=None
+    ):
         await self._ensure_server(llm_engine, hf_tokenizer, max_length, sampling_params)
         session_id = uuid4().hex
+        messages = _wire_messages(prompt, images)
+        # Scalar view of the task for grading/logging (and Trajectory.prompt): the last user
+        # turn's text — taken from the RAW row (wire messages may have inlined its images).
+        raw = prompt if isinstance(prompt, list) else [{"role": "user", "content": str(prompt)}]
+        user_texts = [m["content"] for m in raw if m.get("role") == "user" and isinstance(m.get("content"), str)]
+        prompt_text = user_texts[-1] if user_texts else prompt
         # Pass THIS call's sampling_params so the server defaults each turn to the right train-vs-eval
         # temperature/max_tokens even if the agent doesn't re-send them (see _Session.sampling_params).
-        self._state.open(session_id, prompt, label, images, sampling_params)
+        self._state.open(session_id, prompt_text, label, images, sampling_params)
         session_root = f"{self._server_root}/s/{session_id}"
         ctx = ChatContext(
-            prompt=prompt,
+            messages=messages,
+            tools=tools,
+            prompt=prompt_text,
             label=label,
             images=images,
             base_url=f"{session_root}/v1",

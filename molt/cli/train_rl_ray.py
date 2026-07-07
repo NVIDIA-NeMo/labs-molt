@@ -343,9 +343,13 @@ if __name__ == "__main__":
         "into the chat template (see Qwen `tools=`) so the model is taught the native "
         "<tool_call>{...}</tool_call> emission format without manual prompt engineering.",
     )
-    parser.add_argument("--data.input_template", type=str, default=None)
     parser.add_argument(
-        "--data.apply_chat_template", action="store_true", default=False, help="Use HF tokenizer chat template"
+        "--data.apply_chat_template",
+        action="store_true",
+        default=False,
+        help="Dataset rows are chat messages. Step runners render them here with the HF chat "
+        "template; chat agents require this flag and hand the raw messages to the chat server, "
+        "which renders them once with the model's own template.",
     )
     parser.add_argument("--data.image_key", type=str, default="images", help="Dataset key for image paths/URLs")
     parser.add_argument(
@@ -787,16 +791,6 @@ if __name__ == "__main__":
     if args.data.max_images_per_prompt > 0 and args.fsdp.packing_samples:
         print("[Warning] VLM training does not support --fsdp.packing_samples; disabling packing for this run.")
         args.fsdp.packing_samples = False
-
-    if args.data.input_template and "{}" not in args.data.input_template:
-        print("[Warning] '{}' not in args.data.input_template, set to None")
-        args.data.input_template = None
-
-    if args.data.input_template and "\\n" in args.data.input_template:
-        print(
-            "[Warning] input_template contains \\n characters instead of newline. "
-            "You likely want to pass $'\\n' in Bash or \"`n\" in PowerShell."
-        )
 
     # --- Parallelism / FSDP ---
     if args.fsdp.pp_size > 1:
