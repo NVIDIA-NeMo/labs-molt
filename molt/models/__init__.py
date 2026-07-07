@@ -1,3 +1,5 @@
+"""Model wrappers and loss functions used by Molt trainers."""
+
 from .actor import Actor
 from .critic import Critic
 from .loss import (

@@ -1,3 +1,5 @@
+"""Algorithm helpers for advantage estimation, KL control, and replay buffers."""
+
 from .advantage import (
     ADVANTAGE_ESTIMATORS,
     get_advantage_estimator,

@@ -1,0 +1,17 @@
+{
+  "name": "molt-docs",
+  "private": true,
+  "scripts": {
+    "login": "npm exec --yes --package \"fern-api@$(node -p 'require(\"./fern.config.json\").version')\" -- fern login",
+    "check": "npm exec --yes --package \"fern-api@$(node -p 'require(\"./fern.config.json\").version')\" -- fern check",
+    "dev": "npm exec --yes --package \"fern-api@$(node -p 'require(\"./fern.config.json\").version')\" -- fern docs dev",
+    "preview": "npm exec --yes --package \"fern-api@$(node -p 'require(\"./fern.config.json\").version')\" -- fern generate --docs --preview --id local-preview",
+    "generate": "npm exec --yes --package \"fern-api@$(node -p 'require(\"./fern.config.json\").version')\" -- fern generate --docs",
+    "sanitize:generated": "node scripts/sanitize-generated-mdx.mjs",
+    "generate:library": "npm exec --yes --package \"fern-api@$(node -p 'require(\"./fern.config.json\").version')\" -- fern docs md generate --library molt && npm run sanitize:generated",
+    "generate:library:local": "mkdir -p ../../.tmp && TMPDIR=$(cd ../.. && pwd)/.tmp npm exec --yes --package \"fern-api@$(node -p 'require(\"./fern.config.json\").version')\" -- fern docs md generate --local --library molt-local && npm run sanitize:generated"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
