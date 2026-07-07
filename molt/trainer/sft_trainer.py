@@ -322,10 +322,10 @@ class SFTTrainer:
                 self.strategy.save_model(self.model, self.tokenizer, save_path)
 
     def evaluate(self, eval_dataloader, steps=0):
-        num_eval_batches = 0
         self.model.eval()
         with torch.no_grad():
             loss_sum = 0
+            token_sum = 0
             last_logs = {}
             step_bar = tqdm(
                 range(eval_dataloader.__len__()),
@@ -342,9 +342,14 @@ class SFTTrainer:
                     accum_steps=1,
                     backward=False,
                 )
-                num_eval_batches += 1
-                loss_sum += reported_sft_loss
-                bar_dict = {"eval sft_loss": loss_sum / num_eval_batches}
+                # Token-weighted accumulation (NeMo-RL's val_loss convention): a
+                # per-batch mean weighs a 5-token batch like a 5000-token one, so
+                # eval would drift from the train loss on heterogeneous reply
+                # lengths. Weighting by the batch token count makes the final
+                # value the exact global token mean after the DP all-reduce.
+                loss_sum += reported_sft_loss * batch_num_tokens
+                token_sum += batch_num_tokens
+                bar_dict = {"eval sft_loss": loss_sum / token_sum}
                 step_bar.update()
                 last_logs = self.strategy.all_reduce(bar_dict)
                 step_bar.set_postfix(last_logs)
