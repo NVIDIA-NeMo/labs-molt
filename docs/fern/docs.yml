@@ -32,12 +32,12 @@ libraries:
     output:
       path: ./product-docs/molt/Full-Library-Reference
     lang: python
-  # molt-local:
-  #   input:
-  #     path: ../..
-  #   output:
-  #     path: ./product-docs/molt/Full-Library-Reference
-  #   lang: python
+  molt-local:
+    input:
+      path: ../..
+    output:
+      path: ./product-docs/molt/Full-Library-Reference
+    lang: python
 
 versions:
   - display-name: Nightly
