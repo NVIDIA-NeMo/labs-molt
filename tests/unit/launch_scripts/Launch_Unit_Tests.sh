@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
-python -m coverage run -m pytest tests/unit
+coverage run --data-file="${COVERAGE_FILE:-.coverage}" --source=molt -m pytest tests/unit
