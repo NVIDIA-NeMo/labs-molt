@@ -100,18 +100,24 @@ class SamplesGenerator:
     # both ends — a failed save or missing/unreadable file falls back to the stateless resume.
     _BUFFER = "rollout_buffer.pt"
 
-    def _buffer_path(self) -> str:
-        return os.path.join(os.path.dirname(self.args.ckpt.path.rstrip("/")), self._BUFFER)
-
     def state_dict(self) -> Dict:
+        """Save the completed-but-unshipped rollouts to a fresh sidecar file per checkpoint and
+        return its path (NeMo-RL replay_buffer.pt analogue). A unique file per checkpoint means
+        each checkpoint restores ITS OWN buffer (no overwrite/desync); only the PATH goes in the
+        state_dict (the multi-GB batch must not travel the Ray queue). Best-effort."""
         finished = getattr(self, "_finished_samples", None)
         if not getattr(self.args.ckpt, "warm_resume_rollouts", False) or not finished:
             return {}
         try:
-            path = self._buffer_path()
+            d = os.path.join(os.path.dirname(self.args.ckpt.path.rstrip("/")), "rollout_warm")
+            os.makedirs(d, exist_ok=True)
+            self._warm_seq = getattr(self, "_warm_seq", 0) + 1
+            path = os.path.join(d, f"{self._BUFFER}.{os.getpid()}.{self._warm_seq}")  # pid: unique across segments
             torch.save(list(finished), path)
+            for stale in sorted(os.scandir(d), key=lambda e: e.stat().st_mtime)[:-3]:  # keep newest 3; bound disk
+                os.remove(stale.path)
             return {"buffer_file": path}
-        except Exception as e:  # never let checkpoint bookkeeping break the run
+        except Exception as e:  # never break the checkpoint over warm-resume bookkeeping
             logger.warning(f"warm-resume: save skipped ({e})")
             return {}
 
