@@ -1,0 +1,85 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Build, validate, and release Molt
+
+on:
+  push:
+    branches:
+      - main
+      - "pull-request/[0-9]+"
+      - "deploy-release/*"
+  workflow_dispatch:
+    inputs:
+      release-ref:
+        description: Ref (SHA or branch name) to release
+        required: true
+        type: string
+      dry-run:
+        description: Compute the release but do not publish artifacts.
+        required: true
+        default: true
+        type: boolean
+      create-gh-release:
+        description: Create a GitHub release.
+        required: true
+        default: true
+        type: boolean
+      version-bump-branch:
+        description: Branch for version bump.
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'push' }}
+
+jobs:
+  pre-flight:
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cicd_preflight.yml@v0.80.1
+    if: (vars.ENABLE_RELEASE_WORKFLOW || 'false') == 'true'
+    with:
+      default_runner_prefix: ${{ vars.DEFAULT_RUNNER_PREFIX }}
+      non_nvidia_runner_prefix: ${{ vars.NON_NVIDIA_RUNNER_PREFIX }}
+      sso_users_filename: ${{ vars.SSO_USERS_FILENAME }}
+    secrets: inherit
+
+  release:
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_release_library.yml@v1.6.0
+    needs: [pre-flight]
+    if: |
+      (vars.ENABLE_RELEASE_WORKFLOW || 'false') == 'true'
+      && !cancelled() && !failure()
+      && !(needs.pre-flight.outputs.docs_only == 'true'
+           || needs.pre-flight.outputs.is_deployment_workflow == 'true')
+    with:
+      release-ref: ${{ inputs.release-ref || github.sha }}
+      python-package: molt
+      python-version: "3.12"
+      library-name: Molt
+      validate-only: ${{ github.event_name != 'workflow_dispatch' }}
+      dry-run: ${{ inputs.dry-run || false }}
+      version-bump-branch: ${{ inputs.version-bump-branch || github.ref_name }}
+      create-gh-release: ${{ inputs.create-gh-release || true }}
+      has-src-dir: false
+      skip-test-wheel: true
+      skip-wheel-build: true
+      app-id: ${{ vars.BOT_ID }}
+      restrict-to-admins: true
+    secrets: inherit

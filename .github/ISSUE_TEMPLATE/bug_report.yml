@@ -1,0 +1,74 @@
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Bug report
+description: Report incorrect behavior, regressions, or broken workflows in Molt.
+title: "[bug] "
+labels:
+  - bug
+  - needs-triage
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is broken?
+      placeholder: Describe the incorrect behavior, regression, or failure mode.
+    validations:
+      required: true
+  - type: textarea
+    id: minimal-repro
+    attributes:
+      label: Minimal repro
+      description: Provide the smallest steps, command, or code snippet that reproduces the problem.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected-behavior
+    attributes:
+      label: Expected behavior
+      description: What did you expect to happen instead?
+    validations:
+      required: true
+  - type: dropdown
+    id: affected-area
+    attributes:
+      label: Affected area
+      options:
+        - area:speech
+        - area:llm
+        - area:evaluation
+        - area:frontend
+        - area:docs
+        - area:ci
+        - area:packaging
+        - area:misc
+        - unsure
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: |
+        Branch / commit:
+        Container or environment:
+        GPU / machine:
+        Python / CUDA / PyTorch:
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      render: shell

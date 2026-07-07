@@ -1,0 +1,14 @@
+# Catch-all
+*                          @nvidia-nemo/molt-maintainers
+
+# CI and automation
+/.github/                  @nvidia-nemo/automation
+/.pre-commit-config.yaml   @nvidia-nemo/molt-maintainers
+
+# Build / packaging
+/pyproject.toml            @nvidia-nemo/automation
+/uv.lock                   @nvidia-nemo/automation
+/docker/                   @nvidia-nemo/automation
+
+# Docs
+/docs/                     @nvidia-nemo/molt-maintainers

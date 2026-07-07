@@ -2,7 +2,7 @@ import asyncio
 import importlib.util
 from pathlib import Path
 
-_AGENT_PATH = Path(__file__).resolve().parents[1] / "examples" / "python" / "agents" / "geo3k.py"
+_AGENT_PATH = Path(__file__).resolve().parents[2] / "examples" / "python" / "agents" / "geo3k.py"
 
 
 def _load_geo3k():
