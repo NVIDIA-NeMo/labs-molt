@@ -8,7 +8,7 @@
 #
 # Runs BOTH SFT and RL (vLLM) for omni3 (Nemotron-H Mamba2+MoE) and qwen3.6 (Qwen3.5-MoE).
 # System stack baked in: TE + flash-attn + DeepEP + mamba + fla + vLLM.
-# AutoModel is baked in too (nemo-automodel installed from the requirements.txt pin below),
+# AutoModel is baked in too (nemo-automodel installed from the uv.lock pin below),
 # so this image is SELF-CONTAINED — runnable as-is (e.g. pushed to Docker Hub) with no
 # external mount. At runtime the launch scripts OPTIONALLY prepend a sibling Automodel
 # checkout to PYTHONPATH; since PYTHONPATH is searched before site-packages, that dev
@@ -25,7 +25,13 @@ ENV PIP_BREAK_SYSTEM_PACKAGES=1 \
     PIP_ROOT_USER_ACTION=ignore \
     PIP_NO_CACHE_DIR=1 \
     DEBIAN_FRONTEND=noninteractive \
-    RDMA_CORE_HOME=/opt/rdma-core/build
+    RDMA_CORE_HOME=/opt/rdma-core/build \
+    UV_PROJECT_ENVIRONMENT=/opt/venv \
+    VIRTUAL_ENV=/opt/venv \
+    UV_LINK_MODE=copy \
+    UV_NO_PROGRESS=1 \
+    UV_TORCH_BACKEND=cu130 \
+    PATH="/opt/venv/bin:${PATH}"
 
 # python 3.12 site-packages. GPU arches: A100 sm_80 (Ampere) + H100/H200 sm_90 (Hopper) +
 # B200/GB200 sm_100 (Blackwell). ARCH_LIST / NVTE_CUDA_ARCHS drive the TE / flash-attn /
@@ -34,6 +40,7 @@ ENV PIP_BREAK_SYSTEM_PACKAGES=1 \
 # sm_80, so it builds against the narrower DEEPEP_ARCH_LIST. A100 therefore runs the
 # TE/flash-attn/mamba SFT + medium-inference path, not DeepEP expert-parallel.
 ARG SITE=/usr/local/lib/python3.12/dist-packages
+ARG VENV_SITE=/opt/venv/lib/python3.12/site-packages
 ARG ARCH_LIST="8.0 9.0 10.0"
 ARG NVTE_CUDA_ARCHS="80;90;100"
 ARG DEEPEP_ARCH_LIST="9.0 10.0"
@@ -71,21 +78,22 @@ RUN T=$(python -c "import torch; print(torch.__version__)") && \
     TA=$(python -c "import torchaudio; print(torchaudio.__version__)") && \
     printf 'torch==%s\ntorchvision==%s\ntorchaudio==%s\n' "$T" "$TV" "$TA" > /opt/torch-pin.txt && \
     python -m pip install --upgrade pip setuptools uv && \
-    python -m pip install --ignore-installed --no-deps wheel && \
-    python -m pip install -c /opt/torch-pin.txt pybind11 setuptools_scm ninja cmake pydantic onnxscript onnx importlib_metadata && \
-    (python -m pip uninstall -y xgboost pynvml opencv-python-headless || true) && \
-    python -m pip install -c /opt/torch-pin.txt "dion @ git+https://github.com/microsoft/dion.git"
+    uv venv --system-site-packages ${VIRTUAL_ENV} && \
+    uv pip install --upgrade pip setuptools wheel && \
+    uv pip install -c /opt/torch-pin.txt pybind11 setuptools_scm ninja cmake pydantic onnxscript onnx importlib_metadata && \
+    (uv pip uninstall xgboost pynvml opencv-python-headless || true) && \
+    uv pip install -c /opt/torch-pin.txt "dion @ git+https://github.com/microsoft/dion.git@5fd7ed245e97587add23edbe97a75a1958cc312f"
 
 # --- (a) Transformer Engine release_v2.14 (source) ------------------------------
 # --no-deps is REQUIRED (else pip hits ResolutionImpossible on torch). CPATH exposes
 # torch's bundled nvidia includes so cudnn.h / nccl.h resolve.
-RUN python -m pip install nvidia-mathdx==25.1.1 && \
+RUN uv pip install nvidia-mathdx==25.1.1 && \
     git clone https://github.com/NVIDIA/TransformerEngine.git /opt/TransformerEngine && \
     cd /opt/TransformerEngine && git fetch origin release_v2.14 && git checkout FETCH_HEAD && \
     git submodule init && git submodule update && \
     CPATH="$(for d in ${SITE}/nvidia/*/include; do printf '%s:' "$d"; done)${CPATH:-}" \
     NVTE_CUDA_ARCHS="${NVTE_CUDA_ARCHS}" NVTE_BUILD_THREADS_PER_JOB=8 \
-        python -m pip install --no-cache-dir --no-build-isolation --no-deps -v . && \
+        uv pip install --no-cache-dir --no-build-isolation --no-deps -v . && \
     cd / && rm -rf /opt/TransformerEngine
 
 # --- (b) flash-attn 2.8.3 (source) ----------------------------------------------
@@ -93,7 +101,7 @@ RUN git clone https://github.com/Dao-AILab/flash-attention.git /opt/flash-attent
     cd /opt/flash-attention && git checkout v2.8.3 && \
     CPATH="$(for d in ${SITE}/nvidia/*/include; do printf '%s:' "$d"; done)${CPATH:-}" \
     FLASH_ATTENTION_FORCE_BUILD=TRUE MAX_JOBS=8 TORCH_CUDA_ARCH_LIST="${ARCH_LIST}" \
-        python -m pip install --no-build-isolation --no-deps . && \
+        uv pip install --no-build-isolation --no-deps . && \
     cd / && rm -rf /opt/flash-attention
 
 # --- (d) causal_conv1d 1.6.2 + mamba_ssm 2.3.2.post1 (source) -------------------
@@ -106,7 +114,7 @@ RUN for repo in "https://github.com/Dao-AILab/causal-conv1d.git@v1.6.2@/opt/caus
             -exec sed -i -e 's/cub::LaneId()/(threadIdx.x \& 31u)/g' -e 's/cub::CTA_SYNC()/__syncthreads()/g' {} + && \
         CPATH="$(for d in ${SITE}/nvidia/*/include; do printf '%s:' "$d"; done)${CPATH:-}" \
         env "${flag}=TRUE" MAX_JOBS=8 TORCH_CUDA_ARCH_LIST="${ARCH_LIST}" \
-            python -m pip install --no-build-isolation --no-deps . && cd /; \
+            uv pip install --no-build-isolation --no-deps . && cd /; \
     done && rm -rf /opt/causal-conv1d /opt/mamba
 
 # --- (c) DeepEP — AutoModel automodel_dep recipe (NVIDIA-NeMo/Automodel PR#2614, #2678) -
@@ -132,14 +140,14 @@ RUN apt-get update && apt-get install -y --allow-change-held-packages rdma-core 
     cd /opt/DeepEP && \
     git fetch origin 42144303752422ade37f24bca9e2dde12df70e09 && git checkout FETCH_HEAD && \
     patch -p1 < /opt/deepep.patch && \
-    python -m pip install --no-cache-dir nvidia-nvshmem-cu13==3.6.5 && \
-    NVSHMEM_LIB_PATH=$(pip show nvidia-nvshmem-cu13 | grep "Location:" | cut -d' ' -f2)/nvidia/nvshmem/lib && \
+    uv pip install --no-cache-dir nvidia-nvshmem-cu13==3.6.5 && \
+    NVSHMEM_LIB_PATH=$(uv pip show nvidia-nvshmem-cu13 | grep "Location:" | cut -d' ' -f2)/nvidia/nvshmem/lib && \
     ln -sf ${NVSHMEM_LIB_PATH}/libnvshmem_host.so.3 ${NVSHMEM_LIB_PATH}/libnvshmem_host.so && \
     apt-get update && apt-get install -y --no-install-recommends libnvidia-ml-dev && \
     env RDMA_CORE_HOME=${RDMA_CORE_HOME} HYBRID_EP_MULTINODE=1 \
         LD_LIBRARY_PATH=/usr/local/cuda/lib64/:${LD_LIBRARY_PATH:-} \
         TORCH_CUDA_ARCH_LIST="${DEEPEP_ARCH_LIST}" MAX_JOBS=8 \
-        python -m pip install --no-cache-dir --no-build-isolation -v . && \
+        uv pip install --no-cache-dir --no-build-isolation -v . && \
     apt-get purge -y libnvidia-ml-dev && apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/* /opt/deepep.patch && cd / && rm -rf /opt/DeepEP
 # RDMA_CORE_HOME=/opt/rdma-core/build symlinks to the system (apt) rdma-core at runtime.
@@ -157,25 +165,27 @@ RUN T=$(python -c "import torch; print(torch.__version__)") && \
     TV=$(python -c "import torchvision; print(torchvision.__version__)") && \
     TA=$(python -c "import torchaudio; print(torchaudio.__version__)") && \
     printf 'torch==%s\ntorchvision==%s\ntorchaudio==%s\n' "$T" "$TV" "$TA" > /tmp/torch-pin.txt && \
-    python -m pip install -c /tmp/torch-pin.txt "vllm[audio]==0.24.0" && rm -f /tmp/torch-pin.txt
+    uv pip install -c /tmp/torch-pin.txt "vllm[audio]==0.24.0" && rm -f /tmp/torch-pin.txt
 
-# --- VLM modeling-code runtime deps + molt requirements + fla -----------
-# requirements.txt minus what's already pinned/built above (torch trio, TE, flash-attn,
+# --- VLM modeling-code runtime deps + molt locked requirements + fla -----------
+# uv.lock export minus what's already pinned/built above (torch trio, TE, flash-attn,
 # mamba/causal-conv1d, deepep, vllm, fla, ray, dion). Installed WITH deps but torch-pinned
 # (-c /opt/torch-pin.txt) so transitive deps (multiprocess, pyarrow, ...) come in without
 # swapping torch/the source-built stack. (--no-deps here would skip multiprocess -> SFT crash.)
-# NOTE: nemo-automodel is intentionally NOT filtered out — it installs from the requirements.txt
+# NOTE: nemo-automodel is intentionally NOT filtered out — it installs from the uv.lock
 # git pin here, baking AutoModel into the image (self-contained for Docker Hub). The runtime
 # PYTHONPATH sibling-checkout override (above) takes precedence over this baked copy.
-COPY requirements.txt /tmp/requirements.txt
-RUN python -m pip install ftfy open_clip_torch timm wcwidth && \
+COPY pyproject.toml uv.lock /tmp/molt-lock/
+COPY molt/__init__.py molt/package_info.py /tmp/molt-lock/molt/
+RUN uv pip install ftfy open_clip_torch timm wcwidth && \
+    uv export --directory /tmp/molt-lock --locked --no-dev --all-extras --group test --no-emit-project --no-hashes --output-file /tmp/requirements.lock.txt && \
     grep -ivE '^[[:space:]]*(dion|vllm|torch|torchvision|torchaudio|transformer[-_]engine|flash[-_]attn|flash[-_]linear[-_]attention|fla([-_]core)?|mamba[-_]ssm|causal[-_]conv1d|deep[-_]ep|ray)([=<>!~ ]|$)' \
-        /tmp/requirements.txt > /tmp/req.filtered.txt && \
-    python -m pip install -c /opt/torch-pin.txt -r /tmp/req.filtered.txt && \
-    python -m pip install "ray[default]==2.55.0" && \
-    python -m pip install --no-cache-dir --no-deps "flash-linear-attention==0.4.2" "fla-core==0.4.2" && \
+        /tmp/requirements.lock.txt > /tmp/req.filtered.txt && \
+    uv pip install -c /opt/torch-pin.txt -r /tmp/req.filtered.txt && \
+    uv pip install "ray[default]==2.55.0" && \
+    uv pip install --no-cache-dir --no-deps "flash-linear-attention==0.4.2" "fla-core==0.4.2" && \
     python -c "import importlib.util as u; assert u.find_spec('fla.ops.cp') and u.find_spec('fla.modules.convolution') and u.find_spec('fla.ops.gated_delta_rule'), 'fla CP ops missing'" && \
-    rm -f /tmp/requirements.txt /tmp/req.filtered.txt
+    rm -rf /tmp/molt-lock /tmp/requirements.lock.txt /tmp/req.filtered.txt
 
 # --- restore DeepEP's NVSHMEM ABI ----------------------------------------------
 # DeepEP (step c) built deep_ep_cpp.so against nvidia-nvshmem-cu13==3.6.5, but vLLM hard-pins
@@ -184,13 +194,14 @@ RUN python -m pip install ftfy open_clip_torch timm wcwidth && \
 # 3.6.5 as the LAST pip action (a backward-compatible superset: it keeps 3.4.5's symbols for
 # vLLM while restoring the newer one DeepEP needs). --no-deps so pip does NOT re-drag vLLM's
 # ==3.4.5 pin, and re-create the unversioned .so symlink the DeepEP step made.
-RUN python -m pip install --no-deps --force-reinstall nvidia-nvshmem-cu13==3.6.5 && \
-    NVSHMEM_LIB_PATH=$(pip show nvidia-nvshmem-cu13 | awk '/^Location:/{print $2}')/nvidia/nvshmem/lib && \
+RUN uv pip install --no-deps --reinstall-package nvidia-nvshmem-cu13 nvidia-nvshmem-cu13==3.6.5 && \
+    NVSHMEM_LIB_PATH=$(uv pip show nvidia-nvshmem-cu13 | awk '/^Location:/{print $2}')/nvidia/nvshmem/lib && \
     ln -sf ${NVSHMEM_LIB_PATH}/libnvshmem_host.so.3 ${NVSHMEM_LIB_PATH}/libnvshmem_host.so
 
-# Register torch's bundled nvidia libs on the loader path (vLLM pulls nvidia-* wheels).
-RUN find ${SITE}/nvidia -mindepth 2 -maxdepth 2 -type d -name lib | sort \
-        > /etc/ld.so.conf.d/python-nvidia-libs.conf && ldconfig
+# Register torch's bundled and venv-installed nvidia libs on the loader path.
+RUN for root in ${SITE}/nvidia ${VENV_SITE}/nvidia; do \
+        if [ -d "$root" ]; then find "$root" -mindepth 2 -maxdepth 2 -type d -name lib; fi; \
+    done | sort > /etc/ld.so.conf.d/python-nvidia-libs.conf && ldconfig
 
 # --- Entrypoint -----------------------------------------------------------------
 COPY dockerfile/docker-entrypoint.sh /app/docker-entrypoint.sh

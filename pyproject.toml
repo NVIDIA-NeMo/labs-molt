@@ -1,33 +1,110 @@
-[build-system]
-requires = [
+[project]
+name = "molt"
+description = "A simple Ray + vLLM + FSDP2 stack for SFT and RL."
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+dynamic = ["version"]
+authors = [{ name = "Molt contributors" }]
+maintainers = [{ name = "Molt contributors" }]
+keywords = ["reinforcement learning", "SFT", "RL", "Ray", "vLLM", "FSDP", "NVIDIA"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: GPU :: NVIDIA CUDA",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Distributed Computing",
+]
+dependencies = [
+    "accelerate",
+    "aiohttp",
+    "datasets",
+    "dion",
+    "einops",
+    "grpcio>=1.74.0",
+    "huggingface_hub>=1.0.0",
+    "jsonlines",
+    "nemo-automodel",
+    "optree>=0.15.0",
     "packaging",
-    "setuptools >= 49.4.0",
+    "peft",
+    "pylatexenc",
+    "pynvml>=12.0.0",
+    "ray[default]==2.55.0",
+    "sympy",
+    "tensorboard",
+    "torch",
+    "torchdata",
+    "torchmetrics",
+    "tqdm",
+    "transformers",
+    "vllm; sys_platform == 'linux'",
+    "vllm-router>=0.1.14; sys_platform == 'linux'",
+    "wandb",
     "wheel",
 ]
+
+[project.optional-dependencies]
+vllm = ["vllm==0.24.0; sys_platform == 'linux'"]
+vllm_latest = ["vllm>=0.24.0; sys_platform == 'linux'"]
+flash-attn-2 = ["flash-attn==2.8.3; sys_platform == 'linux'"]
+
+[dependency-groups]
+dev = [
+    "pre-commit",
+    "ruff>=0.9.9",
+]
+test = [
+    "coverage[toml]>=7.8.1",
+    "pytest>=8",
+    "pytest-timeout>=2.4.0",
+]
+build = [
+    "build",
+    "setuptools>=79",
+    "wheel",
+]
+
+[project.urls]
+Homepage = "https://github.com/NVIDIA-NeMo/labs-molt"
+Repository = "https://github.com/NVIDIA-NeMo/labs-molt"
+Issues = "https://github.com/NVIDIA-NeMo/labs-molt/issues"
+
+[build-system]
+requires = ["setuptools>=79", "wheel"]
 build-backend = "setuptools.build_meta"
 
-[tool.isort]
-profile = "black"  # black-compatible
-line_length = 119  # should match black parameters
-ignore_whitespace = true  # ignore whitespace for compatibility with the initial style
-py_version = 310  # python 3.10 as a target version
-sections = ["FUTURE", "STDLIB", "THIRDPARTY", "FIRSTPARTY", "LOCALFOLDER"]
-default_section = "THIRDPARTY"
-extend_skip = ["setup.py", "docs/source/conf.py"]
+[tool.setuptools.packages.find]
+include = ["molt*"]
+exclude = ["tests*", "examples*", "dockerfile*"]
 
-
-[tool.black]
-line_length = 119
+[tool.setuptools.dynamic]
+version = { attr = "molt.package_info.__version__" }
 
 [tool.ruff]
 line-length = 119
 
+[tool.uv]
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'linux' and platform_machine == 'aarch64'",
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+torch-backend = "cu130"
+
+[tool.uv.sources]
+dion = { git = "https://github.com/microsoft/dion.git", rev = "5fd7ed245e97587add23edbe97a75a1958cc312f" }
+nemo-automodel = { git = "https://github.com/NVIDIA-NeMo/Automodel.git", rev = "c4e4c8d17472dc16a34fda22e5132215aefebf13" }
+
 [tool.pytest.ini_options]
-# durations=0 will display all tests execution time, sorted in ascending order starting from from the slowest one.
-# -vv will also display tests with durration = 0.00s
-addopts = "--verbose --pyargs --durations=0 --strict-markers"  # always add these arguments to pytest
-testpaths = ["./tests"]  # must be an explicit path to avoid importing another "tests" module
-# directories to ignore when discovering tests
+addopts = "--verbose --pyargs --durations=0 --strict-markers"
+testpaths = ["./tests"]
 norecursedirs = [
     "external",
     "examples",
@@ -44,7 +121,6 @@ norecursedirs = [
     "venv",
     "{arch}",
 ]
-# markers to select tests, use `pytest --markers` to see all available markers, `pytest -m "<marker>"` to select tests
 markers = [
     "unit: marks unit test, i.e. testing a single, well isolated functionality (deselect with '-m \"not unit\"')",
     "integration: marks test checking the elements when integrated into subsystems (deselect with '-m \"not integration\"')",
@@ -53,4 +129,20 @@ markers = [
     "docs: mark tests related to documentation (deselect with '-m \"not docs\"')",
     "skipduringci: marks tests that are skipped ci as they are addressed by Jenkins jobs but should be run to test user setups",
     "pleasefixme: marks tests that are broken and need fixing",
+]
+
+[tool.coverage.run]
+parallel = true
+concurrency = ["thread", "multiprocessing"]
+source = ["molt"]
+omit = [
+    "tests/*",
+    ".venv/*",
+]
+
+[tool.coverage.paths]
+source = [
+    ".",
+    "/opt/labs-molt",
+    "/home/runner/work/labs-molt/labs-molt",
 ]
