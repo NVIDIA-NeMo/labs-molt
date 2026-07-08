@@ -1,47 +1,6 @@
 # Contributing to Molt
 
-## Development Environment
-
-### Prerequisites
-
-- Python 3.10, 3.11, or 3.12
-- [uv](https://github.com/astral-sh/uv) for Python package management
-- Git for version control
-
-### Setup
-
-1. Install uv:
-
-   ```bash
-   curl -LsSf https://astral.sh/uv/install.sh | sh
-   ```
-
-2. Clone the repository:
-
-   ```bash
-   git clone <repository-url>
-   cd labs-molt
-   ```
-
-3. Set up the development environment:
-
-   ```bash
-   uv sync --all-extras --group test --group dev
-   ```
-
-4. Install pre-commit hooks:
-
-   ```bash
-   uv run pre-commit install
-   ```
-
-## Code Style and Quality
-
-Molt uses Ruff for formatting, import sorting, and linting:
-
-```bash
-uv run ruff format .
-uv run ruff check . --fix
+After cloning the repository, please install pre-commit hooks with:
 ```
 pip install pre-commit
 pre-commit install
