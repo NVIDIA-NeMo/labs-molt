@@ -198,10 +198,12 @@ VLLM_ATTENTION_BACKEND="${VLLM_ATTENTION_BACKEND:-}"
 VLLM_ENFORCE_EAGER="${VLLM_ENFORCE_EAGER:-1}"
 VLLM_DISTRIBUTED_EXECUTOR_BACKEND="${VLLM_DISTRIBUTED_EXECUTOR_BACKEND:-mp}"
 VLLM_ENABLE_EXPERT_PARALLEL="${VLLM_ENABLE_EXPERT_PARALLEL:-1}"
-# Rollout-only speedups: MTP speculative decoding (0=off; the draft is auto-detected
-# from the checkpoint's MTP head — qwen3.6 ships one, so 1 is the safe depth) and the
-# vLLM prefix KV cache (multi-turn rollouts re-prefill the growing history each turn;
-# the trainer resets the cache after every weight broadcast).
+# Rollout-only speedups — both OFF by default; measure vllm_kl/is_filter_ratio before
+# trusting either. MTP speculative decoding (draft auto-detected from the checkpoint's
+# MTP head; ~5x faster generation) is incompatible with ROUTING_REPLAY: the engine's
+# routed-experts capture misaligns under spec decode (the trainer refuses the combo).
+# Prefix caching is numerically unsafe on GDN hybrids (recurrent-state reuse at cache
+# block boundaries inflates vllm_kl ~10x) — keep it off for qwen3.6-class models.
 MTP_NUM_SPECULATIVE_TOKENS="${MTP_NUM_SPECULATIVE_TOKENS:-0}"
 ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-0}"
 # AutoModel actor side: 1 dedicated node, TP+EP+CP for MoE actors.

@@ -548,7 +548,9 @@ if __name__ == "__main__":
         action=argparse.BooleanOptionalAction,
         default=False,
         help="vLLM prefix KV cache. Multi-turn rollouts re-prefill the growing history each turn; "
-        "prefix caching cuts that cost. Trainer resets the cache after every weight broadcast.",
+        "prefix caching cuts that cost. Trainer resets the cache after every weight broadcast. "
+        "Numerically unsafe on GDN/Mamba hybrids (recurrent-state reuse at cache block "
+        "boundaries inflates vllm_kl ~10x): validate vllm_kl before enabling.",
     )
     parser.add_argument(
         "--vllm.enable_chunked_prefill",
@@ -807,6 +809,18 @@ if __name__ == "__main__":
         # rollout preempts in-flight requests at every weight sync -> the routing
         # for those tokens would be lost. Keep partial rollout off under R3.
         raise ValueError("--train.routing_replay is incompatible with --train.partial_rollout_enable.")
+
+    if args.train.routing_replay and args.vllm.mtp_num_speculative_tokens > 0:
+        # The engine's routed-experts capture misaligns under speculative decoding:
+        # replaying those rows routes the training forward WRONG, so R3 raises
+        # vllm_kl several-fold instead of lowering it (and the seq-mask-tis band
+        # then drops the affected data). Refuse the combination until the engine
+        # capture is spec-decode aware.
+        raise ValueError(
+            "--vllm.mtp_num_speculative_tokens is incompatible with --train.routing_replay: "
+            "the rollout engine's routed-experts capture misaligns under speculative "
+            "decoding. Disable MTP or run without routing replay."
+        )
 
     if args.train.routing_replay:
         # Fail in seconds (not 2+ min into vLLM/model init) if the runtime's AutoModel
