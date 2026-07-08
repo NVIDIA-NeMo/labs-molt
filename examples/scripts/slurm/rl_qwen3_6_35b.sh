@@ -198,12 +198,13 @@ VLLM_ATTENTION_BACKEND="${VLLM_ATTENTION_BACKEND:-}"
 VLLM_ENFORCE_EAGER="${VLLM_ENFORCE_EAGER:-1}"
 VLLM_DISTRIBUTED_EXECUTOR_BACKEND="${VLLM_DISTRIBUTED_EXECUTOR_BACKEND:-mp}"
 VLLM_ENABLE_EXPERT_PARALLEL="${VLLM_ENABLE_EXPERT_PARALLEL:-1}"
-# Rollout-only speedups — both OFF by default; measure vllm_kl/is_filter_ratio before
-# trusting either. MTP speculative decoding (draft auto-detected from the checkpoint's
-# MTP head; ~5x faster generation) is incompatible with ROUTING_REPLAY: the engine's
-# routed-experts capture misaligns under spec decode (the trainer refuses the combo).
-# Prefix caching is numerically unsafe on GDN hybrids (recurrent-state reuse at cache
-# block boundaries inflates vllm_kl ~10x) — keep it off for qwen3.6-class models.
+# Rollout-only speedups — both OFF by default. Isolation-tested on qwen3.6:
+#  * ENABLE_PREFIX_CACHING=1 is logprob-clean alone AND with routing replay, and slashes
+#    multi-turn re-prefill (sibling rollouts share the prompt prefix within a step).
+#  * MTP (draft auto-detected from the checkpoint's MTP head; ~5x faster generation) is
+#    clean ONLY standalone — it corrupts rollout logprobs with ROUTING_REPLAY (capture
+#    misaligns) and with prefix caching (KV rollback vs cached blocks). The trainer
+#    hard-refuses both combinations.
 MTP_NUM_SPECULATIVE_TOKENS="${MTP_NUM_SPECULATIVE_TOKENS:-0}"
 ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-0}"
 # AutoModel actor side: 1 dedicated node, TP+EP+CP for MoE actors.
