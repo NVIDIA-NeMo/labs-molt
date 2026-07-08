@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Padded <-> packed conversion for the FSDP2 model backend.
 
 Molt's datasets emit `(B, S)` padded batches. Packing removes padding and

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Multi-turn geo3k VLM env — Python tool-call helper + `<answer>` final answer.
 
 Each turn the model can emit a `<tool_call>` invoking `python_executor(code=...)`.

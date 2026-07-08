@@ -1,0 +1,10 @@
+Molt
+Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+This project is a derivative work of OpenRLHF
+(https://github.com/OpenRLHF/OpenRLHF),
+Copyright (c) OpenRLHF contributors,
+licensed under the Apache License, Version 2.0.
+
+Additional third-party code included in this repository and the licenses of
+third-party dependencies are listed in THIRD_PARTY_NOTICES.md.

@@ -1,5 +1,9 @@
-# Adapted from
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Adapted from SkyPilot
 # https://github.com/skypilot-org/skypilot/blob/86dc0f6283a335e4aa37b3c10716f90999f48ab6/sky/sky_logging.py
+# Copyright (c) SkyPilot authors, licensed under the Apache License, Version 2.0.
 """Logging configuration for molt."""
 
 import logging

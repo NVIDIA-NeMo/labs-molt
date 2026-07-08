@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Single-node quick-start: Qwen3-4B (dense) text SFT on proRL_text_rl.
 #
 # 8 GPUs on one machine via torchrun --standalone — no slurm.

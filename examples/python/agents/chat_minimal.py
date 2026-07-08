@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Hello-world chat agent — single turn, boxed-answer grading.
 
 Models the rollout as a true black box: hand `ctx.base_url` + `ctx.api_key`

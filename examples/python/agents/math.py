@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Single-turn math env for DAPO / AIME / GSM8K-style text RL.
 
 Model produces a chain-of-thought response containing `\\boxed{...}`; we grade

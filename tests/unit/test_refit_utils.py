@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 import torch
 
 from molt.trainer.fsdp.refit import should_refit_state_dict_entry, state_dict_parameter_trainability

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Convert VeraIsHere/geo3k_imgurl_processed to Molt schema.
 
 Source: https://huggingface.co/datasets/VeraIsHere/geo3k_imgurl_processed

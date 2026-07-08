@@ -1,3 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Adapted from OpenRLHF (https://github.com/OpenRLHF/OpenRLHF),
+# Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
+
 """Hierarchical argparse helper.
 
 ``hierarchize(args)`` converts a flat argparse Namespace whose dest names contain

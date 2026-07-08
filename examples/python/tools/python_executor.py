@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Sandboxed Python executor used as a model-callable tool during RL rollouts.
 
 The model emits `<tool_call>` payloads like

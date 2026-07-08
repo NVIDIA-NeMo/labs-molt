@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """slime-style global token-mean normalization for the RL policy loss.
 
 The RL trainer feeds every microbatch of one optimizer-step batch the *same*

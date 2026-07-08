@@ -1,3 +1,11 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Adapted from PyTorch
+# https://github.com/pytorch/pytorch/blob/5298acb5c76855bc5a99ae10016efc86b27949bd/torch/utils/data/distributed.py
+# Copyright (c) PyTorch contributors, licensed under the BSD-3-Clause license
+# (full text in THIRD_PARTY_NOTICES.md).
+
 import math
 from typing import Iterator, Optional, TypeVar
 

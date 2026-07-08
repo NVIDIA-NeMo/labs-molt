@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Numerical-equivalence tests for the PPO `gae` estimator and `ValueLoss`.
 
 Both are checked against a plain in-test reference implementation of the standard

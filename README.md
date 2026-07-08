@@ -15,7 +15,7 @@ Ray · vLLM · NVIDIA AutoModel — the smallest PyTorch-native stack for
 ![NVIDIA AutoModel](https://img.shields.io/badge/Training-NVIDIA_AutoModel-76B900?style=flat-square&logo=nvidia&logoColor=white)
 ![vLLM](https://img.shields.io/badge/Rollout-vLLM-7c3aed?style=flat-square)
 ![Ray](https://img.shields.io/badge/Runtime-Ray-028CF0?style=flat-square)
-![RL code](https://img.shields.io/badge/RL_code-~8.2K_LOC-10b981?style=flat-square)
+![RL code](https://img.shields.io/badge/RL_code-~8.6K_LOC-10b981?style=flat-square)
 
 <br/>
 
@@ -37,7 +37,7 @@ the trainer is a single actor; reward is any Python you write inside an `Env`
 or `ChatAgent` — graders, multi-turn tools, VLM environments, LLM-as-judge.
 Three components carry the rest — **Ray** for placement and async queues,
 **vLLM** for rollout, **NVIDIA AutoModel + FSDP2** for training in pure
-PyTorch. That is the whole stack: **~8.2K lines of RL code that scale to
+PyTorch. That is the whole stack: **~8.6K lines of RL code that scale to
 1T-class MoE** on vLLM with TP / EP / CP — think DeepSeek-V3 at
 `--fsdp.ep_size 256`, Adam CPU offload for the largest actors. One agent
 API, one trainable actor, clean enough to read end-to-end.
@@ -88,7 +88,7 @@ rollout.
 | 🎯 **Single-actor simplicity** | One actor, optional KL reference — the whole RL graph fits on a page | Every gradient is explicit; every loss term is one file away |
 | 🚀 **Frontier-scale MoE** | AutoModel + FSDP2 + TP / EP / CP + Adam CPU offload, MoE-native — e.g. DeepSeek-V3 with `--fsdp.ep_size 256` | The same script that trains 8B scales to 1T-class MoE — no rewrite between scales |
 | 🔗 **Token-first contract** | Aligned token ids, logprobs, action ranges, rewards, multimodal tensors | Multi-turn, VLM, and tool-call traces share one format end-to-end |
-| 🪶 **Small, hackable surface** | ~8.2K LOC of RL code across 3 thin layers | Fork one layer without touching the others — read it in an afternoon |
+| 🪶 **Small, hackable surface** | ~8.6K LOC of RL code across 3 thin layers | Fork one layer without touching the others — read it in an afternoon |
 
 ## 📊 How It Compares
 
@@ -105,7 +105,7 @@ that still drives fully-async agentic RL at frontier MoE scale on vLLM.
 | Parallelism | **TP / EP / CP**, MoE-native | ZeRO-3 / FSDP | TP / PP / EP / SP | TP / PP / DP / CP / EP |
 | Multimodal | VLM RL, multi-turn tool calls | VLM RL (v0.10+) | Qwen2.5-VL, Kimi-VL | geo3k VLM |
 | Config surface | **CLI flags only** | CLI + scripts | Hydra + YAML | CLI + YAML |
-| RL code size¹ | **~8.2K LOC** | ~7.2K | ~62K | ~25K |
+| RL code size¹ | **~8.6K LOC** | ~7.2K | ~62K | ~25K |
 | Design center | **agentic-first research** | RLHF coverage | production breadth | Megatron throughput |
 
 **One framework, one job.** Molt is the smallest PyTorch-native
@@ -124,7 +124,8 @@ RL on vLLM. Read every line that touches your gradients, in plain PyTorch.
 > Megatron/SGLang backends lazily, so its core `slime/` package plus its
 > `slime_plugins/` model-zoo (+~4.7K — the in-repo model code its RL path
 > uses, counted on the same basis as molt's `models/`) are counted, minus
-> SFT/distillation. Measured 2026-06-16 at each repo's latest main HEAD
+> SFT/distillation. Molt measured 2026-07-07 on this repo; the others
+> measured 2026-06-16 at each repo's then-latest main HEAD
 > (verl `86e8123`, slime `243773c`, OpenRLHF `b3d2927`).
 
 ## 🎯 Supported Scope
@@ -138,7 +139,7 @@ RL on vLLM. Read every line that touches your gradients, in plain PyTorch.
 | Runtime | Ray placement, async rollout queues, vLLM engines, partial rollout sync |
 | Model scale | AutoModel + FSDP2 with TP / EP / CP, MoE-native — e.g. DeepSeek-V3 at `--fsdp.ep_size 256` |
 | Model backend | **NVIDIA AutoModel is the primary path** — native CP / EP / TP, custom MoE+EP parallelizer, TE fused attention; everything model-side aligns with AutoModel's own recipes. The HF transformers path is a **non-preferred fallback** (AutoModel drops to it only when a model has no native class) supporting **text + flash_attention_2 + packing only — no CP / EP / TP** |
-| Optimizer | `adam` (default), with CPU offload for the largest actors (`--fsdp.offload optimizer`). `muon` (Newton–Schulz, 2D-weight group) is **experimental and currently unavailable** — its distributed (FSDP / EP) path does not yet work; use `adam` |
+| Optimizer | `adam` (default), with CPU offload for the largest actors (`--fsdp.offload optimizer`). `muon` (Newton–Schulz via Dion: Muon for 2D weights and grouped MoE experts, AdamW for embeddings / head / norms) is **experimental** — runs distributed (FSDP / EP) but has shown no consistent win over `adam` yet, which stays the recommended default |
 
 ### Agents & rewards
 
@@ -577,3 +578,14 @@ practical. The active architecture is intentionally minimal: a
 Gymnasium-aligned agent (`Env` / `ChatAgent`), a single trainable actor,
 optional KL reference workers, vLLM generation, and online policy
 optimization — all on PyTorch + AutoModel.
+
+## 🤝 Contributing
+
+External contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
+All commits must be signed off (`git commit -s`) per the
+[Developer Certificate of Origin (DCO)](https://developercertificate.org/).
+
+## 📄 License
+
+[Apache License 2.0](LICENSE). Copyright and third-party attributions:
+[NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

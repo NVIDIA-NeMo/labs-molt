@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """R3 rollout routing replay — capture alignment + training-side resharding.
 
 The CP-sharded path needs a real process group (exercised by the 4-node run); here

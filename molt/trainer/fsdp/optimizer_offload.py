@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """CPU optimizer offload (the ``--fsdp.offload optimizer`` level).
 
 Run the AdamW step on CPU so the fp32 master and Adam moments never occupy GPU during

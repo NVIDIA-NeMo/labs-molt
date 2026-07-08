@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """vLLM weight refit for the FSDP2/AutoModel backend.
 
 One module owns the two refit-time decisions the sender makes per parameter:

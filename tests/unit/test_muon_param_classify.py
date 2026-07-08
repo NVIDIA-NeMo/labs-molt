@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Muon param classification — grouped MoE experts must reach Muon.
 
 AutoModel stores MoE experts as one 3D grouped weight; _classify_params routes it

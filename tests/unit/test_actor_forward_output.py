@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Actor.forward returns a single named output dict.
 
 Guards the concern that writing ``output["log_probs"]`` (and ``action_log_probs`` /

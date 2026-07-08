@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Resumable + final checkpointing for the FSDP2/AutoModel backend.
 
 Split out of ``FsdpStrategy`` (which keeps a thin ``save_model`` / ``save_ckpt``

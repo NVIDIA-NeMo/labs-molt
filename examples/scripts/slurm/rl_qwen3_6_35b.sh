@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 #SBATCH --account=your_slurm_account
 #SBATCH --partition=interactive
@@ -196,6 +198,15 @@ VLLM_ATTENTION_BACKEND="${VLLM_ATTENTION_BACKEND:-}"
 VLLM_ENFORCE_EAGER="${VLLM_ENFORCE_EAGER:-1}"
 VLLM_DISTRIBUTED_EXECUTOR_BACKEND="${VLLM_DISTRIBUTED_EXECUTOR_BACKEND:-mp}"
 VLLM_ENABLE_EXPERT_PARALLEL="${VLLM_ENABLE_EXPERT_PARALLEL:-1}"
+# Rollout-only speedups — both OFF by default. Isolation-tested on qwen3.6:
+#  * ENABLE_PREFIX_CACHING=1 is logprob-clean alone AND with routing replay, and slashes
+#    multi-turn re-prefill (sibling rollouts share the prompt prefix within a step).
+#  * MTP (draft auto-detected from the checkpoint's MTP head; ~5x faster generation) is
+#    clean ONLY standalone — it corrupts rollout logprobs with ROUTING_REPLAY (capture
+#    misaligns) and with prefix caching (KV rollback vs cached blocks). The trainer
+#    hard-refuses both combinations.
+MTP_NUM_SPECULATIVE_TOKENS="${MTP_NUM_SPECULATIVE_TOKENS:-0}"
+ENABLE_PREFIX_CACHING="${ENABLE_PREFIX_CACHING:-0}"
 # AutoModel actor side: 1 dedicated node, TP+EP+CP for MoE actors.
 ACTOR_NODES="${ACTOR_NODES:-1}"
 ACTOR_GPUS_PER_NODE="${ACTOR_GPUS_PER_NODE:-8}"
@@ -370,6 +381,8 @@ RL_ARGS=(
   --vllm.gdn_prefill_backend "$VLLM_GDN_PREFILL_BACKEND"
   --vllm.mamba_ssm_cache_dtype "$VLLM_MAMBA_SSM_CACHE_DTYPE"
   --vllm.distributed_executor_backend "$VLLM_DISTRIBUTED_EXECUTOR_BACKEND"
+  --vllm.mtp_num_speculative_tokens "$MTP_NUM_SPECULATIVE_TOKENS"
+  $([ "$ENABLE_PREFIX_CACHING" != 0 ] && echo --vllm.enable_prefix_caching || true)
   --fsdp.param_dtype bf16
   --fsdp.attn_implementation "$FSDP_ATTN_IMPLEMENTATION"
   --fsdp.tp_size "$TP_SIZE"

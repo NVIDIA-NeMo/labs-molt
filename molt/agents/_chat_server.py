@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Internal chat forwarder over the vllm-router (imported by ``chat_agent.py``).
 
 The agent talks plain **chat messages** to a loopback endpoint with a stock OpenAI

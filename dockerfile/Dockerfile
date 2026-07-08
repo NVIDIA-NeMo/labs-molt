@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
 # molt — the project image: CUDA-13 (native CUDA 13; A100 sm_80, H100/H200 sm_90, B200/GB200 sm_100).
 #
 # Base: OFFICIAL Docker Hub pytorch/pytorch:2.11.0-cuda13.0-cudnn9-devel

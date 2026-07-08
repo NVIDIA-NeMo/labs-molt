@@ -1,3 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Adapted from OpenRLHF (https://github.com/OpenRLHF/OpenRLHF),
+# Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
+
 import argparse
 import os
 
@@ -542,7 +548,9 @@ if __name__ == "__main__":
         action=argparse.BooleanOptionalAction,
         default=False,
         help="vLLM prefix KV cache. Multi-turn rollouts re-prefill the growing history each turn; "
-        "prefix caching cuts that cost. Trainer resets the cache after every weight broadcast.",
+        "prefix caching cuts that cost. Trainer resets the cache after every weight broadcast. "
+        "Logprob-clean alone and with routing replay (isolation-tested, GDN hybrids "
+        "included); incompatible with MTP speculative decoding.",
     )
     parser.add_argument(
         "--vllm.enable_chunked_prefill",
@@ -801,6 +809,29 @@ if __name__ == "__main__":
         # rollout preempts in-flight requests at every weight sync -> the routing
         # for those tokens would be lost. Keep partial rollout off under R3.
         raise ValueError("--train.routing_replay is incompatible with --train.partial_rollout_enable.")
+
+    if args.train.routing_replay and args.vllm.mtp_num_speculative_tokens > 0:
+        # The engine's routed-experts capture misaligns under speculative decoding:
+        # replaying those rows routes the training forward WRONG, so R3 raises
+        # vllm_kl several-fold instead of lowering it (and the seq-mask-tis band
+        # then drops the affected data). Refuse the combination until the engine
+        # capture is spec-decode aware.
+        raise ValueError(
+            "--vllm.mtp_num_speculative_tokens is incompatible with --train.routing_replay: "
+            "the rollout engine's routed-experts capture misaligns under speculative "
+            "decoding. Disable MTP or run without routing replay."
+        )
+
+    if args.vllm.enable_prefix_caching and args.vllm.mtp_num_speculative_tokens > 0:
+        # Isolation-tested: each feature alone is logprob-clean, together they
+        # inflate vllm_kl ~10x (spec-decode KV rollback vs cached-block reuse),
+        # and the seq-mask-tis band then drops half the batch. Engine-side issue;
+        # refuse the combination.
+        raise ValueError(
+            "--vllm.mtp_num_speculative_tokens is incompatible with --vllm.enable_prefix_caching: "
+            "speculative decoding corrupts rollout logprobs when prefix-cached blocks are "
+            "reused. Enable at most one of the two."
+        )
 
     if args.train.routing_replay:
         # Fail in seconds (not 2+ min into vLLM/model init) if the runtime's AutoModel

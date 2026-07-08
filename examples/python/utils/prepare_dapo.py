@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Convert DAPO-Math-17k to Molt schema.
 
 Source: BytedTsinghua-SIA/DAPO-Math-17k (train; 17K-ish unique problems

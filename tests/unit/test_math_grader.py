@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Unit tests for the geo3k math-answer grader.
 
 Covers the two-tier equivalence (string normalization + symbolic) and guards

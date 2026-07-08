@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Unified chat-format dataset contract: one dataset, two runners.
 
 Locks the invariants of the f193c302 data path — the bug classes these guard

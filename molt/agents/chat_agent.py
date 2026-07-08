@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Chat-completion agent — public face for the chat-agent path.
 
 Subclass `ChatAgent` and implement `run(ctx)`. The rollout is a true black

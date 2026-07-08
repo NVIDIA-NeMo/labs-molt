@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Pluggable advantage estimators.
 
 An estimator turns per-rollout rewards (already clipped, deduped, and grouped by

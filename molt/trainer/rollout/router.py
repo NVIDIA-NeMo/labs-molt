@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Real vllm-router in front of the engine servers, + the rollout transport over it.
 
 The router load-balances the engines' OpenAI API (default consistent_hash: ``x-session-id`` affinity

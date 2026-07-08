@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Shared argparse blocks used by ``train_sft`` and ``train_rl_ray``.
 
 Keeping these knobs in one place avoids two-CLI drift where the RL launcher

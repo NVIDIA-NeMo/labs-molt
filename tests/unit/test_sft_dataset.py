@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Template-agnostic assistant-reply detection for the SFT loss mask.
 
 `discover_reply_markers` must locate the assistant reply span from the chat template

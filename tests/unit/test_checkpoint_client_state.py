@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 """Client-state (de)serialization for resumable checkpoints.
 
 ``CheckpointManager`` used to hand-roll a JSON type-tagging codec to squeeze

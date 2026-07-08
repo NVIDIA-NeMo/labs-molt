@@ -1,3 +1,9 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Adapted from OpenRLHF (https://github.com/OpenRLHF/OpenRLHF),
+# Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
+
 from torch.utils.data import Dataset
 
 from molt.utils.vlm_utils import should_expand_image_placeholder, split_image_placeholder

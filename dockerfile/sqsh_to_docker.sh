@@ -1,4 +1,7 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 # Convert an enroot .sqsh into a Docker Hub-pushable image WITHOUT docker on this host.
 # The cluster has no docker/buildah/skopeo, so we export the rootfs as a tarball that
 # `docker import` turns into a single-layer image, restoring the image's ENV/ENTRYPOINT
