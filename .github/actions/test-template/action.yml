@@ -65,7 +65,7 @@ runs:
           bash -lc 'cd /opt/labs-molt && coverage combine || true; coverage report -i || true; coverage xml -i || true'
 
     - name: Upload coverage artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       if: always()
       with:
         name: coverage-${{ inputs.coverage-prefix }}-${{ inputs.script }}-${{ github.run_id }}
