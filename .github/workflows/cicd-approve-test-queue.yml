@@ -1,4 +1,5 @@
-# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -22,7 +23,7 @@ on:
 jobs:
   approve-test-queue:
     if: github.repository == 'NVIDIA-NeMo/labs-molt'
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_test_approval_queue.yml@v1.3.0
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_test_approval_queue.yml@7a39dff97817b673465972a0e1a1c3c9dbc25372 # v1.3.0
     with:
       workflow_name: CICD Molt
       max_concurrency_internal: ${{ fromJSON(vars.MAX_CONCURRENCY || '3') }}

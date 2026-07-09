@@ -1,4 +1,5 @@
-# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -50,7 +51,7 @@ env:
 
 jobs:
   pre-flight:
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cicd_preflight.yml@v0.80.1
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cicd_preflight.yml@d241fcfa92900f804cd425c7abc11855e5532064 # v0.80.1
     with:
       default_runner_prefix: ${{ vars.DEFAULT_RUNNER_PREFIX }}
       non_nvidia_runner_prefix: ${{ vars.NON_NVIDIA_RUNNER_PREFIX }}
@@ -68,7 +69,7 @@ jobs:
       needs.pre-flight.outputs.is_deployment_workflow != 'true'
       && (vars.RUN_LINT_CHECK || 'false') == 'true'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Run pre-commit
         run: |
           pip install pre-commit==3.6.0
@@ -105,12 +106,12 @@ jobs:
       && !(needs.pre-flight.outputs.docs_only == 'true'
       || needs.pre-flight.outputs.is_deployment_workflow == 'true')
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - name: Get recently merged PR cache refs
         id: recent-pr-cache-refs
-        uses: actions/github-script@v8
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         env:
           REGISTRY: ${{ env.CI_REGISTRY }}
           IMAGE_NAME: ${{ env.CI_IMAGE_NAME }}
@@ -185,7 +186,7 @@ jobs:
             echo "cache-to=type=registry,ref=$REGISTRY/$IMAGE_NAME:molt-$CACHE_KEY-buildcache,mode=max"
           } >> "$GITHUB_OUTPUT"
       - name: Build CI image
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
         with:
           file: dockerfile/Dockerfile
           context: .
@@ -215,7 +216,7 @@ jobs:
       || inputs.test_suite == 'all'
       || inputs.test_suite == 'unit-only')
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Run unit tests
         uses: ./.github/actions/test-template
         with:
@@ -292,7 +293,7 @@ jobs:
       || needs.pre-flight.outputs.is_deployment_workflow == 'true')
     steps:
       - name: Generate fake coverage report
-        uses: actions/github-script@v8
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
         with:
           script: |
             await github.rest.repos.createCommitStatus({
@@ -313,9 +314,9 @@ jobs:
       && needs.pre-flight.outputs.docs_only == 'false'
       && needs.pre-flight.outputs.is_deployment_workflow == 'false'
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
       - name: Download coverage artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: coverage-unit-test-*
           merge-multiple: false
@@ -335,14 +336,14 @@ jobs:
           echo "has_coverage=true" >> "$GITHUB_OUTPUT"
       - name: Upload combined coverage artifact
         if: steps.combine-coverage.outputs.has_coverage == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: coverage-xml-unit-test-${{ github.run_id }}
           path: coverage-unit-test.xml
           if-no-files-found: error
       - name: Upload to Codecov
         if: env.UPLOAD_CODECOV == 'true' && steps.combine-coverage.outputs.has_coverage == 'true'
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@04b047e8bb82a0c002c8312c1c880fbc6a999d45 # v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           flags: unit-test
