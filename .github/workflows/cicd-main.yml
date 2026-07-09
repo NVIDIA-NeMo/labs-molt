@@ -190,6 +190,8 @@ jobs:
           file: dockerfile/Dockerfile
           context: .
           push: true
+          build-args: |
+            INSTALL_TEST_DEPS=1
           cache-from: |
             ${{ steps.build-meta.outputs.cache-from }}
             ${{ steps.recent-pr-cache-refs.outputs.cache-from }}

@@ -182,8 +182,10 @@ RUN T=$(python -c "import torch; print(torch.__version__)") && \
 # NOTE: nemo-automodel is intentionally NOT filtered out — it installs from the requirements.txt
 # git pin here, baking AutoModel into the image (self-contained for Docker Hub). The runtime
 # PYTHONPATH sibling-checkout override (above) takes precedence over this baked copy.
+ARG INSTALL_TEST_DEPS=0
 COPY requirements.txt /tmp/requirements.txt
-RUN python -m pip install ftfy open_clip_torch timm wcwidth && \
+RUN if [ "$INSTALL_TEST_DEPS" = "1" ]; then python -m pip install coverage pytest; fi && \
+    python -m pip install ftfy open_clip_torch timm wcwidth && \
     grep -ivE '^[[:space:]]*(dion|vllm|torch|torchvision|torchaudio|transformer[-_]engine|flash[-_]attn|flash[-_]linear[-_]attention|fla([-_]core)?|mamba[-_]ssm|causal[-_]conv1d|deep[-_]ep|ray)([=<>!~ ]|$)' \
         /tmp/requirements.txt > /tmp/req.filtered.txt && \
     python -m pip install -c /opt/torch-pin.txt -r /tmp/req.filtered.txt && \
