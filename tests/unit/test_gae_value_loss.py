@@ -16,7 +16,7 @@ import types
 
 import torch
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
+ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 # Register bare parent packages so loss.py's `from .utils import masked_mean`
 # resolves to the real utils.py WITHOUT executing molt/models/__init__.py

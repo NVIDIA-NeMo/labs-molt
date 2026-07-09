@@ -4,13 +4,13 @@
 """Unit tests for the geo3k math-answer grader.
 
 Covers the two-tier equivalence (string normalization + symbolic) and guards
-against over-counting. Run: python3 tests/test_math_grader.py
+against over-counting. Run: python3 tests/unit/test_math_grader.py
 """
 
 import importlib.util
 from pathlib import Path
 
-_MG = Path(__file__).resolve().parents[1] / "examples" / "python" / "utils" / "math_grader.py"
+_MG = Path(__file__).resolve().parents[2] / "examples" / "python" / "utils" / "math_grader.py"
 _spec = importlib.util.spec_from_file_location("math_grader", _MG)
 mg = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(mg)

@@ -4,7 +4,7 @@
 import importlib.util
 from pathlib import Path
 
-_TOOL_PATH = Path(__file__).resolve().parents[1] / "examples" / "python" / "tools" / "python_executor.py"
+_TOOL_PATH = Path(__file__).resolve().parents[2] / "examples" / "python" / "tools" / "python_executor.py"
 _spec = importlib.util.spec_from_file_location("python_executor", _TOOL_PATH)
 python_executor = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(python_executor)

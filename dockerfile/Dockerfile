@@ -73,7 +73,7 @@ RUN T=$(python -c "import torch; print(torch.__version__)") && \
     TV=$(python -c "import torchvision; print(torchvision.__version__)") && \
     TA=$(python -c "import torchaudio; print(torchaudio.__version__)") && \
     printf 'torch==%s\ntorchvision==%s\ntorchaudio==%s\n' "$T" "$TV" "$TA" > /opt/torch-pin.txt && \
-    python -m pip install --upgrade pip setuptools uv && \
+    python -m pip install --upgrade pip setuptools && \
     python -m pip install --ignore-installed --no-deps wheel && \
     python -m pip install -c /opt/torch-pin.txt pybind11 setuptools_scm ninja cmake pydantic onnxscript onnx importlib_metadata && \
     (python -m pip uninstall -y xgboost pynvml opencv-python-headless || true) && \

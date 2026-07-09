@@ -1,0 +1,5 @@
+# Catch-all
+*                          @nvidia-nemo/molt-maintainers
+
+# CI and automation
+/.github/                  @nvidia-nemo/automation
