@@ -50,11 +50,27 @@ runs:
           "${{ inputs.image }}" \
           bash -lc 'cd /opt/labs-molt && timeout "$(( ${{ inputs.timeout }} * 60 ))s" bash "${{ inputs.script-dir }}/${{ inputs.script }}.sh"'
 
+    - name: Generate coverage report
+      shell: bash
+      if: always()
+      run: |
+        set -xeuo pipefail
+        docker run --rm \
+          --runtime=nvidia --gpus all \
+          --shm-size=32g \
+          --workdir /opt/labs-molt \
+          --env COVERAGE_FILE=/opt/labs-molt/.coverage \
+          --volume "${{ github.workspace }}:/opt/labs-molt" \
+          "${{ inputs.image }}" \
+          bash -lc 'cd /opt/labs-molt && coverage combine || true; coverage report -i || true; coverage xml -i || true'
+
     - name: Upload coverage artifact
       uses: actions/upload-artifact@v4
       if: always()
       with:
         name: coverage-${{ inputs.coverage-prefix }}-${{ inputs.script }}-${{ github.run_id }}
-        path: .coverage*
+        path: |
+          .coverage
+          coverage.xml
         include-hidden-files: true
         if-no-files-found: ignore

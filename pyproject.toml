@@ -54,3 +54,13 @@ markers = [
     "skipduringci: marks tests that are skipped ci as they are addressed by Jenkins jobs but should be run to test user setups",
     "pleasefixme: marks tests that are broken and need fixing",
 ]
+
+[tool.coverage.run]
+source = ["molt"]
+
+[tool.coverage.paths]
+source = [
+    ".",
+    "/opt/labs-molt/",
+    "/home/runner/work/labs-molt/labs-molt",
+]
