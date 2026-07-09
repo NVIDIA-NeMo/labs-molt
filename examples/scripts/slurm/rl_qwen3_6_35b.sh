@@ -446,11 +446,9 @@ if [ "$FORCE_ON_POLICY" = "1" ]; then
   RL_ARGS+=(--train.force_on_policy)
 fi
 
-# Partial rollout (async gen/train overlap, ~2x throughput) is OFF by default: a
-# rollout that spans a weight broadcast carries off-policy prefix tokens. Set
-# PARTIAL_ROLLOUT=1 to enable — the off-policy prefix is then masked out of the
-# loss (slime mask_offpolicy_in_partial_rollout: Trajectory.off_policy_action_lens
-# -> _build_action_token_mask, zero gradient + out of the token-mean denominator).
+# A rollout spanning a weight broadcast can mix policy versions. The HTTP path
+# cannot mark that boundary, so PARTIAL_ROLLOUT=1 requires per-token IS correction;
+# it does not mask the old prefix.
 if [ "${PARTIAL_ROLLOUT:-0}" = "1" ]; then
   RL_ARGS+=(--train.partial_rollout_enable)
 fi

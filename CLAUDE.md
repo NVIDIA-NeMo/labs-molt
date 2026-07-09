@@ -2,7 +2,10 @@
 
 ## Code standards (hard rules, not preferences)
 
-The gold standard: **a human can read it and understand it in one pass.**
+The priority order is explicit: **human readability comes first; coding-agent
+traceability is the minimum gate.** A human should understand code in one pass,
+and an agent must be able to trace a feature from CLI flag to executed branch,
+tensor/record, metric, and test without reconstructing hidden control flow.
 
 1. Over-complex or hard-to-follow code is a **bug**, not a style issue.
 2. Reduce complexity and line count — prefer deleting code over adding it.
@@ -25,4 +28,4 @@ issue/PR links.
 - Reviews report findings only; fixes ship as one minimal diff per issue
   after approval.
 - Verify with `python -m compileall -q molt examples/python tests` and
-  `pytest -q`; shell scripts with `bash -n`.
+  `python -m pytest -q`; shell scripts with `bash -n`.

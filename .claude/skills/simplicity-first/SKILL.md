@@ -5,10 +5,12 @@ description: Simplicity gate for ALL code written, fixed, or reviewed in this re
 
 # Simplicity is the first principle
 
-**The gold standard is: a human can read it and understand it.** Every rule
-below is an instance of that one test. These are hard correctness rules, not
-style preferences. A violation is a bug and must be fixed before the change
-ships.
+**Human readability comes first; coding-agent traceability is the minimum
+gate.** A human should understand the code in one pass. An agent must at least
+be able to trace a feature from CLI flag to executed branch, tensor/record,
+metric, and test without reconstructing hidden control flow. Every rule below
+is an instance of that ordering. These are hard correctness rules, not style
+preferences. A violation is a bug and must be fixed before the change ships.
 
 1. **Code a human can't follow at a glance is a bug.** If a reviewer can't read
    a function top-to-bottom in one pass, restructure or delete it. Nesting,

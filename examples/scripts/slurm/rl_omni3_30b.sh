@@ -447,10 +447,9 @@ RL_ARGS=(
 
 RL_ARGS+=(--train.agent_path "$AGENT_PATH")
 
-# Partial rollout (async gen/train overlap, ~2x throughput) is OFF by default: a
-# rollout spanning a weight broadcast carries off-policy prefix tokens. Set
-# PARTIAL_ROLLOUT=1 to enable — the off-policy prefix is then masked out of the
-# loss (zero gradient, excluded from the token-mean denominator).
+# A rollout spanning a weight broadcast can mix policy versions. The HTTP path
+# cannot mark that boundary, so PARTIAL_ROLLOUT=1 requires per-token IS correction;
+# it does not mask the old prefix.
 if [ "${PARTIAL_ROLLOUT:-0}" = "1" ]; then
   RL_ARGS+=(--train.partial_rollout_enable)
 fi
