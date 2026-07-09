@@ -51,7 +51,7 @@ try:
 except Exception:
     _install_vllm_test_stub()
 
-import molt.trainer.vllm.vllm_engine as vllm_engine
+import molt.trainer.vllm.vllm_engine as vllm_engine  # noqa: E402
 
 
 def test_vllm_ray_executor_uses_worker_gpu_even_when_actor_is_cpu_only():

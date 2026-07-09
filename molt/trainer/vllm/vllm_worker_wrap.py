@@ -16,10 +16,12 @@
 # Adapted from OpenRLHF (https://github.com/OpenRLHF/OpenRLHF),
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
+
 class WorkerWrap:
     def init_process_group(self, master_address, master_port, rank_offset, world_size, group_name, backend="nccl"):
         """Init torch process group for model weights update"""
         import torch
+
         from molt.utils.distributed_util import stateless_init_process_group
 
         assert torch.distributed.is_initialized(), "default torch process group must be initialized"

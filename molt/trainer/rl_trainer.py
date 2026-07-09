@@ -189,7 +189,7 @@ def compute_eval_metrics(eval_dataloader, samples_list, n_samples_per_prompt):
             metrics[ds][f"pass{n_samples_per_prompt}"] += max(rewards)
         metrics[ds]["pass1"] += sum(rewards) / len(rewards)
         metrics[ds]["count"] += 1
-        metrics[ds]["lengths"].extend(l for l in g["lengths"] if l is not None)
+        metrics[ds]["lengths"].extend(x for x in g["lengths"] if x is not None)
         metrics[ds]["truncated"].extend(t for t in g["truncated"] if t is not None)
 
     logs = {}

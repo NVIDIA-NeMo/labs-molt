@@ -216,9 +216,9 @@ class RemoteExperienceMaker:
         else:
             values_list = None
 
-        assert (
-            len(samples_list) == len(action_log_probs_list) == len(base_action_log_probs_list)
-        ), f"len(samples_list): {len(samples_list)}, len(action_log_probs_list): {len(action_log_probs_list)}, len(base_action_log_probs_list): {len(base_action_log_probs_list)}"
+        assert len(samples_list) == len(action_log_probs_list) == len(base_action_log_probs_list), (
+            f"len(samples_list): {len(samples_list)}, len(action_log_probs_list): {len(action_log_probs_list)}, len(base_action_log_probs_list): {len(base_action_log_probs_list)}"
+        )
         if use_critic:
             assert len(values_list) == len(samples_list), f"values {len(values_list)} != samples {len(samples_list)}"
 

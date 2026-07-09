@@ -23,7 +23,6 @@ from typing import List, Tuple
 def karmarkar_karp(seqlen_list: List[int], k_partitions: int, equal_size: bool):
     # see: https://en.wikipedia.org/wiki/Largest_differencing_method
     class Set:
-
         def __init__(self) -> None:
             self.sum = 0
             self.items = []
@@ -45,7 +44,6 @@ def karmarkar_karp(seqlen_list: List[int], k_partitions: int, equal_size: bool):
             return self.items < other.items
 
     class State:
-
         def __init__(self, items: List[Tuple[int, int]], k: int) -> None:
             self.k = k
             # sets should always be decreasing order
@@ -120,9 +118,9 @@ def karmarkar_karp(seqlen_list: List[int], k_partitions: int, equal_size: bool):
     partitions = final_state.get_partitions()
     if equal_size:
         for i, partition in enumerate(partitions):
-            assert len(partition) * k_partitions == len(
-                seqlen_list
-            ), f"{len(partition)} * {k_partitions} != {len(seqlen_list)}"
+            assert len(partition) * k_partitions == len(seqlen_list), (
+                f"{len(partition)} * {k_partitions} != {len(seqlen_list)}"
+            )
     return partitions
 
 
@@ -166,7 +164,7 @@ def get_minimum_num_micro_batch_size(total_lengths, max_tokens_per_gpu, cp_size,
     # The cap is first scaled by cp_size * tp_size (tokens are split across them).
     max_tokens_per_gpu *= cp_size * tp_size
     batches = []
-    for l in total_lengths:
+    for l in total_lengths:  # noqa: E741
         for i in range(len(batches)):
             if batches[i] + l <= max_tokens_per_gpu:
                 batches[i] += l

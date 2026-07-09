@@ -16,6 +16,7 @@
 # Adapted from OpenRLHF (https://github.com/OpenRLHF/OpenRLHF),
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
+
 def torch_dist_barrier_and_cuda_sync():
     """Synchronize distributed training and CUDA operations.
     This function ensures that:

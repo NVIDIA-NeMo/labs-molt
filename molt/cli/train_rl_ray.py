@@ -763,9 +763,9 @@ if __name__ == "__main__":
 
     # --- Algorithm checks ---
     if args.algo.advantage.estimator in ["rloo", "reinforce_baseline", "grpo", "dr_grpo"]:
-        assert (
-            args.rollout.n_samples_per_prompt > 1
-        ), f"{args.algo.advantage.estimator} requires n_samples_per_prompt > 1"
+        assert args.rollout.n_samples_per_prompt > 1, (
+            f"{args.algo.advantage.estimator} requires n_samples_per_prompt > 1"
+        )
 
     if args.algo.kl.use_loss and args.algo.kl.estimator not in ("k2", "k3"):
         print(f"Recommend setting {args.algo.kl.estimator} to 'k2' or 'k3' when using KL as a loss")
@@ -773,13 +773,13 @@ if __name__ == "__main__":
         print(f"Recommend setting {args.algo.kl.estimator} to 'k1' when not using KL as a loss.")
 
     if args.algo.dynamic_filtering_enable:
-        assert (
-            args.algo.dynamic_filtering_range[0] < args.algo.dynamic_filtering_range[1]
-        ), "dynamic_filtering_range[0] must be less than dynamic_filtering_range[1]"
+        assert args.algo.dynamic_filtering_range[0] < args.algo.dynamic_filtering_range[1], (
+            "dynamic_filtering_range[0] must be less than dynamic_filtering_range[1]"
+        )
         assert args.train.agent_path, "--train.agent_path must be specified when using dynamic filtering"
-        assert (
-            args.rollout.n_samples_per_prompt > 1
-        ), "n_samples_per_prompt must be greater than 1 when using dynamic filtering"
+        assert args.rollout.n_samples_per_prompt > 1, (
+            "n_samples_per_prompt must be greater than 1 when using dynamic filtering"
+        )
 
     if not args.algo.advantage.is_correction_enable:
         # The HTTP router path can't observe a mid-request weight swap, so off_policy_len is always 0

@@ -284,7 +284,7 @@ def merge_mm_train_inputs(mm_train_inputs_list: list, device) -> Dict[str, torch
     """
     merged: Dict[str, list] = {}
     for item in mm_train_inputs_list:
-        for mm_dict in (item if isinstance(item, list) else [item]):
+        for mm_dict in item if isinstance(item, list) else [item]:
             if mm_dict is None:
                 continue
             for key, val in mm_dict.items():

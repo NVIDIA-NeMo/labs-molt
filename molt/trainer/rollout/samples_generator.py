@@ -16,6 +16,7 @@
 # Adapted from OpenRLHF (https://github.com/OpenRLHF/OpenRLHF),
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
+import os
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 

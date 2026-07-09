@@ -468,8 +468,7 @@ class BaseModel(nn.Module):
             self._num_routing_gates = len(gate_layer_ids)
             self._moe_layer_global_ids = gate_layer_ids
             print(
-                f"[R3] Routing replay enabled on {len(gate_layer_ids)} MoE gates "
-                f"at global layer ids {gate_layer_ids}."
+                f"[R3] Routing replay enabled on {len(gate_layer_ids)} MoE gates at global layer ids {gate_layer_ids}."
             )
         if self.packing_samples:
             print("[Packing] Using AutoModel THD/TE packed path.")
