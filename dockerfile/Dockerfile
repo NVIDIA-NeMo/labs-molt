@@ -183,7 +183,7 @@ RUN T=$(python -c "import torch; print(torch.__version__)") && \
 # git pin here, baking AutoModel into the image (self-contained for Docker Hub). The runtime
 # PYTHONPATH sibling-checkout override (above) takes precedence over this baked copy.
 COPY requirements.txt /tmp/requirements.txt
-RUN python -m pip install ftfy open_clip_torch timm wcwidth && \
+RUN python -m pip install "coverage[toml]" ftfy open_clip_torch timm wcwidth && \
     grep -ivE '^[[:space:]]*(dion|vllm|torch|torchvision|torchaudio|transformer[-_]engine|flash[-_]attn|flash[-_]linear[-_]attention|fla([-_]core)?|mamba[-_]ssm|causal[-_]conv1d|deep[-_]ep|ray)([=<>!~ ]|$)' \
         /tmp/requirements.txt > /tmp/req.filtered.txt && \
     python -m pip install -c /opt/torch-pin.txt -r /tmp/req.filtered.txt && \
