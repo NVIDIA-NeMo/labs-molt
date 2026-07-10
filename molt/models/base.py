@@ -369,10 +369,10 @@ class BaseModel(nn.Module):
             # shards; TE fused RoPE expects the simpler 4D rotary layout.
             backend_cfg = {"attn": backend_attn, "rope_fusion": using_te and self.cp_size <= 1}
             # Pin the MoE dispatcher (BackendConfig otherwise auto-selects on deep_ep
-            # importability, silently changing the training path). Default deepep: makes
-            # MoE recompute deterministic under activation checkpointing and gives correct
-            # RL grads (with the FsdpStrategy grad-sync fix). Override: MOLT_MOE_DISPATCHER.
-            backend_cfg["dispatcher"] = os.environ.get("MOLT_MOE_DISPATCHER", "deepep")
+            # importability, silently changing the training path). Default hybridep to
+            # match AutoModel; == deepep on intra-node NVLink. Override MOLT_MOE_DISPATCHER
+            # (d580 recipes pin deepep — cross-node hybridep/DOCA-GPUNetIO fails there).
+            backend_cfg["dispatcher"] = os.environ.get("MOLT_MOE_DISPATCHER", "hybridep")
             # Linear (GEMM) + experts backend follow the attention choice by default
             # (TE attn -> TE linear/experts, else torch). Some models decouple them
             # (e.g. sparse-attn arch needs sdpa but wants TE linear + gmm experts), so
