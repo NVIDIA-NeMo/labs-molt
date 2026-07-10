@@ -630,8 +630,16 @@ class PolicyTrainer:
                     "vLLM). Build the MoE with BackendConfig experts='torch_mm' (the default)."
                 )
 
+            # Large fp32 masters — the packed MoE expert banks reach ~16 GB per
+            # layer at 397B — would peak every rank at full fp32 size during the
+            # gather and OOM both sides of the refit. Their vLLM target dtype is
+            # bf16 anyway, so pre-cast and gather half the bytes; small fp32
+            # params (MoE gate/router) keep their deliberate fp32 round-trip.
+            refit_dtype = None
+            if tensor.dtype == torch.float32 and tensor.numel() * 4 > (1 << 30):
+                refit_dtype = torch.bfloat16
             # Collective; every rank participates.
-            weight, _ = gather_full_param(tensor)
+            weight, _ = gather_full_param(tensor, dtype=refit_dtype)
             if not is_rank0:
                 del weight
                 continue

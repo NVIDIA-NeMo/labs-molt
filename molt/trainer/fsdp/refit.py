@@ -48,6 +48,12 @@ def gather_full_param(param: torch.Tensor, dtype: Optional[torch.dtype] = None) 
     path uses per-tensor streaming with a ping-pong buffer to bound peak memory.
     """
     if isinstance(param, DTensor):
+        if dtype is not None and param.is_floating_point() and param.dtype != dtype:
+            # Cast the local shards BEFORE the gather: an elementwise cast
+            # commutes with all-gather, so the values are identical, but the
+            # collective then moves and materializes the tensor at target
+            # width — halving the per-rank peak when downcasting fp32 masters.
+            param = param.to(dtype=dtype)
         full = param.full_tensor()
     else:
         full = param.data
