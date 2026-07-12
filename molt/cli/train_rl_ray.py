@@ -99,6 +99,7 @@ def train(args):
             mtp_num_speculative_tokens=args.vllm.mtp_num_speculative_tokens,
             enable_return_routed_experts=args.train.routing_replay,
             pipeline_parallel_size=getattr(args.vllm, "pipeline_parallel_size", 1),
+            data_parallel_size=getattr(args.vllm, "data_parallel_size", 1),
         )
 
     # init actor / reference / critic models
@@ -126,12 +127,13 @@ def train(args):
         )
     )
     vllm_pp = getattr(args.vllm, "pipeline_parallel_size", 1)
-    vllm_gpus = args.vllm.num_engines * args.vllm.tensor_parallel_size * vllm_pp
+    vllm_dp = getattr(args.vllm, "data_parallel_size", 1)
+    vllm_gpus = args.vllm.num_engines * args.vllm.tensor_parallel_size * vllm_pp * vllm_dp
     total_gpus = int(ray.cluster_resources().get("GPU", 0))
     if total_gpus and model_gpus + vllm_gpus > total_gpus:
         raise RuntimeError(
             f"GPU over-subscription: FSDP models need {model_gpus} GPUs + vLLM "
-            f"({args.vllm.num_engines} engines x TP{args.vllm.tensor_parallel_size} x PP{vllm_pp}) = {vllm_gpus} GPUs = "
+            f"({args.vllm.num_engines} engines x TP{args.vllm.tensor_parallel_size} x PP{vllm_pp} x DP{vllm_dp}) = {vllm_gpus} GPUs = "
             f"{model_gpus + vllm_gpus} > {total_gpus} cluster GPUs. Lower --vllm.num_engines or add nodes. "
             f"(Otherwise placement deadlocks forever.)"
         )
@@ -483,6 +485,15 @@ if __name__ == "__main__":
         "node, set TP to the node GPU count and PP to the node span (TP*PP GPUs/engine, "
         "ray executor): PP hands off between stages point-to-point across nodes instead "
         "of a cross-node TP all-reduce every layer.",
+    )
+    parser.add_argument(
+        "--vllm.data_parallel_size",
+        type=int,
+        default=1,
+        help="data parallel size per vLLM engine (ray DP backend). vLLM has no standalone "
+        "expert-parallel size: EP = TP * DP, so raise DP to decouple EP from TP "
+        "(DeepSeek-V3-style TP8+DP4 attention -> EP32 experts). An engine spans "
+        "TP*PP*DP GPUs; requires --vllm.enable_expert_parallel and the ray executor.",
     )
     parser.add_argument("--vllm.sync_backend", type=str, default="nccl", help="trainer -> vLLM weight sync backend")
     parser.add_argument("--vllm.enforce_eager", action="store_true", default=False, help="Disable CUDA graph in vLLM")

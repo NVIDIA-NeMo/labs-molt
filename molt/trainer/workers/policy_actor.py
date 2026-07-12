@@ -149,7 +149,10 @@ class PolicyTrainer:
         vllm_num_engines = self.strategy.args.vllm.num_engines
         vllm_tensor_parallel_size = self.strategy.args.vllm.tensor_parallel_size
         vllm_pipeline_parallel_size = getattr(self.strategy.args.vllm, "pipeline_parallel_size", 1)
-        engine_world = vllm_tensor_parallel_size * vllm_pipeline_parallel_size
+        vllm_data_parallel_size = getattr(self.strategy.args.vllm, "data_parallel_size", 1)
+        # One rank per vLLM worker GPU. DP replicates the full (EP-sharded) model,
+        # so every replica's TP*PP workers take the weight broadcast too.
+        engine_world = vllm_tensor_parallel_size * vllm_pipeline_parallel_size * vllm_data_parallel_size
         world_size = vllm_num_engines * engine_world + 1
 
         group_name = "molt"

@@ -280,6 +280,7 @@ def create_vllm_engines(
     mtp_num_speculative_tokens: int = 0,
     enable_return_routed_experts: bool = False,
     pipeline_parallel_size: int = 1,
+    data_parallel_size: int = 1,
 ):
     """Spin up a set of vLLM Ray actors on a dedicated placement group.
 
@@ -298,15 +299,20 @@ def create_vllm_engines(
     ``tensor_parallel_size=16 --vllm.enable_expert_parallel`` -> EP16
     (EP = TP * DP, DP=1) across both nodes. ``mp``/``uni`` are single-node only
     (a Ray bundle cannot span nodes), so cross-node engines need the ray backend.
+
+    vLLM has no standalone expert-parallel size: ``EP = TP * DP``. To decouple EP
+    from TP (DeepSeek-V3-style TP8 attention + EP32 experts) raise
+    ``data_parallel_size``; vLLM's ray DP backend places one TP*PP replica per
+    node-grouped bundle slice, so an engine then spans ``TP * PP * DP`` GPUs.
     """
     _assert_supported_vllm()
 
     vllm_engines = []
     # Default to the ray executor whenever an engine spans more than one GPU
-    # (cross-node TP+EP or pipeline parallelism); a lone-GPU engine uses uni.
-    # Keyed on TP*PP, not TP alone, so TP=1 with PP>1 still selects ray.
+    # (cross-node TP+EP, pipeline, or data parallelism); a lone-GPU engine uses
+    # uni. Keyed on TP*PP*DP, so TP=1 with PP>1 or DP>1 still selects ray.
     distributed_executor_backend = distributed_executor_backend or (
-        "uni" if tensor_parallel_size * pipeline_parallel_size == 1 else "ray"
+        "uni" if tensor_parallel_size * pipeline_parallel_size * data_parallel_size == 1 else "ray"
     )
     if distributed_executor_backend not in {"uni", "ray", "mp"}:
         raise ValueError(
@@ -322,7 +328,12 @@ def create_vllm_engines(
     # bundles — the ray executor, same as cross-node TP.
     if pipeline_parallel_size > 1 and distributed_executor_backend != "ray":
         raise ValueError("vLLM pipeline_parallel_size > 1 requires the 'ray' executor backend.")
-    engine_world = tensor_parallel_size * pipeline_parallel_size
+    # Data parallelism is how a rollout engine gets EP > TP (vLLM defines
+    # EP = TP * DP). vLLM's ray DP backend lays one TP*PP replica per node-grouped
+    # bundle slice, so DP (like PP) needs the ray executor and single-GPU bundles.
+    if data_parallel_size > 1 and distributed_executor_backend != "ray":
+        raise ValueError("vLLM data_parallel_size > 1 requires the 'ray' executor backend.")
+    engine_world = tensor_parallel_size * pipeline_parallel_size * data_parallel_size
     num_gpus = tensor_parallel_size if distributed_executor_backend == "mp" else int(engine_world == 1)
     worker_num_gpus = _vllm_worker_num_gpus(distributed_executor_backend, num_gpus)
 
@@ -428,6 +439,14 @@ def create_vllm_engines(
             # vLLM TP+EP hybrid: non-MoE layers stay TP-sharded across `tensor_parallel_size`
             # ranks; MoE experts are EP-distributed across the same ranks (one group per rank).
             actor_kwargs["enable_expert_parallel"] = True
+
+        if data_parallel_size > 1:
+            # vLLM EP = TP * DP: raising DP is the only way a rollout engine gets
+            # more expert-parallel groups than its TP degree (DeepSeek-V3-style
+            # TP8+DP4 -> EP32). The ray DP backend places one TP*PP replica per
+            # node-grouped bundle slice, matching the placement group above.
+            actor_kwargs["data_parallel_size"] = data_parallel_size
+            actor_kwargs["data_parallel_backend"] = "ray"
 
         if enable_return_routed_experts:
             # R3: make vLLM return the router's per-token top-k expert ids so the
