@@ -408,9 +408,10 @@ sbatch --nodes=4 examples/scripts/slurm/rl_qwen3_6_35b.sh
 Qwen3.6 RL script. The model emits a `<tool_call>` invoking
 `python_executor(code=...)`; the env runs the snippet in a sandboxed
 subprocess and feeds the captured stdout back as a `<tool_response>` turn.
-The loop runs up to `MAX_AGENT_TURNS` (default 5); the final
-`<answer>ANSWER</answer>` (or `\boxed{ANSWER}` for legacy distributions) is
-graded against the ground truth and becomes the reward.
+The loop runs up to `MAX_AGENT_TURNS` (agent default 5; the shipped Qwen3.6
+recipe raises it to 10); the final `<answer>ANSWER</answer>` (or
+`\boxed{ANSWER}` for legacy distributions) is graded against the ground truth
+and becomes the reward.
 
 ### OpenAI- / Anthropic-compatible server agent
 
