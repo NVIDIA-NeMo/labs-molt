@@ -798,9 +798,19 @@ class TrainingActor(BaseRLTrainer):
             rollout_samples, client_states, rollout_metrics, generation_time, vllm_idle_wait = payload
 
             # Batch consumed => free one token to allow generator to produce next batch.
-            self.rollout_slots.put(global_step, block=True)
+            # --train.force_sync_mode defers this until AFTER train_step (which updates the
+            # actor and refits vLLM), so the generator waits for the fresh weights before
+            # producing the next batch -> the next rollout is generated with the same
+            # weights the trainer recomputes it under (strictly on-policy). This removes the
+            # 1-step-stale rollout that inflates vllm_kl on routing-sensitive MoE
+            # checkpoints, at the cost of the generate/train overlap. Default off.
+            force_sync = getattr(self.args.train, "force_sync_mode", False)
+            if not force_sync:
+                self.rollout_slots.put(global_step, block=True)
 
             status, global_step = self.train_step(rollout_samples, global_step)
+            if force_sync:
+                self.rollout_slots.put(global_step, block=True)
             status["timing/generation"] = generation_time
             # Async idle accounting (the real "which side is wasted" signal): in the split
             # actor/vLLM topology these directly attribute the idle the reaper sees.

@@ -269,7 +269,6 @@ class BaseModel(nn.Module):
             raise TypeError(f"Unexpected {type(self).__name__} keyword argument(s): {unexpected}")
         self.temperature = temperature
         self.packing_samples = packing_samples
-        self._forward_autocast_dtype = None
         self.device_mesh = device_mesh
         mesh_dims = getattr(device_mesh, "mesh_dim_names", ()) or ()
         self.cp_mesh = device_mesh["cp"] if device_mesh is not None and "cp" in mesh_dims else None
@@ -357,11 +356,6 @@ class BaseModel(nn.Module):
                 "silently degrade throughput AND break activation-checkpoint recompute determinism. "
                 "Verify this checkpoint's `architectures` is registered if you expected the native path."
             )
-        # With fp32 master weights, autocast the forward to the compute dtype so
-        # lm_head/score inputs match the bf16 parameters.
-        if compute_dtype != torch.float32:
-            self._forward_autocast_dtype = compute_dtype
-
         # AutoModel custom drives attention/MoE through a BackendConfig and hands
         # from_pretrained "sdpa": passing "te" would also fire AutoModel's own post-init
         # TE injection (auto_model.py) on top of the backend's. HF rejects the `backend`
@@ -723,21 +717,11 @@ class BaseModel(nn.Module):
                     sequences = cp_batch["input_ids"]
                 cp_forward = True
 
-        # The fp32-master autocast wrapper is OFF by default: FSDP2's
-        # MixedPrecisionPolicy already casts every managed param to bf16 for the
-        # forward, so autocast's only marginal effect is forcing bf16 inputs into
-        # ops that deliberately compute in fp32 — notably the MoE gate
-        # (gate_precision float32), whose bf16-degraded scores flip top-k routing
-        # vs the engine's fp32 router and inflate vllm_kl on routing-sensitive
-        # MoE checkpoints. MOLT_FORWARD_AUTOCAST=1 restores the legacy wrapper.
-        autocast_ctx = (
-            torch.autocast(device_type="cuda", dtype=self._forward_autocast_dtype)
-            if self._forward_autocast_dtype is not None
-            and sequences.is_cuda
-            and os.environ.get("MOLT_FORWARD_AUTOCAST", "0") == "1"
-            else nullcontext()
-        )
-
+        # No forward-level torch.autocast: FSDP2's MixedPrecisionPolicy already
+        # casts managed params to bf16 for the forward, and an extra autocast would
+        # force the fp32-kept MoE gate (gate_precision float32) into bf16 — its
+        # degraded scores flip top-k routing vs the engine's fp32 router and inflate
+        # vllm_kl on routing-sensitive MoE checkpoints.
         forward_ctx = cp_ctx_factory()
         if cp_context_stack is not None and cp_forward:
             # AutoModel CP train context installs backward hooks, so training
@@ -761,25 +745,24 @@ class BaseModel(nn.Module):
                 replay_ctx = nullcontext()
 
         with forward_ctx:
-            with autocast_ctx:
-                # Always pass sequences as keyword `input_ids`: some VLM forwards
-                # declare `pixel_values` first positional, so a bare positional would
-                # collide with it. In the pre-embed CP path we pass inputs_embeds
-                # directly (the model auto-detects it and skips multimodal scatter).
-                forward_kwargs = dict(
-                    attention_mask=forward_attention_mask,
-                    position_ids=position_ids,
-                    **attn_kwargs,
-                    **mm_inputs,
-                )
-                if output_hidden_states:
-                    forward_kwargs["output_hidden_states"] = True
-                if cp_forward and inputs_embeds is not None:
-                    forward_kwargs["inputs_embeds"] = inputs_embeds
-                else:
-                    forward_kwargs["input_ids"] = sequences
-                with replay_ctx:
-                    output = self.model(**forward_kwargs)
+            # Always pass sequences as keyword `input_ids`: some VLM forwards
+            # declare `pixel_values` first positional, so a bare positional would
+            # collide with it. In the pre-embed CP path we pass inputs_embeds
+            # directly (the model auto-detects it and skips multimodal scatter).
+            forward_kwargs = dict(
+                attention_mask=forward_attention_mask,
+                position_ids=position_ids,
+                **attn_kwargs,
+                **mm_inputs,
+            )
+            if output_hidden_states:
+                forward_kwargs["output_hidden_states"] = True
+            if cp_forward and inputs_embeds is not None:
+                forward_kwargs["inputs_embeds"] = inputs_embeds
+            else:
+                forward_kwargs["input_ids"] = sequences
+            with replay_ctx:
+                output = self.model(**forward_kwargs)
         # AutoModel's custom MoE/LLM models (e.g. Qwen3MoeForCausalLM) return a
         # raw logits Tensor; HF returns a ModelOutput with `.logits`. Normalize.
         output = _normalize_output(output)

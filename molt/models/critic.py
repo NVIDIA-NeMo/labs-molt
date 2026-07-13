@@ -56,14 +56,16 @@ class _ValueHead(nn.Module):
 
     def __init__(self, hidden_size: int):
         super().__init__()
-        # fp32 to match the fp32 master-weight convention; bf16 compute comes from
-        # the same forward autocast the backbone uses.
+        # fp32 to match the fp32 master-weight convention; the value head is tiny,
+        # so running it in fp32 (upcasting the bf16 backbone hidden) is cheap.
         self.proj = nn.Linear(hidden_size, 1, bias=False, dtype=torch.float32)
 
     def forward(self, hidden_states):
         # Gather any TP/SP sharding (no-op for a replicated DTensor or a plain tensor).
         hidden_states = unshard_dtensor(hidden_states)
-        return self.proj(hidden_states)
+        # No forward autocast anymore, so align the bf16 backbone hidden to the
+        # fp32 value-head weight explicitly instead of relying on autocast.
+        return self.proj(hidden_states.to(self.proj.weight.dtype))
 
 
 def _resolve_hidden_size(model) -> int:

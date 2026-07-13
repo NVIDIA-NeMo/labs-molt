@@ -700,6 +700,15 @@ if __name__ == "__main__":
         help="Use vLLM pause/resume during weight sync so generation can overlap with training.",
     )
     parser.add_argument(
+        "--train.force_sync_mode",
+        action="store_true",
+        default=False,
+        help="Strictly on-policy: free the rollout slot only AFTER train_step refits vLLM, so the "
+        "next batch is generated with the same weights the trainer recomputes it under. Removes the "
+        "1-step-stale rollout that inflates vllm_kl on routing-sensitive MoE checkpoints, at the "
+        "cost of the generate/train overlap.",
+    )
+    parser.add_argument(
         "--train.routing_replay",
         action="store_true",
         default=False,

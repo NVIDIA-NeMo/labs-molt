@@ -131,7 +131,7 @@ srun \
   --ntasks="$SLURM_JOB_NUM_NODES" \
   --ntasks-per-node=1 \
   "${CONTAINER_ARGS[@]}" \
-  bash -lc "cd /molt && export MOLT_FORWARD_AUTOCAST=${MOLT_FORWARD_AUTOCAST:-0} && ${PYTHONPATH_PREFIX}torchrun \
+  bash -lc "cd /molt && ${PYTHONPATH_PREFIX}torchrun \
     --nnodes=$SLURM_JOB_NUM_NODES \
     --nproc-per-node=$GPUS_PER_NODE \
     --node-rank=\$SLURM_NODEID \

@@ -151,7 +151,7 @@ srun \
   --ntasks="$SLURM_JOB_NUM_NODES" \
   --ntasks-per-node=1 \
   "${CONTAINER_ARGS[@]}" \
-  bash -lc "cd /molt && export CUDNN_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/cudnn LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/cudnn/lib:\${LD_LIBRARY_PATH:-} PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MOLT_MOE_RESHARD_AFTER_FWD=${MOLT_MOE_RESHARD_AFTER_FWD:-1} MOLT_DEFER_GRAD_SYNC=${MOLT_DEFER_GRAD_SYNC:-1} MOLT_FORWARD_AUTOCAST=${MOLT_FORWARD_AUTOCAST:-0} MOLT_MOE_DISPATCHER=${MOLT_MOE_DISPATCHER:-hybridep} && ${PYTHONPATH_PREFIX}torchrun \
+  bash -lc "cd /molt && export CUDNN_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/cudnn LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/cudnn/lib:\${LD_LIBRARY_PATH:-} PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MOLT_MOE_RESHARD_AFTER_FWD=${MOLT_MOE_RESHARD_AFTER_FWD:-1} MOLT_DEFER_GRAD_SYNC=${MOLT_DEFER_GRAD_SYNC:-1} MOLT_MOE_DISPATCHER=${MOLT_MOE_DISPATCHER:-hybridep} && ${PYTHONPATH_PREFIX}torchrun \
     --nnodes=$SLURM_JOB_NUM_NODES \
     --nproc-per-node=$GPUS_PER_NODE \
     --node-rank=\$SLURM_NODEID \
