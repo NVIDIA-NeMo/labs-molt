@@ -81,7 +81,7 @@ def train(args):
             args.vllm.enforce_eager,
             max_len,
             args.vllm.gpu_memory_utilization,
-            "processed_logprobs" if args.algo.advantage.is_correction_enable else None,
+            "processed_logprobs" if args.algo.advantage.is_correction_level != "off" else None,
             max_images_per_prompt=getattr(args.data, "max_images_per_prompt", 0),
             mm_encoder_attn_backend=args.vllm.mm_encoder_attn_backend,
             gdn_prefill_backend=args.vllm.gdn_prefill_backend,
@@ -408,24 +408,30 @@ if __name__ == "__main__":
         default=False,
         help="disable dividing by std for advantages while keeping mean normalization",
     )
-    # Importance-sampling correction for async/off-policy rollout logprobs.
-    parser.add_argument("--algo.advantage.is_correction_enable", action="store_true", default=False)
+    # Train/rollout (FSDP-actor vs vLLM) logprob-mismatch importance-sampling correction.
+    parser.add_argument(
+        "--algo.advantage.is_correction_level",
+        type=str,
+        default="off",
+        choices=["off", "token", "seq", "geo"],
+        help="Granularity of the gated ratio: off (correction disabled), token (each token), "
+        "seq (product = exp(sum), unbiased/high-variance), geo (per-seq geometric mean = exp(mean), "
+        "balanced). seq/geo are rejection filters and require --is_correction_mode mask.",
+    )
+    parser.add_argument(
+        "--algo.advantage.is_correction_mode",
+        type=str,
+        default="mask",
+        choices=["mask", "clip", "trunc"],
+        help="Bound treatment (token level only for clip/trunc): mask (drop out-of-band units, zero "
+        "gradient), clip (clamp the weight into [low, high]), trunc (clamp only the upper tail).",
+    )
     parser.add_argument(
         "--algo.advantage.is_correction_threshold",
         type=float,
         nargs=2,
         default=[0.5, 5.0],
-        help=(
-            "Low and high thresholds for vLLM importance sampling correction. "
-            "TIS uses the high value as an upper cap; ICE-POP and seq-mask-tis use both bounds."
-        ),
-    )
-    parser.add_argument(
-        "--algo.advantage.is_correction_type",
-        type=str,
-        default="tis",
-        choices=["tis", "icepop", "seq-mask-tis"],
-        help="vLLM IS correction type: tis (token-level clamp), icepop (token-level filter), seq-mask-tis (sequence-level geom mean)",
+        help="Low and high bounds [low, high] for the off-policy IS ratio pi_train/pi_rollout.",
     )
     parser.add_argument(
         "--algo.kl.use_loss", action="store_true", default=False, help="whether to use KL loss from GRPO"
@@ -812,23 +818,23 @@ if __name__ == "__main__":
             "n_samples_per_prompt must be greater than 1 when using dynamic filtering"
         )
 
-    if not args.algo.advantage.is_correction_enable:
+    if args.algo.advantage.is_correction_level == "off":
         # The HTTP router path can't observe a mid-request weight swap, so off_policy_len is always 0
         # (no slime-style masking of stale-weight tokens). Async rollout (crosses broadcasts between
         # requests) and partial rollout (preempts mid-request at every weight sync) both then feed
         # off-policy tokens into the loss uncorrected AND unmasked -> fail fast instead of silently
-        # biasing the update. Per-token IS (is_correction_enable) is the correction that replaces it.
+        # biasing the update. Per-token IS (is_correction_level != off) is the correction that replaces it.
         if args.train.async_queue_size > 1 or args.train.partial_rollout_enable:
             raise ValueError(
                 "Off-policy rollout (--train.async_queue_size > 1 or --train.partial_rollout_enable) "
                 "produces tokens across weight broadcasts that the router path does NOT mask "
-                "(off_policy_len is always 0 over HTTP). Enable --algo.advantage.is_correction_enable "
-                "(per-token IS corrects them), or run synchronously (--train.async_queue_size 1, no "
+                "(off_policy_len is always 0 over HTTP). Set --algo.advantage.is_correction_level "
+                "(token|seq|geo) to correct them, or run synchronously (--train.async_queue_size 1, no "
                 "--train.partial_rollout_enable)."
             )
         print(
-            "[Warning] Rollout samples may be off-policy. Enable "
-            "--algo.advantage.is_correction_enable to correct rollout logprobs during training."
+            "[Warning] Rollout samples may be off-policy. Set "
+            "--algo.advantage.is_correction_level (token|seq|geo) to correct rollout logprobs during training."
         )
     elif args.train.partial_rollout_enable:
         # IS is on, so the off-policy tokens are corrected; note only that slime-style MASKING is not.

@@ -111,8 +111,7 @@ python3 -u -m molt.cli.train_rl_ray \
   --actor.dual_clip 10.0 \
   --actor.aux_loss_coef 0.000 \
   --algo.advantage.estimator reinforce_baseline \
-  --algo.advantage.is_correction_enable \
-  --algo.advantage.is_correction_type seq-mask-tis \
+  --algo.advantage.is_correction_level geo \
   --algo.advantage.is_correction_threshold 0.99 1.01 \
   --algo.kl.use_loss \
   --algo.kl.estimator k2 \

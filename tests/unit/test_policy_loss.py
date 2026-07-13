@@ -15,6 +15,7 @@
 
 import math
 
+import pytest
 import torch
 
 from molt.models import PolicyLoss
@@ -23,9 +24,9 @@ from molt.models.utils import compute_approx_kl
 
 def test_seq_mask_tis_uses_raw_token_importance_weights_for_kept_sequences():
     loss_fn = PolicyLoss(
-        enable_vllm_is_correction=True,
-        vllm_is_truncated_threshold=[0.5, 2.0],
-        vllm_is_correction_type="seq-mask-tis",
+        is_correction_threshold=[0.5, 2.0],
+        is_correction_level="geo",
+        is_correction_mode="mask",
     )
     rollout_log_probs = torch.tensor([[-math.log(3.0), math.log(3.0)]])
 
@@ -64,9 +65,9 @@ def test_force_on_policy_reinforce_still_applies_is_correction():
     logp = torch.zeros(1, 2)
     rollout = torch.tensor([[-0.1, -0.1]])  # old(0) - rollout(-0.1) = 0.1
     loss_fn = PolicyLoss(
-        enable_vllm_is_correction=True,
-        vllm_is_truncated_threshold=[0.0, 100.0],
-        vllm_is_correction_type="tis",
+        is_correction_threshold=[0.0, 100.0],
+        is_correction_level="token",
+        is_correction_mode="trunc",
     )
 
     _, _, _, _, vllm_kl, _ = loss_fn(
@@ -82,9 +83,9 @@ def test_force_on_policy_reinforce_still_applies_is_correction():
 
 def test_tis_caps_large_importance_weights_without_flooring_small_weights():
     loss_fn = PolicyLoss(
-        enable_vllm_is_correction=True,
-        vllm_is_truncated_threshold=[0.5, 2.0],
-        vllm_is_correction_type="tis",
+        is_correction_threshold=[0.5, 2.0],
+        is_correction_level="token",
+        is_correction_mode="trunc",
     )
 
     loss, *_ = loss_fn(
@@ -100,9 +101,9 @@ def test_tis_caps_large_importance_weights_without_flooring_small_weights():
 
 def test_icepop_importance_weights_do_not_nan_on_overflow():
     loss_fn = PolicyLoss(
-        enable_vllm_is_correction=True,
-        vllm_is_truncated_threshold=[0.5, 2.0],
-        vllm_is_correction_type="icepop",
+        is_correction_threshold=[0.5, 2.0],
+        is_correction_level="token",
+        is_correction_mode="mask",
     )
 
     loss, *_ = loss_fn(
@@ -161,9 +162,9 @@ def test_policy_loss_empty_action_mask_returns_zero():
 
 def test_tis_caps_overflowed_importance_weights_at_high_threshold():
     loss_fn = PolicyLoss(
-        enable_vllm_is_correction=True,
-        vllm_is_truncated_threshold=[0.5, 2.0],
-        vllm_is_correction_type="tis",
+        is_correction_threshold=[0.5, 2.0],
+        is_correction_level="token",
+        is_correction_mode="trunc",
     )
 
     loss, *_ = loss_fn(
@@ -179,9 +180,9 @@ def test_tis_caps_overflowed_importance_weights_at_high_threshold():
 
 def test_seq_mask_tis_drops_overflowed_importance_weight_without_nan():
     loss_fn = PolicyLoss(
-        enable_vllm_is_correction=True,
-        vllm_is_truncated_threshold=[0.5, 2.0],
-        vllm_is_correction_type="seq-mask-tis",
+        is_correction_threshold=[0.5, 2.0],
+        is_correction_level="geo",
+        is_correction_mode="mask",
     )
 
     loss, *_, is_filter_ratio = loss_fn(
@@ -198,9 +199,9 @@ def test_seq_mask_tis_drops_overflowed_importance_weight_without_nan():
 
 def test_policy_loss_sanitizes_nonfinite_vllm_kl_metric():
     loss_fn = PolicyLoss(
-        enable_vllm_is_correction=True,
-        vllm_is_truncated_threshold=[0.5, 2.0],
-        vllm_is_correction_type="tis",
+        is_correction_threshold=[0.5, 2.0],
+        is_correction_level="token",
+        is_correction_mode="trunc",
     )
 
     loss, *_, vllm_kl, is_filter_ratio = loss_fn(
@@ -214,6 +215,58 @@ def test_policy_loss_sanitizes_nonfinite_vllm_kl_metric():
     torch.testing.assert_close(loss, torch.tensor(0.0))
     assert torch.isfinite(vllm_kl)
     assert torch.isfinite(is_filter_ratio)
+
+
+def test_token_clip_clamps_each_token_weight_without_dropping():
+    # token x clip: keep every token, clamp its IS weight into [low, high]
+    # (contrast with token x mask, which zeros out-of-band tokens).
+    loss_fn = PolicyLoss(
+        is_correction_threshold=[0.5, 2.0],
+        is_correction_level="token",
+        is_correction_mode="clip",
+    )
+    # token ratios pi_train/pi_rollout = [3, 1/3]  (old=0, rollout=[-log3, +log3])
+    loss, *_, is_filter_ratio = loss_fn(
+        torch.zeros(1, 2),
+        torch.zeros(1, 2),
+        torch.ones(1, 2),
+        action_mask=torch.ones(1, 2, dtype=torch.bool),
+        rollout_log_probs=torch.tensor([[-math.log(3.0), math.log(3.0)]]),
+    )
+    # base per-token loss -1; weights clamp to [2.0, 0.5] -> mean(-(2.0+0.5)/2)
+    torch.testing.assert_close(loss, torch.tensor(-(2.0 + 0.5) / 2.0))
+    torch.testing.assert_close(is_filter_ratio, torch.tensor(1.0))  # both clamped, none dropped
+
+
+def test_level_off_disables_correction_even_with_rollout_logprobs():
+    # level="off" (default) folds in the old enable=False: no IS weight is applied
+    # even when rollout_log_probs are passed, and the vllm_kl / is_filter metrics
+    # stay None. Loss is the plain policy loss (ratio 1 -> -advantage).
+    loss_fn = PolicyLoss()  # default is_correction_level="off"
+    loss, *_, vllm_kl, is_filter_ratio = loss_fn(
+        torch.zeros(1, 2),
+        torch.zeros(1, 2),
+        torch.ones(1, 2),
+        action_mask=torch.ones(1, 2, dtype=torch.bool),
+        rollout_log_probs=torch.tensor([[-math.log(3.0), math.log(3.0)]]),
+    )
+    torch.testing.assert_close(loss, torch.tensor(-1.0))  # no IS scaling applied
+    assert vllm_kl is None
+    assert is_filter_ratio is None
+
+
+@pytest.mark.parametrize("level", ["seq", "geo"])
+@pytest.mark.parametrize("mode", ["clip", "trunc"])
+def test_sequence_geometric_levels_only_allow_mask(level, mode):
+    # seq/geo are per-sequence rejection FILTERS (survivors keep their per-token IS
+    # weight), so clip/trunc — which would replace that with one clamped sequence
+    # weight — are rejected at construction.
+    with pytest.raises(ValueError, match="only supports is_correction_mode=mask"):
+        PolicyLoss(
+            is_correction_threshold=[0.5, 2.0],
+            is_correction_level=level,
+            is_correction_mode=mode,
+        )
 
 
 def test_compute_approx_kl_sanitizes_equal_negative_infinity_logprobs():

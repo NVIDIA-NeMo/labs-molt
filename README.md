@@ -157,7 +157,7 @@ RL on vLLM. Read every line that touches your gradients, in plain PyTorch.
 | Estimators | `reinforce`, `reinforce_baseline`, `rloo`, `grpo`, `dr_grpo`, `gae` (PPO), `on_policy_distill` |
 | PPO critic | `--algo.advantage.estimator gae` adds a value model: its own Ray group (`CriticModelActor`), colocated on the actor's GPUs by default or disaggregatable, GAE advantages (`--algo.advantage.lam`) + clipped value loss (`--critic.value_clip`), own optimizer/LR (`--critic.adam.lr`) and resumable `_critic` checkpoint. Built on `NeMoAutoModelForCausalLM` + a scalar value head, so it keeps the native TP / EP / CP path |
 | Distillation | On-policy distillation — per-token reverse KL to a frozen teacher, via `--algo.advantage.estimator on_policy_distill` + `--ref.model_name_or_path` |
-| IS correction | `tis`, `icepop`, `seq-mask-tis` (off-policy / async rollout) |
+| IS correction | Train/rollout logprob-mismatch correction for off-policy / async rollout: `is_correction_level {off,token,seq,geo}` × `is_correction_mode {mask,clip,trunc}` (covers TIS, IcePop, seq-mask-tis; see *IS correction* below) |
 | KL | Optional reference workers when `--algo.kl.init_coef > 0` (the reference doubles as the distillation teacher) |
 
 ### MoE routing stability
@@ -166,6 +166,38 @@ RL on vLLM. Read every line that touches your gradients, in plain PyTorch.
 |---|---|
 | Router replay (R3) | `--train.routing_replay` — vLLM's per-token top-k selection replayed in the training forward; details in the *MoE routing stability* section under Scaling Knobs |
 | Router freeze | `--actor.freeze_moe_router` holds the gate/router weights fixed so vLLM and the actor keep routing tokens to the same experts. Stabilizes MoE RL / distillation and shrinks the same rollout-vs-train logprob gap the IS-correction filters address — a router that drifts between refits is a large source of that gap |
+
+### IS correction (train/rollout logprob mismatch)
+
+Async and partial rollout make the FSDP actor's recomputed `pi_train` diverge from
+vLLM's gen-time `pi_rollout` (different kernels, plus a mid-request weight swap the
+HTTP router can't observe). Molt corrects the resulting off-policy update with the
+per-token importance ratio `pi_train / pi_rollout`, gated by two knobs:
+
+- `--algo.advantage.is_correction_level {off, token, seq, geo}` — granularity of the
+  gated ratio. `off` disables correction; `token` gates each token's own ratio;
+  `seq`/`geo` aggregate a sequence's ratios (`exp(sum)` / `exp(mean)`) into a
+  per-sequence **rejection filter** (kept sequences still carry their per-token IS
+  weight), so they require `mode mask`.
+- `--algo.advantage.is_correction_mode {mask, clip, trunc}` — treatment of a unit
+  outside the band. `mask` drops it (zero gradient); `clip` clamps its weight into
+  the band; `trunc` clamps only the upper tail.
+- `--algo.advantage.is_correction_threshold LOW HIGH` — the `[low, high]` band on the
+  ratio (recipes use a tight `0.99 1.01`).
+
+The named schemes and their prior art:
+
+| Flags | Scheme | Prior art |
+|---|---|---|
+| `level token mode trunc` | truncated IS | TIS |
+| `level token mode mask` | token masking | IcePop |
+| `level token mode clip` | token clip | per-token weight clamp |
+| `level geo mode mask` | seq-mask-tis (recipe default) | GSPO-style sequence ratio used as a filter |
+| `level seq mode mask` | product-ratio reject | sequence log-ratio sum |
+
+References: **TIS** (truncated importance sampling of the train/infer ratio), **IcePop**
+(token-level masking of out-of-band ratios), and **GSPO** (Qwen — sequence-level importance
+ratio, which motivates the `seq`/`geo` aggregation).
 
 ## 📦 Installation
 
@@ -242,7 +274,7 @@ Common RL switches:
 | Decouple rollout and training | `--train.async_queue_size 2` |
 | Keep rollout alive during sync | `--train.partial_rollout_enable` |
 | Filter by agent scores | `--algo.dynamic_filtering_enable --algo.dynamic_filtering_range 0.0 1.0` |
-| Correct async rollout logprobs | `--algo.advantage.is_correction_enable --algo.advantage.is_correction_type seq-mask-tis` |
+| Correct async rollout logprobs | `--algo.advantage.is_correction_level geo` (seq-mask-tis; token-level adds `--algo.advantage.is_correction_mode clip/trunc/mask`) |
 | Freeze MoE routing (stabilize MoE RL) | `--actor.freeze_moe_router` |
 | On-policy distillation | `--algo.advantage.estimator on_policy_distill --ref.model_name_or_path /path/to/teacher` |
 

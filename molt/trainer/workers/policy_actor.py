@@ -90,13 +90,13 @@ class PolicyTrainer:
             clip_eps_low=self.args.actor.eps_clip_low_high[0],
             clip_eps_high=self.args.actor.eps_clip_low_high[1],
             dual_clip=self.args.actor.dual_clip,
-            enable_vllm_is_correction=self.args.algo.advantage.is_correction_enable,
-            vllm_is_truncated_threshold=(
+            is_correction_level=self.args.algo.advantage.is_correction_level,
+            is_correction_mode=self.args.algo.advantage.is_correction_mode,
+            is_correction_threshold=(
                 self.args.algo.advantage.is_correction_threshold
-                if self.args.algo.advantage.is_correction_enable
+                if self.args.algo.advantage.is_correction_level != "off"
                 else None
             ),
-            vllm_is_correction_type=self.args.algo.advantage.is_correction_type,
         )
 
         # Add the MoE router load-balancing aux loss only when its coefficient is set.

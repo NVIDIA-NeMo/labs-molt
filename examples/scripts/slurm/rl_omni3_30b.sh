@@ -429,8 +429,7 @@ RL_ARGS=(
   --actor.entropy_coef "${ENTROPY_COEF:-0.0}"
   --actor.freezing_steps "${FREEZING_STEPS:-0}"
   --algo.advantage.estimator "${ESTIMATOR:-reinforce_baseline}"
-  --algo.advantage.is_correction_enable
-  --algo.advantage.is_correction_type seq-mask-tis
+  --algo.advantage.is_correction_level geo
   --algo.advantage.is_correction_threshold "${IS_LOW:-0.95}" "${IS_HIGH:-1.05}"
   --algo.kl.use_loss
   --algo.kl.estimator k2

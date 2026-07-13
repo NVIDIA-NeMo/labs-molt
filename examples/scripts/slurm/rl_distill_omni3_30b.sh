@@ -356,8 +356,7 @@ RL_ARGS=(
   # override with --algo.kl.init_coef.
   --algo.advantage.estimator on_policy_distill
   # TIS still matters: tokens are sampled by vLLM but scored with FSDP-recomputed logprobs.
-  --algo.advantage.is_correction_enable
-  --algo.advantage.is_correction_type seq-mask-tis
+  --algo.advantage.is_correction_level geo
   --algo.advantage.is_correction_threshold "${IS_LOW:-0.5}" "${IS_HIGH:-2.0}"
   --reward.clip_range -1 1
   --ckpt.output_dir "$SAVE_ROOT/hf"

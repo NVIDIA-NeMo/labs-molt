@@ -424,8 +424,7 @@ RL_ARGS=(
   --actor.aux_loss_coef "$MOE_AUX_LOSS_COEF"
   --actor.entropy_coef "${ENTROPY_COEF:-0.0}"
   --algo.advantage.estimator reinforce_baseline
-  --algo.advantage.is_correction_enable
-  --algo.advantage.is_correction_type seq-mask-tis
+  --algo.advantage.is_correction_level geo
   --algo.advantage.is_correction_threshold "${IS_LOW:-0.99}" "${IS_HIGH:-1.01}"
   --algo.kl.use_loss
   --algo.kl.estimator k2

@@ -190,9 +190,9 @@ class PolicyLoss(nn.Module):
         clip_eps_high: float = 0.2,
         dual_clip: float = None,
         token_level_loss: bool = True,
-        enable_vllm_is_correction: bool = False,
-        vllm_is_truncated_threshold: list = None,
-        vllm_is_correction_type: str = "tis",
+        is_correction_threshold: list = None,
+        is_correction_level: str = "off",
+        is_correction_mode: str = "mask",
         loss_agg_mode: str = "token-mean",
     ) -> None:
         super().__init__()
@@ -200,18 +200,38 @@ class PolicyLoss(nn.Module):
         self.clip_eps_high = clip_eps_high
         self.token_level_loss = token_level_loss
         self.dual_clip = dual_clip
-        self.enable_vllm_is_correction = enable_vllm_is_correction
-        self.vllm_is_truncated_threshold = vllm_is_truncated_threshold
-        self.vllm_is_correction_type = vllm_is_correction_type
+        # Train/rollout (FSDP-actor vs vLLM) logprob-mismatch correction, applied to
+        # the per-token off-policy IS ratio pi_train/pi_rollout. Two knobs:
+        #   is_correction_level: granularity of the ratio that gets gated —
+        #     off   -> correction disabled
+        #     token -> each token's own ratio (robust to a single outlier token)
+        #     seq   -> product of a sequence's token ratios = exp(sum) (unbiased, high var)
+        #     geo   -> geometric mean = exp(mean) (per-seq, balanced bias/variance)
+        #   is_correction_mode: what to do with a unit outside [low, high] bounds —
+        #     mask  -> drop it (zero gradient); keep the per-token IS weight otherwise
+        #     clip  -> keep it, clamp its weight into [low, high]
+        #     trunc -> keep it, clamp only the upper tail (small weights unchanged)
+        self.is_correction_threshold = is_correction_threshold
+        self.is_correction_level = is_correction_level
+        self.is_correction_mode = is_correction_mode
         self.loss_agg_mode = loss_agg_mode
 
         # Dual-clip policy objective: https://arxiv.org/pdf/1912.09729
         if dual_clip is not None:
             assert dual_clip > 1.0, f"dual_clip must be > 1.0, got {dual_clip}"
 
-        if self.vllm_is_correction_type not in {"tis", "icepop", "seq-mask-tis"}:
+        if self.is_correction_level not in {"off", "token", "seq", "geo"}:
+            raise ValueError(f"is_correction_level must be off/token/seq/geo, got {self.is_correction_level}")
+        if self.is_correction_mode not in {"mask", "clip", "trunc"}:
+            raise ValueError(f"is_correction_mode must be mask/clip/trunc, got {self.is_correction_mode}")
+        # seq/geo aggregate the ratio into a per-sequence GATE; survivors keep their
+        # per-token IS weight, so only mask (reject out-of-band sequences) is meaningful.
+        # clip/trunc would replace the per-token weight with one clamped sequence weight,
+        # discarding the per-token IS — reject that combination.
+        if self.is_correction_level in {"seq", "geo"} and self.is_correction_mode != "mask":
             raise ValueError(
-                f"Invalid vllm_is_correction_type: {self.vllm_is_correction_type}, must be one of tis/icepop/seq-mask-tis"
+                f"is_correction_level={self.is_correction_level} only supports is_correction_mode=mask "
+                f"(seq/geo are rejection filters, not per-token weights); got mode={self.is_correction_mode}"
             )
 
     def forward(
@@ -254,38 +274,56 @@ class PolicyLoss(nn.Module):
 
         vllm_kl = None
         is_filter_ratio = None
-        if self.enable_vllm_is_correction:
+        if self.is_correction_level != "off":
             if rollout_log_probs is None:
-                raise ValueError("rollout_log_probs is required when vLLM importance sampling correction is enabled")
-            low_threshold, high_threshold = self.vllm_is_truncated_threshold
+                raise ValueError("rollout_log_probs is required when IS correction is enabled")
+            low, high = self.is_correction_threshold
+            # per-token off-policy log-ratio  log(pi_train / pi_rollout)
             is_log_ratio = torch.nan_to_num(
                 old_log_probs.float() - rollout_log_probs.float(),
                 nan=0.0,
                 posinf=log_ratio_limit,
                 neginf=-log_ratio_limit,
             ).clamp(min=-log_ratio_limit, max=log_ratio_limit)
-            vllm_is_ratio = torch.exp(is_log_ratio).detach()
-            if self.vllm_is_correction_type == "icepop":
-                # ICEPOP: token-level filtering (set coefficients outside the interval to 0)
-                mask = (vllm_is_ratio >= low_threshold) & (vllm_is_ratio <= high_threshold)
-                loss = torch.where(mask, vllm_is_ratio * loss, torch.zeros_like(loss))
-                is_filter_ratio = 1.0 - masked_mean(mask.float(), action_mask, dim=None)
-            elif self.vllm_is_correction_type == "seq-mask-tis":
-                seq_log_ratio = masked_mean(is_log_ratio, action_mask, dim=-1)
-                seq_is = torch.exp(seq_log_ratio)
-                seq_mask = (seq_is >= low_threshold) & (seq_is <= high_threshold)
-                loss = torch.where(seq_mask.unsqueeze(-1), vllm_is_ratio * loss, torch.zeros_like(loss))
-                # Fraction of sequences dropped by per-sequence geom-mean threshold.
-                is_filter_ratio = 1.0 - seq_mask.float().mean()
+            token_ratio = torch.exp(is_log_ratio).detach()
+
+            # (1) per-UNIT off-policy ratio (unit = token, or per-sequence for
+            # seq/geo — kept at [B, 1] so the filter metric can stay per-sequence).
+            # is_correction_level selects the aggregation.
+            if self.is_correction_level == "token":
+                unit_ratio = token_ratio
+            elif self.is_correction_level == "seq":
+                # product of a sequence's token ratios = exp(sum of log-ratios).
+                seq_log = (is_log_ratio * action_mask.float()).sum(dim=-1, keepdim=True)
+                unit_ratio = torch.exp(seq_log.clamp(min=-log_ratio_limit, max=log_ratio_limit))
+            else:  # "geo" — per-sequence geometric mean = exp(mean of log-ratios).
+                seq_log = masked_mean(is_log_ratio, action_mask, dim=-1).unsqueeze(-1)
+                unit_ratio = torch.exp(seq_log)
+
+            # (2) gate the per-unit ratio (is_correction_mode) -> per-token coefficient
+            # + per-unit filtered flag.
+            if self.is_correction_mode == "mask":
+                # Drop out-of-band units; weight the survivors by their per-token ratio.
+                keep = (unit_ratio >= low) & (unit_ratio <= high)
+                coef = torch.where(keep.expand_as(token_ratio), token_ratio, torch.zeros_like(token_ratio))
+                unit_filtered = ~keep
+            elif self.is_correction_mode == "clip":
+                # Keep every unit, clamp its weight into [low, high] (applied per-token).
+                coef = unit_ratio.clamp(min=low, max=high).expand_as(token_ratio)
+                unit_filtered = (unit_ratio < low) | (unit_ratio > high)
+            else:  # "trunc" — cap only the upper tail; small weights unchanged.
+                coef = unit_ratio.clamp(max=high).expand_as(token_ratio)
+                unit_filtered = unit_ratio > high
+
+            loss = coef * loss
+            # Filter fraction reported at the unit's own granularity: per (masked)
+            # token for token-level, per sequence for seq/geo (the latter matches the
+            # original seq-mask-tis: unit_filtered.mean() == 1 - seq_mask.mean()).
+            if self.is_correction_level == "token":
+                is_filter_ratio = masked_mean(unit_filtered.float(), action_mask, dim=None)
             else:
-                # TIS truncation semantics: cap large off-policy weights, but
-                # keep small weights small instead of
-                # raising them to the ICE-POP lower bound.
-                too_large = vllm_is_ratio > high_threshold
-                vllm_is_ratio = vllm_is_ratio.clamp(max=high_threshold)
-                loss = vllm_is_ratio * loss
-                # Tokens whose IS ratio exceeded the upper cap and got clamped.
-                is_filter_ratio = masked_mean(too_large.float(), action_mask, dim=None)
+                is_filter_ratio = unit_filtered.float().mean()
+
             vllm_logprob_diff = torch.nan_to_num(
                 rollout_log_probs.float() - old_log_probs.float(),
                 nan=0.0,
