@@ -679,6 +679,12 @@ class GenerateSamplesActor:
                         "temperature": self.args.eval.temperature,
                         "n_samples_per_prompt": self.args.eval.n_samples_per_prompt,
                     }
+                    # Independent eval sampling: override only what the user set for eval;
+                    # unset knobs fall back to the rollout values already in generate_kwargs.
+                    if self.args.eval.top_p is not None:
+                        eval_kwargs["top_p"] = self.args.eval.top_p
+                    if self.args.eval.max_new_tokens is not None:
+                        eval_kwargs["max_new_tokens"] = self.args.eval.max_new_tokens
                     # Under partial rollout the rollout path (below) deliberately
                     # skips vllm_lock so the trainer's broadcast_to_vllm refit can
                     # interleave via pause/resume. Eval must follow the same
@@ -699,18 +705,31 @@ class GenerateSamplesActor:
                     self.rollout_queue.put(("eval", global_step, eval_metrics), block=True)
                     continue
 
-                if not self._partial_rollout:
-                    ray.get(self.vllm_lock.acquire.remote())
-                try:
-                    t0 = time.time()
-                    rollout_samples, rollout_metrics, prompts_consumed, is_exhausted = (
-                        self.samples_generator.generate_samples(**self.generate_kwargs)
-                    )
-                    generation_time = time.time() - t0
-                    total_consumed_prompts += prompts_consumed
-                finally:
+                if self.args.train.rollout_replay_dir:
+                    # Debug: replay a dumped rollout batch (train-only) to iterate on the
+                    # training/refit path without regenerating; accounting is stubbed.
+                    replay_path = os.path.join(self.args.train.rollout_replay_dir, f"rollout_step{global_step}.pt")
+                    rollout_samples = torch.load(replay_path, weights_only=False)
+                    rollout_metrics, is_exhausted, generation_time = {}, False, 0.0
+                    logger.info(f"[rollout_replay] loaded {len(rollout_samples)} samples from {replay_path}")
+                else:
                     if not self._partial_rollout:
-                        ray.get(self.vllm_lock.release.remote())
+                        ray.get(self.vllm_lock.acquire.remote())
+                    try:
+                        t0 = time.time()
+                        rollout_samples, rollout_metrics, prompts_consumed, is_exhausted = (
+                            self.samples_generator.generate_samples(**self.generate_kwargs)
+                        )
+                        generation_time = time.time() - t0
+                        total_consumed_prompts += prompts_consumed
+                    finally:
+                        if not self._partial_rollout:
+                            ray.get(self.vllm_lock.release.remote())
+                    if self.args.train.rollout_dump_dir and rollout_samples:
+                        os.makedirs(self.args.train.rollout_dump_dir, exist_ok=True)
+                        dump_path = os.path.join(self.args.train.rollout_dump_dir, f"rollout_step{global_step}.pt")
+                        torch.save(rollout_samples, dump_path)
+                        logger.info(f"[rollout_dump] wrote {len(rollout_samples)} samples to {dump_path}")
 
                 if rollout_samples:
                     client_states = {

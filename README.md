@@ -277,6 +277,9 @@ Common RL switches:
 | Correct async rollout logprobs | `--algo.advantage.is_correction_level geo` (seq-mask-tis; token-level adds `--algo.advantage.is_correction_mode clip/trunc/mask`) |
 | Freeze MoE routing (stabilize MoE RL) | `--actor.freeze_moe_router` |
 | On-policy distillation | `--algo.advantage.estimator on_policy_distill --ref.model_name_or_path /path/to/teacher` |
+| Independent eval sampling | `--eval.temperature`, `--eval.top_p`, `--eval.max_new_tokens`, `--eval.n_samples_per_prompt` (unset ones fall back to rollout) |
+| Dump / replay a rollout batch | `--train.rollout_dump_dir <dir>` then `--train.rollout_replay_dir <dir>` re-runs training on it without regenerating |
+| Audit weight-refit coverage | `--train.verify_refit` warns which vLLM params a broadcast left stale |
 
 ## 🤖 Agent Contract
 
