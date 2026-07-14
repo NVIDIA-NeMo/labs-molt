@@ -285,6 +285,64 @@ def test_run_turn_replays_retried_turn_idempotently(monkeypatch):
     assert len(session.trajectories[0].action_ranges) == 1 and len(tp.calls) == 1
 
 
+class _FlakyTransport(_FakeTransport):
+    """Raises on the listed 0-indexed generate calls (a transient engine 500 the stock SDK retries)
+    WITHOUT consuming an action, so a retry hits the next call."""
+
+    def __init__(self, actions, fail_calls):
+        super().__init__(actions)
+        self.fail_calls = set(fail_calls)
+        self._n = 0
+
+    async def generate(self, prompt_token_ids, sampling_params, multi_modal_data=None, session_id=None):
+        c, self._n = self._n, self._n + 1
+        if c in self.fail_calls:
+            raise RuntimeError("transient engine 500")
+        return await super().generate(prompt_token_ids, sampling_params, multi_modal_data, session_id)
+
+
+def test_turn1_generate_failure_then_retry_is_clean(monkeypatch):
+    # A mid-turn generate failure must leave the session untouched so the stock client's retry re-runs
+    # cleanly — no half-built segment (which on turn 1 would crash the extends check on len(None)).
+    _patch_prompts(monkeypatch, [[1, 2, 3], [1, 2, 3]])  # turn 1 tokenizes on the failed try AND the retry
+    tp = _FlakyTransport([_act([90], [-0.1])], fail_calls={0})
+    state = ChatServerState(tp, _proc(), "policy", 1000, _sampling())
+    state.open("sid", "P", "lab", None)
+    session = state.sessions["sid"]
+    with pytest.raises(RuntimeError):
+        asyncio.run(_run_turn(state, session, _MSG))
+    assert session.trajectories == []  # failed generate left NO half-built segment
+    action, _ = asyncio.run(_run_turn(state, session, _MSG))  # retry: must not raise TypeError
+    assert action == "ACT" and len(session.trajectories) == 1
+    assert session.trajectories[0].observation_tokens == [1, 2, 3, 90]
+
+
+def test_continuation_generate_failure_then_retry_no_double_append(monkeypatch):
+    # A continuation whose generate fails must not leave its delta half-appended; the retry appends it
+    # exactly once (else the trained context would carry the tool feedback twice).
+    _patch_prompts(monkeypatch, [[1, 2, 3]])
+    monkeypatch.setattr(cs, "_tokenize_feedback", lambda proc, text, imgs, traj, ml: [50, 51])
+    tp = _FlakyTransport([_act([90], [-0.1]), _act([91], [-0.2])], fail_calls={1})  # turn-2 first generate fails
+    state = ChatServerState(tp, _proc(), "policy", 1000, _sampling())
+    state.open("sid", "P", "lab", None)
+    session = state.sessions["sid"]
+    asyncio.run(_run_turn(state, session, _MSG))  # turn 1 ok
+    traj = session.trajectories[0]
+    msgs2 = {
+        "messages": [
+            {"role": "user", "content": "P"},
+            {"role": "assistant", "content": "ACT"},
+            {"role": "user", "content": "obs"},
+        ]
+    }
+    with pytest.raises(RuntimeError):
+        asyncio.run(_run_turn(state, session, msgs2))
+    assert traj.observation_tokens == [1, 2, 3, 90]  # delta NOT appended on the failed attempt
+    asyncio.run(_run_turn(state, session, msgs2))  # retry
+    assert traj.observation_tokens == [1, 2, 3, 90, 50, 51, 91]  # delta + action appended exactly once
+    assert len(session.trajectories) == 1 and traj.action_ranges == [(3, 4), (6, 7)]
+
+
 def test_run_turn_ends_truncated_on_context_overflow(monkeypatch):
     _patch_prompts(monkeypatch, [list(range(5000))])
     state, tp = _state([_act([90], [-0.1])], max_length=100)
