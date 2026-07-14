@@ -16,9 +16,11 @@ Ray · vLLM · NVIDIA AutoModel — the smallest PyTorch-native stack for
 ![vLLM](https://img.shields.io/badge/Rollout-vLLM-7c3aed?style=flat-square)
 ![Ray](https://img.shields.io/badge/Runtime-Ray-028CF0?style=flat-square)
 ![RL code](https://img.shields.io/badge/RL_code-~8.6K_LOC-10b981?style=flat-square)
+[![Tech Report](https://img.shields.io/badge/Tech_Report-ResearchGate-00CCBB?style=flat-square)](https://www.researchgate.net/publication/409325071_Molt_A_Scalable_PyTorch-Native_Training_Framework_for_Agentic_Reinforcement_Learning)
 
 <br/>
 
+[**Paper**](https://www.researchgate.net/publication/409325071_Molt_A_Scalable_PyTorch-Native_Training_Framework_for_Agentic_Reinforcement_Learning) ·
 [**Architecture**](#-architecture) ·
 [**Why Molt**](#-why-molt) ·
 [**Quick Start**](#-quick-start) ·
