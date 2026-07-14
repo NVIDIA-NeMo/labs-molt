@@ -28,7 +28,11 @@ import torch
 
 from molt.agents.base import Trajectory
 from molt.models.base import BaseModel
-from molt.trainer.algorithm.experience import Experience, make_experience_batch, remove_padding_in_sequences
+from molt.trainer.algorithm.experience import (
+    Experience,
+    make_experience_batch,
+    remove_padding_in_sequences,
+)
 
 L, K = 3, 2  # MoE layers, top-k
 
@@ -234,3 +238,66 @@ def test_build_routing_targets_cp_pads_with_sentinel():
         assert targets[layer].shape == (2, K)
         assert targets[layer][0, 0].item() == 10 * layer + 2  # global pos 1 (real)
         assert (targets[layer][1] == -1).all()  # global pos 2 (pad -> sentinel)
+
+
+def test_make_experience_batch_mixed_none_routed_experts():
+    # A batch mixing a captured-routing sample with an unrouted (None) one must neither
+    # silently drop the batch's routing (leading None -> first-item dispatch returned None)
+    # nor crash on None.size(-1) (trailing None). The None sample becomes an all-(-1)
+    # sentinel block: natural routing on every token, i.e. exactly "no captured routing".
+    routed = torch.zeros(L, K, 3, dtype=torch.int16)
+    have = Experience(sequences=torch.tensor([1, 2, 3]), attention_mask=torch.tensor([1, 1, 1]), routed_experts=routed)
+    missing = Experience(
+        sequences=torch.tensor([4, 5, 6]), attention_mask=torch.tensor([1, 1, 1]), routed_experts=None
+    )
+
+    trailing = make_experience_batch([have, missing])  # trailing None used to crash
+    assert trailing.routed_experts.shape == (2, L, K, 3)
+    assert torch.equal(trailing.routed_experts[0], routed)
+    assert (trailing.routed_experts[1] == -1).all()
+
+    leading = make_experience_batch([missing, have])  # leading None used to drop the batch's routing
+    assert leading.routed_experts.shape == (2, L, K, 3)
+    assert (leading.routed_experts[0] == -1).all()
+    assert torch.equal(leading.routed_experts[1], routed)
+
+
+def test_make_experience_batch_none_routed_experts_longest_stays_seq_aligned():
+    # The unrouted (None) sample is the LONGEST: its synthesized sentinel must carry its own
+    # sequence length, or routed_experts would pad to a shorter seq dim than `sequences` and
+    # desync from the token axis the training forward replays against.
+    have = Experience(
+        sequences=torch.tensor([1, 2]),
+        attention_mask=torch.tensor([1, 1]),
+        routed_experts=torch.zeros(L, K, 2, dtype=torch.int16),
+    )
+    missing = Experience(sequences=torch.tensor([3, 4, 5, 6]), attention_mask=torch.tensor([1, 1, 1, 1]))
+    batch = make_experience_batch([have, missing])
+
+    assert batch.sequences.shape == (2, 4)
+    assert batch.routed_experts.shape == (2, L, K, 4)  # seq dim matches sequences, not the routed sample's 2
+    assert (batch.routed_experts[1] == -1).all()
+
+
+def test_make_experience_batch_all_none_routed_experts_stays_none():
+    a = Experience(sequences=torch.tensor([1, 2]), attention_mask=torch.tensor([1, 1]), routed_experts=None)
+    b = Experience(sequences=torch.tensor([3, 4]), attention_mask=torch.tensor([1, 1]), routed_experts=None)
+    assert make_experience_batch([a, b]).routed_experts is None
+
+
+def test_concat_experiences_mixed_none_routed_experts():
+    # The make_experience micro-batch path (concat_experiences over single-sample (1, ...)
+    # experiences) hits the same first-item dispatch. A None among tensors must merge, seq-
+    # aligned with sequences and right-padded by the -1 sentinel, not drop the batch or crash.
+    routed = torch.zeros(1, L, K, 2, dtype=torch.int16)
+    have = Experience(sequences=torch.tensor([[1, 2]]), attention_mask=torch.tensor([[1, 1]]), routed_experts=routed)
+    missing = Experience(  # leading None AND the longest sequence
+        sequences=torch.tensor([[3, 4, 5]]), attention_mask=torch.tensor([[1, 1, 1]]), routed_experts=None
+    )
+
+    merged = Experience.concat_experiences([missing, have], pad_token_id=0)
+    assert merged.sequences.shape == (2, 3)
+    assert merged.routed_experts.shape == (2, L, K, 3)  # seq dim tracks sequences
+    assert (merged.routed_experts[0] == -1).all()  # unrouted sample -> natural routing everywhere
+    assert (merged.routed_experts[1, :, :, :2] == 0).all()  # captured rows preserved
+    assert (merged.routed_experts[1, :, :, 2] == -1).all()  # its pad tail -> sentinel
