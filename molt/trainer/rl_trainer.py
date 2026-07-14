@@ -706,12 +706,18 @@ class GenerateSamplesActor:
                     continue
 
                 if self.args.train.rollout_replay_dir:
-                    # Debug: replay a dumped rollout batch (train-only) to iterate on the
-                    # training/refit path without regenerating; accounting is stubbed.
+                    # Debug: replay dumped rollout batches (train-only) to iterate on the
+                    # training/refit path without regenerating. When the dumps run out, report
+                    # exhaustion so the normal end-of-data path (below) stops the run cleanly.
                     replay_path = os.path.join(self.args.train.rollout_replay_dir, f"rollout_step{global_step}.pt")
-                    rollout_samples = torch.load(replay_path, weights_only=False)
-                    rollout_metrics, is_exhausted, generation_time = {}, False, 0.0
-                    logger.info(f"[rollout_replay] loaded {len(rollout_samples)} samples from {replay_path}")
+                    rollout_metrics, prompts_consumed, generation_time = {}, 0, 0.0
+                    is_exhausted = not os.path.exists(replay_path)
+                    rollout_samples = None if is_exhausted else torch.load(replay_path, weights_only=False)
+                    logger.info(
+                        f"[rollout_replay] exhausted at {replay_path}"
+                        if is_exhausted
+                        else f"[rollout_replay] loaded {len(rollout_samples)} samples from {replay_path}"
+                    )
                 else:
                     if not self._partial_rollout:
                         ray.get(self.vllm_lock.acquire.remote())

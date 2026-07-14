@@ -75,7 +75,7 @@ class WorkerWrap:
         ]
         loaded = self.model_runner.model.load_weights(weights=weights)
         # Accumulate refreshed param names for the optional whole-broadcast coverage
-        # audit (--train.verify_refit); a no-op unless reset_refit_audit() armed it.
+        # audit (--train.audit_refit); a no-op unless reset_refit_audit() armed it.
         if getattr(self, "_refit_audit_loaded", None) is not None and loaded:
             self._refit_audit_loaded.update(loaded)
         # Warn on EVERY refit flush that vLLM ignored entirely (loaded nothing) -- a real

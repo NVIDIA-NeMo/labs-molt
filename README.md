@@ -279,7 +279,7 @@ Common RL switches:
 | On-policy distillation | `--algo.advantage.estimator on_policy_distill --ref.model_name_or_path /path/to/teacher` |
 | Independent eval sampling | `--eval.temperature`, `--eval.top_p`, `--eval.max_new_tokens`, `--eval.n_samples_per_prompt` (unset ones fall back to rollout) |
 | Dump / replay a rollout batch | `--train.rollout_dump_dir <dir>` then `--train.rollout_replay_dir <dir>` re-runs training on it without regenerating |
-| Audit weight-refit coverage | `--train.verify_refit` warns which vLLM params a broadcast left stale |
+| Audit weight-refit coverage | `--train.audit_refit` warns which vLLM params a broadcast left stale |
 
 ## 🤖 Agent Contract
 

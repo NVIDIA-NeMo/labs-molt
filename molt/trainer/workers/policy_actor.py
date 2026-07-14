@@ -582,9 +582,9 @@ class PolicyTrainer:
         # still call `gather_full_param` (an FSDP collective) but drop the
         # gathered tensor immediately — no point staging the batch on every rank.
         is_rank0 = torch.distributed.get_rank() == 0
-        # --train.verify_refit: rank 0 arms a coverage audit, checked after the last flush.
-        verify_refit = is_rank0 and getattr(self.strategy.args.train, "verify_refit", False)
-        if verify_refit:
+        # --train.audit_refit: rank 0 arms a coverage audit, checked after the last flush.
+        audit_refit = is_rank0 and getattr(self.strategy.args.train, "audit_refit", False)
+        if audit_refit:
             ray.get([engine.reset_refit_audit.remote() for engine in self.vllm_engines])
         # 512 MiB flushes, matching slime's `--update-weight-buffer-size` default
         # (512 * 1024**2). vLLM runs at high gpu_memory_utilization (~0.9-0.95) with
@@ -693,17 +693,16 @@ class PolicyTrainer:
         if is_rank0:
             _flush()
 
-        if verify_refit:
-            missing = sorted(
-                {m for lst in ray.get([e.refit_audit_missing.remote() for e in self.vllm_engines]) for m in lst}
-            )
+        if audit_refit:
+            per_engine = ray.get([e.refit_audit_missing.remote() for e in self.vllm_engines])
+            missing = sorted({name for lst in per_engine for name in lst})
             if missing:
                 logger.warning(
-                    f"[verify_refit] {len(missing)} vLLM params NOT refreshed by this broadcast "
+                    f"[audit_refit] {len(missing)} vLLM params NOT refreshed by this broadcast "
                     f"(stale rollout weights); sample: {missing[:10]}"
                 )
             else:
-                logger.info("[verify_refit] all vLLM params refreshed by this broadcast")
+                logger.info("[audit_refit] all vLLM params refreshed by this broadcast")
 
         torch.cuda.empty_cache()
         torch_dist_barrier_and_cuda_sync()
