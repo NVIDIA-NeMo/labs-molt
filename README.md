@@ -598,6 +598,20 @@ Gymnasium-aligned agent (`Env` / `ChatAgent`), a single trainable actor,
 optional KL reference workers, vLLM generation, and online policy
 optimization — all on PyTorch + AutoModel.
 
+## 📚 Citation
+
+If you use Molt in your research, please cite:
+
+```bibtex
+@misc{molt2026,
+  title        = {Molt: A Scalable PyTorch-Native Training Framework for Agentic Reinforcement Learning},
+  author       = {Jian Hu and contributors},
+  year         = {2026},
+  howpublished = {\url{https://github.com/NVIDIA-NeMo/labs-molt}},
+  note         = {Technical report: \url{https://www.researchgate.net/publication/409325071_Molt_A_Scalable_PyTorch-Native_Training_Framework_for_Agentic_Reinforcement_Learning}}
+}
+```
+
 ## 🤝 Contributing
 
 External contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
