@@ -30,15 +30,6 @@ import torch
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
-# Register bare parent packages so loss.py's `from .utils import masked_mean`
-# resolves to the real utils.py WITHOUT executing molt/models/__init__.py
-# (which imports Actor -> nemo_automodel, unavailable on the host).
-for _pkg in ("molt", "molt.models"):
-    if _pkg not in sys.modules:
-        _m = types.ModuleType(_pkg)
-        _m.__path__ = []  # mark as a package
-        sys.modules[_pkg] = _m
-
 
 def _load(modname: str, relpath: str):
     spec = importlib.util.spec_from_file_location(modname, ROOT / relpath)
@@ -48,13 +39,33 @@ def _load(modname: str, relpath: str):
     return mod
 
 
-_load("molt.models.utils", "molt/models/utils.py")
-loss_mod = _load("molt.models.loss", "molt/models/loss.py")
-adv_mod = _load("advantage", "molt/trainer/algorithm/advantage.py")
+# Load loss.py / advantage.py by path WITHOUT executing molt/models/__init__.py
+# (it imports Actor -> nemo_automodel, unavailable on the host). We register bare
+# parent packages + the by-path modules in sys.modules, then restore it so these
+# stubs don't shadow the real molt.models when a sibling test is collected next.
+_MISSING = object()
+_MODULE_NAMES = ("molt", "molt.models", "molt.models.utils", "molt.models.loss", "advantage")
+_saved_modules = {name: sys.modules.get(name, _MISSING) for name in _MODULE_NAMES}
+try:
+    for _pkg in ("molt", "molt.models"):
+        if _pkg not in sys.modules:
+            _m = types.ModuleType(_pkg)
+            _m.__path__ = []  # mark as a package
+            sys.modules[_pkg] = _m
 
-AdvantageContext = adv_mod.AdvantageContext
-gae = adv_mod.get_advantage_estimator("gae")
-ValueLoss = loss_mod.ValueLoss
+    _load("molt.models.utils", "molt/models/utils.py")
+    loss_mod = _load("molt.models.loss", "molt/models/loss.py")
+    adv_mod = _load("advantage", "molt/trainer/algorithm/advantage.py")
+
+    AdvantageContext = adv_mod.AdvantageContext
+    gae = adv_mod.get_advantage_estimator("gae")
+    ValueLoss = loss_mod.ValueLoss
+finally:
+    for name, previous in _saved_modules.items():
+        if previous is _MISSING:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = previous
 
 
 def _reference_gae(rewards, values, gamma, lambd):
