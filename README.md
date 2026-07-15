@@ -183,26 +183,35 @@ sequence-level masked IS, which motivates the `seq`/`geo` rejection filter).
 
 ## 📦 Installation
 
-The recommended path is the prebuilt project image on Docker Hub. It bakes the full
-CUDA-13 stack (torch 2.11 · vLLM · TransformerEngine · flash-attn · mamba · DeepEP ·
-NVIDIA AutoModel), so it runs SFT and RL as-is with no local build:
+First clone the repo — the launch scripts, agents, and recipes live here, and
+`examples/scripts/docker_run.sh` mounts this checkout into the container:
 
 ```bash
-docker pull hijkzzz/molt:latest   # or the pinned tag hijkzzz/molt:0.1
+git clone https://github.com/NVIDIA-NeMo/labs-molt.git
+cd labs-molt
 ```
 
-`examples/scripts/docker_run.sh` defaults to this image (`IMAGE_NAME=hijkzzz/molt:latest`,
-build skipped), so a full-stack sanity check is one command:
+**The recommended path is the project container** (`dockerfile/Dockerfile`). It bakes the
+full CUDA-13 stack — torch 2.11 · vLLM · TransformerEngine · flash-attn · mamba · DeepEP ·
+NVIDIA AutoModel — built for A100 / H100 / H200 / B200·GB200, so it runs SFT and RL as-is
+with no local dependency wrangling. Pull the prebuilt image from Docker Hub:
+
+```bash
+docker pull hijkzzz/molt:latest   # or a pinned release: hijkzzz/molt:0.1.2
+```
+
+...or build it yourself from the Dockerfile (e.g. to change the CUDA / vLLM / AutoModel pins):
+
+```bash
+docker build -f dockerfile/Dockerfile -t hijkzzz/molt:latest .
+```
+
+`examples/scripts/docker_run.sh` defaults to this image (build skipped), so a full-stack
+sanity check is one command:
 
 ```bash
 bash examples/scripts/docker_run.sh "python -c 'import vllm, transformer_engine; print(vllm.__version__); print(transformer_engine.__version__)'"
-```
-
-To build the image yourself instead (e.g. to change the CUDA / vLLM pins), point the
-script at a local tag and enable the build:
-
-```bash
-IMAGE_NAME=molt:local SKIP_BUILD=0 bash examples/scripts/docker_run.sh "pytest -q"
+# build locally instead of pulling:  IMAGE_NAME=molt:local SKIP_BUILD=0 bash examples/scripts/docker_run.sh "pytest -q"
 ```
 
 For local (non-container) development:
