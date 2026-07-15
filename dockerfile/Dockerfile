@@ -159,7 +159,7 @@ RUN apt-get update && apt-get install -y --allow-change-held-packages rdma-core 
     rm -rf /var/lib/apt/lists/* /opt/deepep.patch && cd / && rm -rf /opt/DeepEP
 # RDMA_CORE_HOME=/opt/rdma-core/build symlinks to the system (apt) rdma-core at runtime.
 
-# --- (e) vLLM 0.24.0 (cu130) ----------------------------------------------------
+# --- (e) vLLM 0.25.1 (cu130) ----------------------------------------------------
 # Pin the base cu130 torch trio via a constraints file so pip can never swap it; let pip
 # pull vLLM's cu13 kernel deps (flashinfer-cu13, nvidia-cutlass-dsl, etc.).
 # vllm[audio] (not bare vllm): the official Nemotron-Omni GA model carries a Parakeet
@@ -172,7 +172,7 @@ RUN T=$(python -c "import torch; print(torch.__version__)") && \
     TV=$(python -c "import torchvision; print(torchvision.__version__)") && \
     TA=$(python -c "import torchaudio; print(torchaudio.__version__)") && \
     printf 'torch==%s\ntorchvision==%s\ntorchaudio==%s\n' "$T" "$TV" "$TA" > /tmp/torch-pin.txt && \
-    python -m pip install -c /tmp/torch-pin.txt "vllm[audio]==0.24.0" && rm -f /tmp/torch-pin.txt
+    python -m pip install -c /tmp/torch-pin.txt "vllm[audio]==0.25.1" && rm -f /tmp/torch-pin.txt
 
 # --- VLM modeling-code runtime deps + molt requirements + fla -----------
 # requirements.txt minus what's already pinned/built above (torch trio, TE, flash-attn,
