@@ -90,6 +90,7 @@ class PolicyTrainer:
             clip_eps_low=self.args.actor.eps_clip_low_high[0],
             clip_eps_high=self.args.actor.eps_clip_low_high[1],
             dual_clip=self.args.actor.dual_clip,
+            loss_mode=self.args.actor.loss_mode,
             is_correction_level=self.args.algo.advantage.is_correction_level,
             is_correction_mode=self.args.algo.advantage.is_correction_mode,
             is_correction_threshold=(

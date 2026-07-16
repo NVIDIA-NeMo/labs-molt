@@ -16,7 +16,7 @@
 # Adapted from OpenRLHF (https://github.com/OpenRLHF/OpenRLHF),
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
-from typing import Optional
+from typing import Literal, Optional
 
 import torch
 import torch.nn as nn
@@ -194,6 +194,7 @@ class PolicyLoss(nn.Module):
         is_correction_level: str = "off",
         is_correction_mode: str = "mask",
         loss_agg_mode: str = "token-mean",
+        loss_mode: Literal["ppo", "cispo"] = "ppo",
     ) -> None:
         super().__init__()
         self.clip_eps_low = clip_eps_low
@@ -215,10 +216,20 @@ class PolicyLoss(nn.Module):
         self.is_correction_level = is_correction_level
         self.is_correction_mode = is_correction_mode
         self.loss_agg_mode = loss_agg_mode
-
+        if loss_mode not in {"ppo", "cispo"}:
+            raise ValueError(f"loss_mode must be ppo/cispo, got {loss_mode}")
+        self.loss_mode = loss_mode
         # Dual-clip policy objective: https://arxiv.org/pdf/1912.09729
         if dual_clip is not None:
             assert dual_clip > 1.0, f"dual_clip must be > 1.0, got {dual_clip}"
+        if self.loss_mode == "cispo":
+            # CISPO clamps the raw ratio to an absolute ceiling (not a +offset like PPO's
+            # surr2), so clip_eps_high here must be passed as that ceiling (e.g. 1.2).
+            assert clip_eps_high >= 1.0, f"clip_eps_high must be >= 1.0 if loss_mode='cispo', got {clip_eps_high}"
+            # dual_clip only has meaning for the min(surr1, surr2) PPO surrogate CISPO
+            # doesn't compute; reject rather than silently ignore it.
+            if dual_clip is not None:
+                raise ValueError("dual_clip is a PPO-only extra bound; it has no effect under loss_mode='cispo'")
 
         if self.is_correction_level not in {"off", "token", "seq", "geo"}:
             raise ValueError(f"is_correction_level must be off/token/seq/geo, got {self.is_correction_level}")
@@ -233,7 +244,7 @@ class PolicyLoss(nn.Module):
                 f"is_correction_level={self.is_correction_level} only supports is_correction_mode=mask "
                 f"(seq/geo are rejection filters, not per-token weights); got mode={self.is_correction_mode}"
             )
-
+        
     def forward(
         self,
         log_probs: torch.Tensor,
@@ -259,18 +270,21 @@ class PolicyLoss(nn.Module):
             advantages = torch.where(mask, advantages, torch.zeros_like(advantages))
 
         ratio = policy_log_ratio.clamp(min=-log_ratio_limit, max=log_ratio_limit).exp()
+        if self.loss_mode == "ppo":
+            surr1 = ratio * advantages
+            surr2 = ratio.clamp(1 - self.clip_eps_low, 1 + self.clip_eps_high) * advantages
 
-        surr1 = ratio * advantages
-        surr2 = ratio.clamp(1 - self.clip_eps_low, 1 + self.clip_eps_high) * advantages
-
-        if self.dual_clip is None:
-            loss = -torch.min(surr1, surr2)
-        else:
-            clip1 = torch.min(surr1, surr2)
-            # Dual-clip: additional lower bound for negative advantages
-            clip2 = torch.max(clip1, self.dual_clip * advantages)
-            # Apply dual-clip: use clip2 for negative advantages, clip1 for positive advantages
-            loss = -torch.where(advantages < 0, clip2, clip1)
+            if self.dual_clip is None:
+                loss = -torch.min(surr1, surr2)
+            else:
+                clip1 = torch.min(surr1, surr2)
+                # Dual-clip: additional lower bound for negative advantages
+                clip2 = torch.max(clip1, self.dual_clip * advantages)
+                # Apply dual-clip: use clip2 for negative advantages, clip1 for positive advantages
+                loss = -torch.where(advantages < 0, clip2, clip1)
+        else:  # "cispo"
+            clipped_ratio = ratio.clamp_max(self.clip_eps_high).detach()
+            loss = -clipped_ratio * advantages * log_probs
 
         vllm_kl = None
         is_filter_ratio = None
@@ -356,6 +370,9 @@ class PolicyLoss(nn.Module):
                 dp_size=dp_size,
                 global_batch_size=global_batch_size,
             )
-        clip_ratio = masked_mean(torch.lt(surr2, surr1).float(), action_mask, dim=None)
+        if self.loss_mode == "cispo":
+            clip_ratio = masked_mean((ratio > self.clip_eps_high).float(), action_mask, dim=None)
+        else:
+            clip_ratio = masked_mean(torch.lt(surr2, surr1).float(), action_mask, dim=None)
         policy_kl = masked_mean(-policy_log_ratio.detach(), action_mask, dim=None)
         return loss, reported_loss, clip_ratio, policy_kl, vllm_kl, is_filter_ratio

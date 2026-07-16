@@ -481,6 +481,17 @@ if __name__ == "__main__":
     )
     parser.add_argument("--actor.dual_clip", type=float, default=None, help="Dual-clip policy objective")
     parser.add_argument(
+        "--actor.loss_mode",
+        type=str,
+        default="ppo",
+        choices=["ppo", "cispo"],
+        help="Policy-gradient surrogate: ppo (clipped min(surr1,surr2), optionally --actor.dual_clip) or "
+        "cispo (https://arxiv.org/abs/2506.13585 — clips only the upper side of the IS ratio, "
+        "stop-gradient through that weight, gradient flows through log-probs only; pass "
+        "--actor.eps_clip_low_high's high value as the absolute ratio ceiling, e.g. 1.2, not a +offset; "
+        "--actor.dual_clip is unused in this mode).",
+    )
+    parser.add_argument(
         "--actor.entropy_coef",
         type=float,
         default=None,
