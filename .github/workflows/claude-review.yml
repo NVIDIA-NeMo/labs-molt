@@ -27,7 +27,7 @@ permissions:
 
 jobs:
   claude-review:
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_claude_review.yml@v1.8.4
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_claude_review.yml@209ac7913b0419a5ccbac47b02d00fbea4939243 # v1.8.4
     with:
       model: ${{ vars.CLAUDE_MODEL }}
       prompt: |
