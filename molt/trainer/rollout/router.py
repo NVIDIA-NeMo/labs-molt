@@ -226,7 +226,24 @@ class RouterGenerateClient:
         for attempt in range(retries):
             try:
                 async with self.http.post(path, json=body, headers=headers) as resp:
-                    resp.raise_for_status()
+                    try:
+                        resp.raise_for_status()
+                    except aiohttp.ClientResponseError as exc:
+                        # aiohttp's default exception only reports ``400 Bad
+                        # Request`` and discards vLLM's actionable JSON body
+                        # (for example, the exact multimodal image limit).
+                        # Preserve that detail so a bad rollout fails once with
+                        # a diagnosable error instead of looking transient.
+                        read_text = getattr(resp, "text", None)
+                        detail = ""
+                        if callable(read_text):
+                            try:
+                                detail = (await read_text()).strip()
+                            except Exception:
+                                detail = ""
+                        if detail:
+                            exc.message = f"{exc.message}: {detail[:2048]}"
+                        raise
                     return await resp.json()
             except (aiohttp.ClientResponseError, aiohttp.ClientConnectionError) as e:
                 fatal = isinstance(e, aiohttp.ClientResponseError) and e.status < 500  # 4xx = real bug

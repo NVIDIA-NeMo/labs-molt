@@ -67,22 +67,27 @@ class _FakeHttp:
 
 
 class _RaisingResp:
-    def __init__(self, exc):
+    def __init__(self, exc, body=""):
         self._exc = exc
+        self._body = body
 
     def raise_for_status(self):
         raise self._exc
+
+    async def text(self):
+        return self._body
 
     async def json(self):
         return {}
 
 
 class _RaisingCtx:
-    def __init__(self, exc):
+    def __init__(self, exc, body=""):
         self._exc = exc
+        self._body = body
 
     async def __aenter__(self):
-        return _RaisingResp(self._exc)
+        return _RaisingResp(self._exc, self._body)
 
     async def __aexit__(self, *a):
         return False
@@ -91,13 +96,17 @@ class _RaisingCtx:
 class _FlakyHttp:
     """Fails the first ``fail_times`` POSTs with ``exc``, then serves ``payload``."""
 
-    def __init__(self, payload, exc, fail_times):
-        self.payload, self.exc, self.fail_times = payload, exc, fail_times
+    def __init__(self, payload, exc, fail_times, body=""):
+        self.payload, self.exc, self.fail_times, self.body = payload, exc, fail_times, body
         self.attempts = 0
 
     def post(self, url, json=None, headers=None):
         self.attempts += 1
-        return _RaisingCtx(self.exc) if self.attempts <= self.fail_times else _FakeCtx(self.payload)
+        return (
+            _RaisingCtx(self.exc, self.body)
+            if self.attempts <= self.fail_times
+            else _FakeCtx(self.payload)
+        )
 
 
 def _sp():
@@ -184,6 +193,24 @@ def test_post_fails_fast_on_4xx(monkeypatch):
     http = _FlakyHttp(_gen_resp([90]), aiohttp.ClientResponseError(None, (), status=400), fail_times=10)
     with pytest.raises(aiohttp.ClientResponseError):
         asyncio.run(RouterGenerateClient(http).generate([1, 2], _sp()))
+    assert http.attempts == 1
+
+
+def test_post_includes_vllm_error_body_in_4xx(monkeypatch):
+    async def _no_sleep(*_a, **_k):
+        pass
+
+    monkeypatch.setattr("molt.trainer.rollout.router.asyncio.sleep", _no_sleep)
+    body = '{"error":{"message":"At most 9 image(s) may be provided in one prompt."}}'
+    http = _FlakyHttp(
+        _gen_resp([90]),
+        aiohttp.ClientResponseError(None, (), status=400, message="Bad Request"),
+        fail_times=10,
+        body=body,
+    )
+    with pytest.raises(aiohttp.ClientResponseError) as caught:
+        asyncio.run(RouterGenerateClient(http).generate([1, 2], _sp()))
+    assert "At most 9 image" in caught.value.message
     assert http.attempts == 1
 
 
