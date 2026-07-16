@@ -1,0 +1,57 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Claude Code Review
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+  id-token: write
+
+jobs:
+  claude-review:
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_claude_review.yml@v1.8.4
+    with:
+      model: ${{ vars.CLAUDE_MODEL }}
+      prompt: |
+        You are doing a light code review. Keep it concise and actionable.
+
+        Focus ONLY on:
+        - Critical bugs or logic errors
+        - Typos in code, comments, or strings
+        - Missing or insufficient test coverage for changed code
+        - Outdated or inaccurate documentation affected by the changes
+
+        Do NOT comment on:
+        - Style preferences or formatting
+        - Minor naming suggestions
+        - Architectural opinions or refactoring ideas
+        - Performance unless there is a clear, measurable issue
+
+        Provide feedback using inline comments for specific code suggestions.
+        Use top-level comments for general observations.
+
+        IMPORTANT: Do NOT approve the pull request. Only leave comments.
+
+        It's perfectly acceptable to not have anything to comment on.
+        If you do not have anything to comment on, post "LGTM".
+    secrets:
+      NVIDIA_INFERENCE_URL: ${{ secrets.NVIDIA_INFERENCE_URL }}
+      NVIDIA_INFERENCE_KEY: ${{ secrets.NVIDIA_INFERENCE_KEY }}
