@@ -335,3 +335,15 @@ def test_compute_approx_kl_sanitizes_equal_negative_infinity_logprobs():
     )
 
     torch.testing.assert_close(kl, torch.zeros(1, 1))
+
+
+def test_policy_loss_registry_rejects_unknown_and_duplicate_names():
+    from molt.models.loss import POLICY_LOSSES, get_policy_loss, register_policy_loss
+
+    assert {"ppo", "cispo"} <= set(POLICY_LOSSES)  # built-in surrogates are registered
+    with pytest.raises(ValueError, match="Unknown policy loss"):
+        get_policy_loss("nope")
+    with pytest.raises(ValueError, match="Unknown policy loss"):
+        PolicyLoss(loss_mode="nope")  # surfaced at construction
+    with pytest.raises(ValueError, match="already registered"):
+        register_policy_loss("ppo")(lambda *a, **k: None)  # no silent shadowing

@@ -16,7 +16,7 @@
 # Adapted from OpenRLHF (https://github.com/OpenRLHF/OpenRLHF),
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
-from typing import Literal, Optional
+from typing import Callable, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -175,6 +175,59 @@ class ValueLoss(nn.Module):
         return loss, reported_loss, clip_frac
 
 
+# ──────────────── policy-loss surrogates (registry, mirrors advantage.py) ────────────────
+# A surrogate maps the per-token IS ``ratio`` + advantages to a per-token loss and the
+# clip-fraction metric; PolicyLoss.forward owns everything shared (ratio, IS correction,
+# aggregation). Register a new surrogate the same way advantage estimators register, so it
+# plugs in without editing forward:  @register_policy_loss("gspo") def ...(...).
+PolicyLossFn = Callable[..., Tuple[torch.Tensor, torch.Tensor]]
+POLICY_LOSSES: Dict[str, PolicyLossFn] = {}
+
+
+def register_policy_loss(name: str) -> Callable[[PolicyLossFn], PolicyLossFn]:
+    """Register a policy-loss surrogate under `name`."""
+
+    def decorator(fn: PolicyLossFn) -> PolicyLossFn:
+        if name in POLICY_LOSSES and POLICY_LOSSES[name] is not fn:
+            raise ValueError(f"Policy loss '{name}' is already registered")
+        POLICY_LOSSES[name] = fn
+        return fn
+
+    return decorator
+
+
+def get_policy_loss(name: str) -> PolicyLossFn:
+    if name not in POLICY_LOSSES:
+        raise ValueError(f"Unknown policy loss '{name}'. Registered: {sorted(POLICY_LOSSES)}")
+    return POLICY_LOSSES[name]
+
+
+@register_policy_loss("ppo")
+def ppo_policy_loss(ratio, advantages, log_probs, action_mask, *, clip_eps_low, clip_eps_high, dual_clip, **_):
+    """Clipped PPO surrogate `-min(r·A, clip(r)·A)`, optionally dual-clipped for A<0."""
+    surr1 = ratio * advantages
+    surr2 = ratio.clamp(1 - clip_eps_low, 1 + clip_eps_high) * advantages
+    if dual_clip is None:
+        loss = -torch.min(surr1, surr2)
+    else:
+        clip1 = torch.min(surr1, surr2)
+        # Dual-clip: extra lower bound for negative advantages (clip2 for A<0, clip1 for A>=0).
+        clip2 = torch.max(clip1, dual_clip * advantages)
+        loss = -torch.where(advantages < 0, clip2, clip1)
+    clip_ratio = masked_mean(torch.lt(surr2, surr1).float(), action_mask, dim=None)
+    return loss, clip_ratio
+
+
+@register_policy_loss("cispo")
+def cispo_policy_loss(ratio, advantages, log_probs, action_mask, *, clip_eps_high, **_):
+    """CISPO (https://arxiv.org/abs/2506.13585): stop-gradient upper-clipped IS weight,
+    REINFORCE through log-probs so clipped tokens still contribute gradient."""
+    clipped_ratio = ratio.clamp_max(clip_eps_high).detach()
+    loss = -clipped_ratio * advantages * log_probs
+    clip_ratio = masked_mean((ratio > clip_eps_high).float(), action_mask, dim=None)
+    return loss, clip_ratio
+
+
 class PolicyLoss(nn.Module):
     """
     Clipped policy-gradient loss for non-critic RL.
@@ -194,7 +247,7 @@ class PolicyLoss(nn.Module):
         is_correction_level: str = "off",
         is_correction_mode: str = "mask",
         loss_agg_mode: str = "token-mean",
-        loss_mode: Literal["ppo", "cispo"] = "ppo",
+        loss_mode: str = "ppo",
     ) -> None:
         super().__init__()
         self.clip_eps_low = clip_eps_low
@@ -216,9 +269,8 @@ class PolicyLoss(nn.Module):
         self.is_correction_level = is_correction_level
         self.is_correction_mode = is_correction_mode
         self.loss_agg_mode = loss_agg_mode
-        if loss_mode not in {"ppo", "cispo"}:
-            raise ValueError(f"loss_mode must be ppo/cispo, got {loss_mode}")
         self.loss_mode = loss_mode
+        self.policy_loss_fn = get_policy_loss(loss_mode)  # raises on an unregistered name
         # Dual-clip policy objective: https://arxiv.org/pdf/1912.09729
         if dual_clip is not None:
             assert dual_clip > 1.0, f"dual_clip must be > 1.0, got {dual_clip}"
@@ -244,7 +296,7 @@ class PolicyLoss(nn.Module):
                 f"is_correction_level={self.is_correction_level} only supports is_correction_mode=mask "
                 f"(seq/geo are rejection filters, not per-token weights); got mode={self.is_correction_mode}"
             )
-        
+
     def forward(
         self,
         log_probs: torch.Tensor,
@@ -270,21 +322,15 @@ class PolicyLoss(nn.Module):
             advantages = torch.where(mask, advantages, torch.zeros_like(advantages))
 
         ratio = policy_log_ratio.clamp(min=-log_ratio_limit, max=log_ratio_limit).exp()
-        if self.loss_mode == "ppo":
-            surr1 = ratio * advantages
-            surr2 = ratio.clamp(1 - self.clip_eps_low, 1 + self.clip_eps_high) * advantages
-
-            if self.dual_clip is None:
-                loss = -torch.min(surr1, surr2)
-            else:
-                clip1 = torch.min(surr1, surr2)
-                # Dual-clip: additional lower bound for negative advantages
-                clip2 = torch.max(clip1, self.dual_clip * advantages)
-                # Apply dual-clip: use clip2 for negative advantages, clip1 for positive advantages
-                loss = -torch.where(advantages < 0, clip2, clip1)
-        else:  # "cispo"
-            clipped_ratio = ratio.clamp_max(self.clip_eps_high).detach()
-            loss = -clipped_ratio * advantages * log_probs
+        loss, clip_ratio = self.policy_loss_fn(
+            ratio,
+            advantages,
+            log_probs,
+            action_mask,
+            clip_eps_low=self.clip_eps_low,
+            clip_eps_high=self.clip_eps_high,
+            dual_clip=self.dual_clip,
+        )
 
         vllm_kl = None
         is_filter_ratio = None
@@ -370,9 +416,5 @@ class PolicyLoss(nn.Module):
                 dp_size=dp_size,
                 global_batch_size=global_batch_size,
             )
-        if self.loss_mode == "cispo":
-            clip_ratio = masked_mean((ratio > self.clip_eps_high).float(), action_mask, dim=None)
-        else:
-            clip_ratio = masked_mean(torch.lt(surr2, surr1).float(), action_mask, dim=None)
         policy_kl = masked_mean(-policy_log_ratio.detach(), action_mask, dim=None)
         return loss, reported_loss, clip_ratio, policy_kl, vllm_kl, is_filter_ratio
