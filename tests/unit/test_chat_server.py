@@ -523,9 +523,21 @@ def test_decode_anthropic_normalizes_to_openai_shape():
         ],
     }
     out = _decode_anthropic(body)
-    assert all(m["role"] != "system" for m in out["messages"]) and len(out["messages"]) == 2
-    blocks = out["messages"][1]["content"]
+    assert out["messages"][0] == {"role": "system", "content": "sys"}
+    assert len(out["messages"]) == 3
+    blocks = out["messages"][2]["content"]
     assert blocks[1] == {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+
+
+def test_decode_anthropic_system_blocks_reach_template_input():
+    body = {
+        "system": [{"type": "text", "text": "Be concise."}],
+        "messages": [{"role": "user", "content": "hi"}],
+    }
+    out = _decode_anthropic(body)
+    chat, images = cs._messages_to_chat(SimpleNamespace(expand_image_placeholder=False), out["messages"])
+    assert chat == [{"role": "system", "content": "Be concise."}, {"role": "user", "content": "hi"}]
+    assert images == []
 
 
 def test_decode_anthropic_unwraps_tool_result():

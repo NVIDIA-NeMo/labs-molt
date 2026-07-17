@@ -96,9 +96,9 @@ def _content_to_text_and_images(content) -> tuple[str, list]:
 
 def _decode_anthropic(body: dict) -> dict:
     """Anthropic Messages request -> canonical (OpenAI-shaped) body the router
-    understands. Only content blocks + (already same-named) sampling fields are
-    touched; top-level ``system`` is left inert."""
-    messages = []
+    understands. Top-level ``system`` becomes the first canonical message; content
+    blocks are normalized below."""
+    messages = [{"role": "system", "content": body["system"]}] if body.get("system") else []
     for m in body.get("messages", []):
         content = m.get("content")
         if isinstance(content, list):
