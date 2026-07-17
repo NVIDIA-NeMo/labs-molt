@@ -249,7 +249,7 @@ class SamplesGenerator:
             rollout_metrics["rollout/dropped/total"] = float(sum(drop_counts.values()))
         if dynamic_filtering and prompts_dispatched:
             rollout_metrics["dynamic_filtering_pass_rate"] = groups_accepted / prompts_dispatched * 100
-        # Pre-filter stats: the model's TRUE judge pass rate over ALL scored samples, BEFORE DAPO
+        # Pre-filter stats: the model's TRUE judge pass rate over ALL scored rollouts, BEFORE DAPO
         # drops uniform groups. (post-filter `reward`/`pivotrl_correct` only covers kept MIXED groups
         # ~0.5-0.65 by construction, so it hides the real pass rate + the all-pass saturation.)
         if score_stats.get("score_n", 0) > 0:
@@ -275,15 +275,15 @@ class SamplesGenerator:
         exhausted = self._dataloader_iter is None and not self._finished_samples and not self._inflight_rollouts
         return batch_samples, rollout_metrics, prompts_dispatched, exhausted
 
-    def _passes_dynamic_filter(self, group_samples) -> bool:
-        """Whether a scored group's mean reward lands inside the dynamic-filtering range.
+    def _passes_dynamic_filter(self, rollout_samples) -> bool:
+        """Whether a scored group's mean rollout reward lands inside the dynamic-filtering range.
 
-        A group with any unscored sample always passes — filtering only applies once
-        every sample in the group has a score.
+        A group with any unscored rollout always passes — filtering only applies once
+        every rollout in the group has a score.
         """
-        if not all(s.scores is not None for s in group_samples):
+        if not all(s.scores is not None for s in rollout_samples):
             return True
-        scores = [s.scores[0].item() for s in group_samples]
+        scores = [s.scores[0].item() for s in rollout_samples]
         mean_score = sum(scores) / len(scores)
         min_score, max_score = self.args.algo.dynamic_filtering_range
         if min_score < mean_score < max_score:
@@ -321,11 +321,16 @@ class SamplesGenerator:
                 drop_counts[drop_reason] += 1
 
         if dynamic_filtering and group_samples:
-            # Pre-filter score stats (the model's TRUE judge pass rate over scored samples, BEFORE
+            # Compaction can emit several step-samples with the same terminal score. Keep one
+            # representative per rollout for filtering; all segments still enter training below.
+            rollout_samples = {
+                (s.rollout_ids[0] if getattr(s, "rollout_ids", None) else id(s)): s for s in group_samples
+            }.values()
+            # Pre-filter score stats (the model's TRUE judge pass rate over scored rollouts, BEFORE
             # DAPO drops uniform groups). Accumulate here, before any keep/drop decision, so the
             # logged mean reflects all-pass + all-fail + mixed (not just the kept mixed groups).
             if score_stats is not None:
-                scored = [s.scores[0].item() for s in group_samples if s.scores is not None]
+                scored = [s.scores[0].item() for s in rollout_samples if s.scores is not None]
                 if scored:
                     min_score, max_score = self.args.algo.dynamic_filtering_range
                     gmean = sum(scored) / len(scored)
@@ -341,15 +346,11 @@ class SamplesGenerator:
             # -> NCCL collective desync/hang. Drop+backfill the whole group so each accepted group
             # contributes exactly n_samples (batch stays a clean groups_per_batch * n_samples).
             n_samples = generate_kwargs.get("n_samples_per_prompt", self.args.rollout.n_samples_per_prompt)
-            # Count ROLLOUTS, not step-samples: a multi-turn / context-compacting agent emits
-            # several step-samples per rollout sharing one rollout_id (see experience.py), so
-            # len(group_samples) over-counts and a group that actually lost a rollout could still
-            # pass this completeness check. Count distinct rollout_ids (single-turn: 1 each, == old).
-            n_rollouts = len({(s.rollout_ids[0] if getattr(s, "rollout_ids", None) else id(s)) for s in group_samples})
+            n_rollouts = len(rollout_samples)
             if n_rollouts < n_samples:
                 drop_counts["incomplete_group"] += len(group_samples)
                 return []
-            if not self._passes_dynamic_filter(group_samples):
+            if not self._passes_dynamic_filter(rollout_samples):
                 drop_counts["dynamic_filter"] += len(group_samples)
                 return []
         return group_samples

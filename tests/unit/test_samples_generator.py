@@ -15,6 +15,7 @@
 
 import sys
 import types
+from collections import defaultdict
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -218,6 +219,26 @@ def test_generate_samples_drops_filtered_groups_and_refills_their_slots(monkeypa
     # The filtered group is tallied by reason for observability.
     assert rollout_metrics["rollout/dropped/dynamic_filter"] == 1.0
     assert rollout_metrics["rollout/dropped/total"] == 1.0
+
+
+def test_dynamic_filtering_counts_compaction_segments_once_per_rollout(monkeypatch):
+    generator = object.__new__(SamplesGenerator)
+    generator.args = SimpleNamespace(
+        rollout=SimpleNamespace(n_samples_per_prompt=2),
+        algo=SimpleNamespace(dynamic_filtering_range=(0.4, 0.6)),
+    )
+    samples = [
+        SimpleNamespace(rollout_ids=[rollout_id], scores=torch.tensor([score]))
+        for rollout_id, score in [("a", 1.0), ("a", 1.0), ("a", 1.0), ("b", 0.0)]
+    ]
+    generator._process_response_into_experience = lambda response, **kwargs: (response, None)
+    monkeypatch.setattr(samples_generator.ray, "get", lambda _: samples)
+    score_stats = defaultdict(float)
+
+    kept = generator._filter_group(object(), True, defaultdict(int), score_stats=score_stats)
+
+    assert kept == samples
+    assert dict(score_stats) == {"score_sum": 1.0, "score_n": 2, "groups": 1.0, "all_pass": 0.0, "all_fail": 0.0}
 
 
 def test_process_response_counts_only_action_tokens_for_multiturn_lengths():
