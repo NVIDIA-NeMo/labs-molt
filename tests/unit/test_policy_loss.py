@@ -269,6 +269,64 @@ def test_sequence_geometric_levels_only_allow_mask(level, mode):
         )
 
 
+def test_cispo_clamps_only_ratios_above_the_ceiling():
+    # ratios = exp(log_probs - old_log_probs) = exp([0.5, -0.5]) ~= [1.65, 0.61].
+    # Ceiling 1.2: the first token is clamped down to 1.2, the second (below the
+    # ceiling, and below 1.0) passes through unclamped -- CISPO has no lower clip.
+    loss_fn = PolicyLoss(loss_mode="cispo", clip_eps_high=1.2)
+    log_probs = torch.tensor([[0.5, -0.5]])
+    old_log_probs = torch.zeros(1, 2)
+    advantages = torch.ones(1, 2)
+
+    loss, *_ = loss_fn(
+        log_probs,
+        old_log_probs,
+        advantages,
+        action_mask=torch.ones(1, 2, dtype=torch.bool),
+    )
+
+    ratio = log_probs.exp()
+    expected = -(1.2 * 1.0 * log_probs[0, 0] + ratio[0, 1] * 1.0 * log_probs[0, 1]) / 2.0
+    torch.testing.assert_close(loss, expected)
+
+
+def test_cispo_clip_ratio_metric_reports_fraction_above_ceiling():
+    loss_fn = PolicyLoss(loss_mode="cispo", clip_eps_high=1.2)
+    # ratios ~= [1.65, 0.61, 1.65]: 2 of 3 tokens exceed the 1.2 ceiling.
+    log_probs = torch.tensor([[0.5, -0.5, 0.5]])
+    old_log_probs = torch.zeros(1, 3)
+
+    _, _, clip_ratio, *_ = loss_fn(
+        log_probs,
+        old_log_probs,
+        torch.ones(1, 3),
+        action_mask=torch.ones(1, 3, dtype=torch.bool),
+    )
+
+    torch.testing.assert_close(clip_ratio, torch.tensor(2.0 / 3.0))
+
+
+def test_cispo_gradient_flows_only_through_log_probs_not_the_clip_weight():
+    # The defining CISPO property: the IS weight is stop-gradient'd (detach()), so the
+    # gradient is a plain REINFORCE term through log_probs, not a PPO-style ratio*advantage
+    # gradient through the (clipped) ratio itself.
+    loss_fn = PolicyLoss(loss_mode="cispo", clip_eps_high=1.2)
+    log_probs = torch.zeros(1, 2, requires_grad=True)  # ratio = 1, below the ceiling
+    old_log_probs = torch.zeros(1, 2)
+    advantages = torch.tensor([[2.0, -3.0]])
+
+    loss, *_ = loss_fn(
+        log_probs,
+        old_log_probs,
+        advantages,
+        action_mask=torch.ones(1, 2, dtype=torch.bool),
+    )
+    loss.backward()
+
+    # d(-1 * A * log_probs)/d(log_probs) = -A, token-mean aggregated.
+    torch.testing.assert_close(log_probs.grad, -advantages / 2.0)
+
+
 def test_compute_approx_kl_sanitizes_equal_negative_infinity_logprobs():
     kl = compute_approx_kl(
         torch.full((1, 1), -torch.inf),

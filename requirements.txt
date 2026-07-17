@@ -1,7 +1,7 @@
 accelerate
 aiohttp
 datasets
-dion
+dion @ git+https://github.com/microsoft/dion.git
 einops
 grpcio>=1.74.0
 huggingface_hub>=1.0.0
