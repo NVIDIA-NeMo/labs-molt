@@ -369,6 +369,12 @@ class BaseRLTrainer:
             self.broadcast_to_vllm()
         broadcast_time = time.time() - t0
 
+        # Log the KL coefficient applied to this step's loss (the value passed into
+        # `fit`), captured before the update below mutates it. Without this, adaptive-KL
+        # runs (--algo.kl.target set) surface the measured `kl` but not the coefficient
+        # the AdaptiveKLController is driving in response — the feedback loop is invisible.
+        status["kl_coef"] = self.kl_ctl.value
+
         # Refresh KL controller with the latest measurement (no-op for FixedKLController).
         if "kl" in status:
             self.kl_ctl.update(status["kl"], self.args.rollout.batch_size * self.args.rollout.n_samples_per_prompt)
