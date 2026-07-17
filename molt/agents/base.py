@@ -35,6 +35,7 @@ step-return tuple — used by both the per-step `Env.step()` and the one-shot
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 from abc import ABC, abstractmethod
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -57,6 +58,13 @@ def _first_scalar(value):
     if isinstance(value, (list, tuple)):
         return _first_scalar(value[0]) if value else None
     return value
+
+
+# Tokenizing an observation is a multi-second CPU op that must not share asyncio's default
+# executor: a blocking agent parking its whole trajectory there saturates the pool, and the
+# tokenize it awaits through the loopback chat server then starves and deadlocks. Off the hot
+# path (one call per turn, gated by generation), so a small dedicated pool suffices.
+_TOKENIZE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="tokenize")
 
 
 def _tokenize_observation(hf_tokenizer, text, images):
@@ -308,7 +316,7 @@ class StepEnvRunner(Runner):
         # blocks the loop and serializes the group (+ stalls the others' awaited generations). Run it
         # in a thread so the loop stays free and rollouts overlap (mirrors the chat server).
         obs_tokens, mm_train_inputs, pil_images = await asyncio.get_running_loop().run_in_executor(
-            None, _tokenize_observation, hf_tokenizer, observation_text, images
+            _TOKENIZE_EXECUTOR, _tokenize_observation, hf_tokenizer, observation_text, images
         )
         image_budget = 0
         if pil_images:

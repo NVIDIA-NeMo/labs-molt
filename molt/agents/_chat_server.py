@@ -51,7 +51,13 @@ import uvicorn
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from molt.agents.base import Trajectory, _extract_generation_logprobs, _tokenize_feedback, _tokenize_observation
+from molt.agents.base import (
+    _TOKENIZE_EXECUTOR,
+    Trajectory,
+    _extract_generation_logprobs,
+    _tokenize_feedback,
+    _tokenize_observation,
+)
 from molt.utils.vlm_utils import (
     estimate_vllm_input_expansion_delta,
     load_images,
@@ -279,7 +285,7 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
         chat, pil_images = _messages_to_chat(state, messages)
         prompt_text = state.processor.apply_chat_template(chat, tokenize=False, add_generation_prompt=True, **kwargs)
         prompt_ids, mm_train_inputs, pil_images = await loop.run_in_executor(
-            None, _tokenize_observation, state.processor, prompt_text, pil_images
+            _TOKENIZE_EXECUTOR, _tokenize_observation, state.processor, prompt_text, pil_images
         )
         image_budget = (
             estimate_vllm_input_expansion_delta(state.processor, prompt_ids, mm_train_inputs, pil_images)
@@ -316,7 +322,7 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
         delta_text = full[len(prefix) :]
         new_pil = _content_to_text_and_images(messages[-1].get("content"))[1]  # images added THIS turn
         delta_ids = await loop.run_in_executor(
-            None, _tokenize_feedback, state.processor, delta_text, new_pil, traj, state.max_length
+            _TOKENIZE_EXECUTOR, _tokenize_feedback, state.processor, delta_text, new_pil, traj, state.max_length
         )
         # Generate over the accumulated tokens PLUS this turn's delta, but do NOT append the delta yet.
         gen_tokens = traj.observation_tokens + delta_ids
