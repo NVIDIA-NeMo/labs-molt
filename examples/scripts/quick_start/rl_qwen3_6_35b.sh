@@ -123,7 +123,7 @@ python3 -u -m molt.cli.train_rl_ray \
   --eval.n_samples_per_prompt 1 \
   --ckpt.output_dir "$SAVE_ROOT/hf" \
   --ckpt.path "$SAVE_ROOT/state" \
-  --ckpt.save_steps 5 \
+  --ckpt.save_steps 1 \
   --logger.logging_steps 1 \
   --logger.wandb.project "${WANDB_PROJECT:-molt_quickstart_qwen3_6}" \
   --logger.wandb.run_name "${WANDB_RUN_NAME:-qwen3_6_quickstart_$$}"

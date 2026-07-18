@@ -15,6 +15,7 @@
 
 import asyncio
 import os
+import shutil
 import time
 from typing import Dict, Tuple
 
@@ -267,20 +268,58 @@ class BaseRLTrainer:
         # Best eval metric tracking
         self.best_eval_metric_value = float("-inf")
         self.best_eval_metric_key = getattr(self.args.ckpt, "best_metric_key", "") or ""
-        self._latest_eval_metric_value = None
 
     def restore_best_metric_tracker(self, checkpoint_states) -> None:
-        if not checkpoint_states:
+        if not getattr(self.args.ckpt, "load_enable", False):
             return
 
-        checkpoint_metric_key = checkpoint_states.get("best_eval_metric_key")
-        checkpoint_metric_value = checkpoint_states.get("best_eval_metric_value")
+        states = [checkpoint_states or {}]
+        actor_root = os.path.join(self.args.ckpt.path, "_actor")
+        if os.path.isdir(actor_root):
+            for name in os.listdir(actor_root):
+                path = os.path.join(actor_root, name)
+                if (
+                    name.startswith("best_global_step")
+                    and not name.endswith((".tmp", ".old"))
+                    and self.strategy.checkpoint._is_loadable_ckpt_dir(path)
+                ):
+                    try:
+                        states.append(
+                            torch.load(os.path.join(path, "extra_state.pt"), weights_only=False)["client_state"]
+                        )
+                    except (KeyError, OSError, RuntimeError, EOFError) as exc:
+                        logger.warning(f"Ignoring unreadable best-checkpoint metadata at {path}: {exc}")
 
-        if checkpoint_metric_key:
-            self.best_eval_metric_key = checkpoint_metric_key
-        if checkpoint_metric_value is not None:
+        for state in states:
+            checkpoint_metric_key = state.get("best_eval_metric_key")
+            checkpoint_metric_value = state.get("best_eval_metric_value")
+            if checkpoint_metric_value is None or checkpoint_metric_value <= self.best_eval_metric_value:
+                continue
+            if checkpoint_metric_key:
+                self.best_eval_metric_key = checkpoint_metric_key
             self.best_eval_metric_value = checkpoint_metric_value
-            self._latest_eval_metric_value = checkpoint_metric_value
+        self._prune_hf_checkpoints()
+
+    def _prune_hf_checkpoints(self) -> None:
+        """Keep HF snapshots aligned with retained actor checkpoints."""
+        if not getattr(self.args.ckpt, "save_hf", False):
+            return
+
+        actor_root = os.path.join(self.args.ckpt.path, "_actor")
+        if not os.path.isdir(actor_root):
+            return
+        retained_tags = {
+            name
+            for name in os.listdir(actor_root)
+            if (name.startswith("global_step") or name.startswith("best_global_step"))
+            and self.strategy.checkpoint._is_loadable_ckpt_dir(os.path.join(actor_root, name))
+        }
+        for name in os.listdir(self.args.ckpt.path):
+            if not name.endswith("_hf"):
+                continue
+            tag = name[:-3]
+            if (tag.startswith("global_step") or tag.startswith("best_global_step")) and tag not in retained_tags:
+                shutil.rmtree(os.path.join(self.args.ckpt.path, name), ignore_errors=True)
 
     def fit(self, global_step: int = 0) -> None:
         raise NotImplementedError("fit method is not implemented")
@@ -358,16 +397,16 @@ class BaseRLTrainer:
         status["actor_frozen"] = float(actor_frozen)
         policy_train_time = time.time() - t0
 
-        # Sync weights to vLLM (skipped while the actor is frozen: its weights are
-        # unchanged, so the live vLLM copy is already current).
+        # Sync changed weights to vLLM. Frozen steps only publish the new logical
+        # policy step under the lock because the actor weights did not change.
         t0 = time.time()
         # Reset per-step so a frozen/skipped broadcast reports 0 (not a stale
         # value); the TrainingActor.broadcast_to_vllm override sets these when
         # it runs (lock-wait vs actual transfer).
         self._broadcast_lock_wait_s = 0.0
         self._broadcast_transfer_s = 0.0
-        if self.vllm_engines is not None and not actor_frozen:
-            self.broadcast_to_vllm()
+        if self.vllm_engines is not None:
+            self.broadcast_to_vllm(global_step + 1, refit=not actor_frozen)
         broadcast_time = time.time() - t0
 
         # Log the KL coefficient applied to this step's loss (the value passed into
@@ -432,19 +471,28 @@ class BaseRLTrainer:
             ray.get(self.critic_model_group.async_run_method(method_name="empty_cache"))
         return status
 
-    def broadcast_to_vllm(self) -> None:
+    def broadcast_to_vllm(self, policy_step=None, refit=True) -> None:
         """Broadcast actor weights to vLLM engines."""
-        ray.get(self.actor_model_group.async_run_method(method_name="broadcast_to_vllm"))
+        if refit:
+            ray.get(self.actor_model_group.async_run_method(method_name="broadcast_to_vllm"))
 
         # NOTE: We keep vLLM in weights-only state after weight sync.
         # KV cache will be woken up before generation in SamplesGenerator.
 
-    def save_best_checkpoint(self, eval_metrics, global_step, client_states=None):
+    def save_best_checkpoint(self, eval_metrics, global_step, client_states=None, source_tag=None):
         """Save checkpoint if eval metric is the best so far.
 
         When best_metric_key is 'none' or no eval_*_pass1 metric is present,
         this is a no-op — regular save_steps checkpoints still save the most recent.
         """
+        if getattr(self.args.train, "partial_rollout_enable", False):
+            if eval_metrics and self.best_eval_metric_key != "none":
+                logger.warning(
+                    "Skipping best-checkpoint selection with partial rollouts: "
+                    "one evaluation can span multiple policy versions."
+                )
+            return
+
         if not eval_metrics or self.best_eval_metric_key == "none":
             return
 
@@ -453,28 +501,92 @@ class BaseRLTrainer:
         else:
             # Auto-detect: prefer eval_*_pass1 metric.
             metric_key = next((k for k in sorted(eval_metrics) if k.endswith("_pass1")), None)
-            if metric_key is not None:
-                self.best_eval_metric_key = metric_key
         if metric_key is None:
             return
 
         current_value = eval_metrics[metric_key]
-        self._latest_eval_metric_value = current_value
-        prev_best = self.best_eval_metric_value
+        if not (current_value > self.best_eval_metric_value):
+            return
 
-        if current_value > self.best_eval_metric_value:
-            self.best_eval_metric_value = current_value
-            logger.info(
-                f"New best eval metric: {metric_key}={current_value:.4f} at step {global_step} "
-                f"(previous best: {prev_best if prev_best > float('-inf') else 'N/A'})"
-            )
+        tag = f"best_global_step{global_step}"
+        client_state_updates = {
+            "best_eval_metric_key": metric_key,
+            "best_eval_metric_value": current_value,
+            "checkpoint_metric_key": metric_key,
+        }
+        if source_tag is not None:
+            checkpoint_roots = [os.path.join(self.args.ckpt.path, "_actor")]
+            if self.critic_model_group is not None:
+                checkpoint_roots.append(os.path.join(self.args.ckpt.path, "_critic"))
+            copies = [(os.path.join(root, source_tag), os.path.join(root, tag), root) for root in checkpoint_roots]
+            if self.args.ckpt.save_hf:
+                copies.append(
+                    (
+                        os.path.join(self.args.ckpt.path, f"{source_tag}_hf"),
+                        os.path.join(self.args.ckpt.path, f"{tag}_hf"),
+                        None,
+                    )
+                )
+            missing = [source for source, _, _ in copies if not os.path.isdir(source)]
+            if missing:
+                logger.warning(
+                    f"Skipping best checkpoint for eval step {global_step}: matching saved checkpoint "
+                    f"{source_tag} is unavailable. Align --ckpt.save_steps with --eval.steps."
+                )
+                return
 
-            client_states = client_states or {}
-            client_states["best_eval_metric_key"] = metric_key
-            client_states["best_eval_metric_value"] = current_value
-            client_states["checkpoint_metric_key"] = metric_key
+            for _, best_path, _ in copies:
+                pending_path = f"{best_path}.tmp"
+                backup_path = f"{best_path}.old"
+                shutil.rmtree(pending_path, ignore_errors=True)
+                if os.path.exists(backup_path):
+                    if os.path.exists(best_path):
+                        shutil.rmtree(backup_path, ignore_errors=True)
+                    else:
+                        os.replace(backup_path, best_path)
 
-            tag = f"best_global_step{global_step}"
+            published = []
+            backups = []
+            try:
+                for source_path, best_path, checkpoint_root in copies:
+                    pending_path = f"{best_path}.tmp"
+                    shutil.copytree(source_path, pending_path)
+                    if checkpoint_root is not None:
+                        extra_state_path = os.path.join(pending_path, "extra_state.pt")
+                        extra = torch.load(extra_state_path, weights_only=False)
+                        extra.setdefault("client_state", {}).update(client_state_updates)
+                        self.strategy.checkpoint._atomic_write_torch(extra_state_path, extra)
+                        self.strategy.checkpoint._write_ckpt_metric(pending_path, current_value, metric_key)
+
+                # The actor checkpoint is the durable commit marker read on resume,
+                # so publish it only after the critic and HF export are in place.
+                for _, best_path, _ in copies[1:] + copies[:1]:
+                    pending_path = f"{best_path}.tmp"
+                    backup_path = f"{best_path}.old"
+                    if os.path.exists(best_path):
+                        os.replace(best_path, backup_path)
+                        backups.append((best_path, backup_path))
+                    os.replace(pending_path, best_path)
+                    published.append(best_path)
+            except BaseException:
+                for best_path in reversed(published):
+                    shutil.rmtree(best_path, ignore_errors=True)
+                for best_path, backup_path in reversed(backups):
+                    if os.path.exists(backup_path):
+                        os.replace(backup_path, best_path)
+                raise
+            finally:
+                for _, best_path, _ in copies:
+                    shutil.rmtree(f"{best_path}.tmp", ignore_errors=True)
+
+            for _, backup_path in backups:
+                shutil.rmtree(backup_path, ignore_errors=True)
+            for _, _, checkpoint_root in copies:
+                if checkpoint_root is not None:
+                    self.strategy.checkpoint._prune_checkpoints(checkpoint_root, tag, 0, 0, is_best=True)
+        else:
+            client_states = dict(client_states or {})
+            client_states.update(client_state_updates)
             refs = self.actor_model_group.async_run_method(
                 method_name="save_checkpoint",
                 tag=tag,
@@ -487,7 +599,16 @@ class BaseRLTrainer:
                     method_name="save_checkpoint", tag=tag, metric_value=current_value, metric_key=metric_key
                 )
             ray.get(refs)
-            logger.info(f"Saved best checkpoint: {tag} ({metric_key}={current_value:.4f})")
+
+        self._prune_hf_checkpoints()
+        prev_best = self.best_eval_metric_value
+        self.best_eval_metric_key = metric_key
+        self.best_eval_metric_value = current_value
+        logger.info(
+            f"New best eval metric: {metric_key}={current_value:.4f} at step {global_step} "
+            f"(previous best: {prev_best if prev_best > float('-inf') else 'N/A'})"
+        )
+        logger.info(f"Saved best checkpoint: {tag} ({metric_key}={current_value:.4f})")
 
     def save_logs_and_checkpoints(self, global_step: int, logs_dict=None, client_states=None) -> None:
         logs_dict = logs_dict or {}
@@ -507,7 +628,10 @@ class BaseRLTrainer:
             # rotated out by max_num cleanup).
             client_states["best_eval_metric_key"] = self.best_eval_metric_key
             client_states["best_eval_metric_value"] = self.best_eval_metric_value
-            metric_value = self._latest_eval_metric_value
+            # Retention sorts rolling checkpoints by metric before age. Use the
+            # monotonic best-so-far value so older checkpoints never outrank a
+            # recent source that an in-flight async evaluation may still need.
+            metric_value = None if self.best_eval_metric_value == float("-inf") else self.best_eval_metric_value
             metric_key = client_states.get("checkpoint_metric_key") or self.best_eval_metric_key or None
             refs = self.actor_model_group.async_run_method(
                 method_name="save_checkpoint",
@@ -521,6 +645,7 @@ class BaseRLTrainer:
                     method_name="save_checkpoint", tag=tag, metric_value=metric_value, metric_key=metric_key
                 )
             ray.get(refs)
+            self._prune_hf_checkpoints()
 
     def load_checkpoint_states_or_default(self) -> Dict:
         ckpt_path = os.path.join(self.args.ckpt.path, "_actor")
@@ -545,15 +670,19 @@ class BaseRLTrainer:
 
 @ray.remote(num_cpus=0)
 class VLLMLock:
-    """Cross-actor mutex for vLLM critical sections."""
+    """Cross-actor mutex carrying the policy version currently loaded by vLLM."""
 
     def __init__(self):
         self._lock = asyncio.Lock()
+        self._policy_step = 0
 
     async def acquire(self):
         await self._lock.acquire()
+        return self._policy_step
 
-    async def release(self):
+    async def release(self, policy_step=None):
+        if policy_step is not None:
+            self._policy_step = policy_step
         self._lock.release()
 
 
@@ -680,22 +809,23 @@ class GenerateSamplesActor:
                 if should_eval:
                     self._last_eval_step = global_step
                     self._next_eval_step = (global_step // eval_steps + 1) * eval_steps
-                    logger.info(f"Starting async evaluation at step {global_step}...")
                     # Under partial rollout the rollout path (below) deliberately
                     # skips vllm_lock so the trainer's broadcast_to_vllm refit can
                     # interleave via pause/resume. Eval must follow the same
                     # contract: holding the lock across the whole eval generation
                     # (~1hr at 32K) blocks the refit's acquire and wedges training
                     # (train_step never returns → no global_step advance).
+                    policy_step = global_step
                     if not self._partial_rollout:
-                        ray.get(self.vllm_lock.acquire.remote())
+                        policy_step = ray.get(self.vllm_lock.acquire.remote())
+                    logger.info(f"Starting async evaluation of vLLM policy step {policy_step}...")
                     try:
                         eval_metrics = self._run_eval()
                     finally:
                         if not self._partial_rollout:
                             ray.get(self.vllm_lock.release.remote())
                     logger.info(f"Async evaluation completed: {eval_metrics}")
-                    self.rollout_queue.put(("eval", global_step, eval_metrics), block=True)
+                    self.rollout_queue.put(("eval", policy_step, eval_metrics), block=True)
                     continue
 
                 if self.args.train.rollout_replay_dir:
@@ -831,7 +961,8 @@ class TrainingActor(BaseRLTrainer):
                     self.tensorboard_logger.log_eval(eval_step, eval_metrics)
                 client_states = dict(self._latest_client_states)
                 client_states["global_step"] = global_step
-                self.save_best_checkpoint(eval_metrics, eval_step, client_states)
+                source_tag = None if eval_step == global_step else f"global_step{eval_step}"
+                self.save_best_checkpoint(eval_metrics, eval_step, client_states, source_tag=source_tag)
                 step_start_time = time.time()
                 continue
 
@@ -877,7 +1008,7 @@ class TrainingActor(BaseRLTrainer):
         if self.tensorboard_logger:
             self.tensorboard_logger.close()
 
-    def broadcast_to_vllm(self):
+    def broadcast_to_vllm(self, policy_step=None, refit=True):
         # Keep new generation calls out while existing requests are paused and
         # refitted. Report lock wait separately from the weight transfer. The lock
         # release sits in finally so a failed refit (NCCL errors do happen mid-run)
@@ -887,14 +1018,17 @@ class TrainingActor(BaseRLTrainer):
         ray.get(self.vllm_lock.acquire.remote())
         self._broadcast_lock_wait_s = time.time() - _t0
         _t0 = time.time()
+        synced_policy_step = None
         try:
-            batch_vllm_engine_call(self.vllm_engines, "pause_generation")
-            super().broadcast_to_vllm()
-            if self._prefix_caching_enabled:
-                batch_vllm_engine_call(self.vllm_engines, "reset_prefix_cache")
-            batch_vllm_engine_call(self.vllm_engines, "resume_generation")
+            if refit:
+                batch_vllm_engine_call(self.vllm_engines, "pause_generation")
+                super().broadcast_to_vllm()
+                if self._prefix_caching_enabled:
+                    batch_vllm_engine_call(self.vllm_engines, "reset_prefix_cache")
+                batch_vllm_engine_call(self.vllm_engines, "resume_generation")
+            synced_policy_step = policy_step
         finally:
-            ray.get(self.vllm_lock.release.remote())
+            ray.get(self.vllm_lock.release.remote(synced_policy_step))
             self._broadcast_transfer_s = time.time() - _t0
 
 
@@ -921,6 +1055,34 @@ class RLTrainer:
         queue_size = getattr(strategy.args.train, "async_queue_size", 1)
         if queue_size <= 0:
             raise ValueError(f"async_queue_size must be positive, got {queue_size}")
+
+        best_selection_enabled = (
+            getattr(strategy.args.eval, "dataset", None)
+            and strategy.args.eval.steps != float("inf")
+            and getattr(strategy.args.ckpt, "best_metric_key", "") != "none"
+            and not getattr(strategy.args.train, "partial_rollout_enable", False)
+        )
+        force_sync = getattr(strategy.args.train, "force_sync_mode", False)
+        delayed_best_possible = best_selection_enabled and (not force_sync or queue_size > 1)
+        if delayed_best_possible and strategy.args.ckpt.save_steps != 1:
+            raise ValueError(
+                "Delayed best-checkpoint selection requires --ckpt.save_steps 1, so either policy that can win "
+                "the generation/refit race has a matching resumable checkpoint."
+            )
+        if delayed_best_possible:
+            max_num = getattr(strategy.args.ckpt, "max_num", 3)
+            min_num = queue_size + 1
+            if max_num > 0 and max_num < min_num:
+                raise ValueError(
+                    "Delayed best-checkpoint selection requires --ckpt.max_num at least "
+                    f"async_queue_size + 1 ({min_num}), or a non-positive value to disable count-based pruning."
+                )
+            max_mem = getattr(strategy.args.ckpt, "max_mem", float("inf"))
+            if 0 < max_mem < float("inf"):
+                raise ValueError(
+                    "Delayed best-checkpoint selection requires unbounded --ckpt.max_mem; a disk cap can evict "
+                    "the checkpoint of an in-flight evaluation before its metric arrives."
+                )
         logger.info(f"async_queue_size={queue_size}")
 
         self.rollout_queue = Queue(maxsize=queue_size)
@@ -975,7 +1137,7 @@ class RLTrainer:
                         checkpoint_states["data_loader_state_dict"],
                         checkpoint_states.get("rollout_generator_state_dict"),
                     ),
-                    self.trainer_actor.broadcast_to_vllm.remote(),
+                    self.trainer_actor.broadcast_to_vllm.remote(global_step),
                 ]
             )
 
