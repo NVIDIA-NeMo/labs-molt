@@ -71,7 +71,7 @@ export OPTIM="${OPTIM:-adam}"
 export LR="${LR:-2e-6}"
 
 # --- Eval / checkpoint ------------------------------------------------------
-export SAVE_STEPS="${SAVE_STEPS:-2}"
+export SAVE_STEPS="${SAVE_STEPS:-1}"
 export EVAL_STEPS="${EVAL_STEPS:-10}"
 export EVAL_N_SAMPLES_PER_PROMPT="${EVAL_N_SAMPLES_PER_PROMPT:-1}"
 # Off by default: a step-0 baseline eval holds the rollout engines for the whole
@@ -431,7 +431,7 @@ RL_ARGS=(
   --reward.clip_range -1 1
   --ckpt.output_dir "$SAVE_ROOT/hf"
   --ckpt.path "$SAVE_ROOT/state"
-  --ckpt.save_steps "${SAVE_STEPS:-5}"
+  --ckpt.save_steps "${SAVE_STEPS:-1}"
   --ckpt.max_num "${CKPT_MAX_NUM:-50}"
   --logger.logging_steps 1
   --logger.wandb.project "${WANDB_PROJECT:-molt_async_visual_rl}"
