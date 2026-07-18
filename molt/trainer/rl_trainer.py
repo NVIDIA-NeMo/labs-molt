@@ -1066,7 +1066,7 @@ class RLTrainer:
         delayed_best_possible = best_selection_enabled and (not force_sync or queue_size > 1)
         if delayed_best_possible and strategy.args.ckpt.save_steps != 1:
             raise ValueError(
-                "Delayed best-checkpoint selection requires --ckpt.save_steps 1, so either policy that can win "
+                "Delayed best-checkpoint selection requires --ckpt.save_steps 1, so every policy that can win "
                 "the generation/refit race has a matching resumable checkpoint."
             )
         if delayed_best_possible:
