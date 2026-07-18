@@ -335,6 +335,56 @@ def test_gae_whitens_advantages_and_masks():
     assert ret[on].std(unbiased=False).item() > 1e-3
 
 
+def test_gae_length_adaptive_lambda_policy_decouples_from_critic():
+    """lam_alpha sets a per-sequence lambda_policy = 1 - 1/(alpha*l) for the advantages,
+    while returns keep lambda_critic (ctx.lam). Two rows of different action length get
+    different lambda_policy. no_whiten exposes the raw advantages for a direct check."""
+    B, L = 2, 5
+    mask = torch.tensor([[1.0, 1.0, 1.0, 1.0, 1.0], [1.0, 1.0, 1.0, 0.0, 0.0]])  # lengths 5, 3
+    kl = torch.zeros(B, L)
+    values = torch.randn(B, L)
+    reward = torch.tensor([1.0, -1.0])
+    gamma, alpha, lam_critic = 1.0, 1.5, 1.0
+
+    ctx = _ctx([mask], [kl], [values], kl_coef=0.0, gamma=gamma, lam=lam_critic)
+    ctx.lam_alpha = alpha
+    ctx.no_whiten = True
+    adv, ret = gae(reward, [[0], [1]], ctx)
+    adv, ret = adv[0], ret[0]
+
+    token_reward = torch.zeros(B, L)
+    token_reward[0, 4] = reward[0]  # reward on each row's last action token
+    token_reward[1, 2] = reward[1]
+
+    lam_policy = 1.0 - 1.0 / (alpha * mask.sum(1))  # per row: [0.8667, 0.7778]
+    ref_adv, _ = _reference_gae_masked(token_reward, values * mask, mask, gamma, lam_policy)
+    _, ref_ret = _reference_gae_masked(token_reward, values * mask, mask, gamma, torch.tensor(lam_critic))
+
+    assert torch.allclose(adv, ref_adv * mask, atol=1e-5)
+    assert torch.allclose(ret, ref_ret * mask, atol=1e-5)
+    assert not torch.allclose(lam_policy, torch.full((B,), float(lam_critic)))  # lambdas differ
+
+
+def test_gae_lam_alpha_none_uses_single_lambda():
+    """lam_alpha=None keeps the pre-existing single-lambda behaviour: advantages and
+    returns share ctx.lam, so returns == advantage_recursion(lam) + V."""
+    B, L = 1, 4
+    mask = torch.ones(B, L)
+    values = torch.randn(B, L)
+    reward = torch.tensor([1.0])
+    gamma, lam = 1.0, 0.9
+
+    ctx = _ctx([mask], [torch.zeros(B, L)], [values], kl_coef=0.0, gamma=gamma, lam=lam)
+    ctx.no_whiten = True
+    adv, ret = gae(reward, [[0]], ctx)
+
+    token_reward = torch.zeros(B, L)
+    token_reward[0, -1] = reward[0]
+    ref_adv, ref_ret = _reference_gae_masked(token_reward, values * mask, mask, gamma, lam)
+    assert torch.allclose(adv[0], ref_adv * mask, atol=1e-5)
+    assert torch.allclose(ret[0], ref_ret * mask, atol=1e-5)
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

@@ -163,7 +163,8 @@ class RemoteExperienceMaker:
         # ratio is 1 and the loss is REINFORCE — the old-logprob recompute is redundant.
         # Skip it; policy_train sets old = action.detach(), sharing the exact R3 routing.
         # (A KL/distill reward, kl_coef > 0, still needs old to compare against the ref.)
-        skip_actor_old = args.train.force_on_policy and args.algo.kl.init_coef == 0
+        # SAO ratios divide by pi_rollout, so pi_old is never read — skip it too.
+        skip_actor_old = (args.train.force_on_policy or args.algo.sao) and args.algo.kl.init_coef == 0
         if not skip_actor_old:
             actor_forward_kwargs = dict(vlm_forward_kwargs)
             if any(s.routed_experts is not None for s in samples_list):
@@ -361,6 +362,7 @@ class RemoteExperienceMaker:
             lam=args.algo.advantage.lam,
             values=[exp.values for exp in experiences] if needs_values else None,
             no_whiten=args.algo.advantage.no_whiten,
+            lam_alpha=args.algo.advantage.lam_alpha,
         )
         advantages, returns = get_advantage_estimator(self.advantage_estimator)(rewards, rollouts["groups"], ctx)
 

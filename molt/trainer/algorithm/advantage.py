@@ -64,6 +64,7 @@ class AdvantageContext:
     kls: List[torch.Tensor]  # per experience (B, L) per-token KL
     values: List[torch.Tensor] | None = None  # per experience (B, L) critic V(s) at collection (PPO/gae)
     no_whiten: bool = False  # skip whitening entirely: raw returns (no mean-center, no std)
+    lam_alpha: float | None = None  # length-adaptive lambda_policy = 1 - 1/(alpha*l); None = fixed lam
 
 
 Estimator = Callable[
@@ -238,6 +239,30 @@ def rloo(
     return [ret.clone() for ret in returns], returns
 
 
+def _gae_recursion(
+    token_reward: torch.Tensor,
+    values: torch.Tensor,
+    mask: torch.Tensor,
+    gamma: float,
+    lam: float | torch.Tensor,
+) -> torch.Tensor:
+    """Reverse GAE over the action span. Masked (padding / multi-turn observation) tokens
+    are transparent: the bootstrap value and running GAE carry across them, so an action
+    token before a gap bootstraps off the next action token's value, not a spurious V=0.
+    ``lam`` is a scalar or a per-sequence ``(B,)`` tensor (length-adaptive lambda_policy)."""
+    adv = torch.zeros_like(token_reward)
+    running = torch.zeros(token_reward.size(0), device=token_reward.device)
+    next_value = torch.zeros_like(running)  # V(s_{T+1}) = 0
+    m = mask.float()
+    for t in reversed(range(token_reward.size(1))):
+        delta = token_reward[:, t] + gamma * next_value - values[:, t]
+        running_t = delta + gamma * lam * running
+        next_value = values[:, t] * m[:, t] + (1 - m[:, t]) * next_value
+        running = running_t * m[:, t] + (1 - m[:, t]) * running
+        adv[:, t] = running
+    return adv
+
+
 @register_advantage_estimator("gae")
 def gae(
     rewards: torch.Tensor, groups: List[List[int]], ctx: AdvantageContext
@@ -282,28 +307,21 @@ def gae(
                 1, last[has_action], reward[has_action, None].to(token_reward.dtype)
             )
         token_reward = token_reward * mask
-        # Zero V(s) off the action span so the value-regression target below
-        # (returns = A + V) carries no critic output on masked positions; the
-        # recursion itself never reads these (they are carried over, see below).
+        # Zero V(s) off the action span so returns = A + V carries no critic output there.
         values = values * mask
 
-        # GAE reverse recursion: A_t = (r_t + gamma * V_{t+1} - V_t) + gamma * lam * A_{t+1}.
-        # Masked (padding / multi-turn observation) tokens are transparent: carry the
-        # bootstrap value and the running GAE across them so an action token before a
-        # gap bootstraps from the next action token's value, not a spurious terminal
-        # V = 0 (matters at lam < 1, a no-op at lam = 1).
-        adv = torch.zeros_like(token_reward)
-        running = torch.zeros(token_reward.size(0), device=token_reward.device)
-        next_value = torch.zeros_like(running)  # V(s_{T+1}) = 0
-        m = mask.float()
-        for t in reversed(range(token_reward.size(1))):
-            delta = token_reward[:, t] + ctx.gamma * next_value - values[:, t]
-            running_t = delta + ctx.gamma * ctx.lam * running
-            next_value = values[:, t] * m[:, t] + (1 - m[:, t]) * next_value
-            running = running_t * m[:, t] + (1 - m[:, t]) * running
-            adv[:, t] = running
+        # Advantages use lambda_policy: length-adaptive 1 - 1/(alpha*l) per sequence
+        # (l = action-token count) when lam_alpha is set, else the fixed lam.
+        if ctx.lam_alpha is not None:
+            length = mask.float().sum(dim=1).clamp(min=1.0)  # (B,)
+            lam_policy: float | torch.Tensor = 1.0 - 1.0 / (ctx.lam_alpha * length)
+        else:
+            lam_policy = ctx.lam
+        adv = _gae_recursion(token_reward, values, mask, ctx.gamma, lam_policy)
+        # Returns use lambda_critic (ctx.lam); reuse adv when the two lambdas coincide.
+        adv_critic = adv if ctx.lam_alpha is None else _gae_recursion(token_reward, values, mask, ctx.gamma, ctx.lam)
         advantages.append(adv * mask)
-        returns.append((adv + values) * mask)  # value-regression target: returns = A + V(s)
+        returns.append((adv_critic + values) * mask)  # value-regression target: returns = A + V(s)
     # Advantages must be whitened (mean/std over action tokens, unless no_whiten),
     # re-masked so off-action positions stay 0; returns are left un-whitened (they
     # remain the value-regression target A + V(s)).

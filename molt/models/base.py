@@ -258,6 +258,7 @@ class BaseModel(nn.Module):
         temperature: float = 1.0,
         freeze_visual_encoder: bool = False,
         freeze_moe_router: bool = False,
+        freeze_attention: bool = False,
         use_fp32_master_weights: bool = True,
         moe_aux_loss_coef: float = 0.0,
         routing_replay: bool = False,
@@ -514,6 +515,18 @@ class BaseModel(nn.Module):
                             n_frozen += 1
             if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
                 print(f"[MoE] freeze_moe_router=True: froze {n_frozen} router param tensors")
+
+        # Frozen-Attention value model: freeze self-attention, train only the MoE/FFN
+        # projections. Match by name segment (no single attention class across arches).
+        if freeze_attention:
+            n_frozen = 0
+            for name, module in self.model.named_modules():
+                if name.rsplit(".", 1)[-1] in {"self_attn", "attn", "attention"}:
+                    for param in module.parameters():
+                        param.requires_grad = False
+                        n_frozen += 1
+            if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+                print(f"[Critic] freeze_attention=True: froze {n_frozen} attention param tensors")
 
         # https://github.com/huggingface/transformers/issues/26877
         # Use `model.generate(use_cache=True)` instead.

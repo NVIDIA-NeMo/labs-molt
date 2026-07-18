@@ -337,10 +337,67 @@ def test_compute_approx_kl_sanitizes_equal_negative_infinity_logprobs():
     torch.testing.assert_close(kl, torch.zeros(1, 1))
 
 
+def test_sao_masks_out_of_band_tokens_to_zero_gradient():
+    # Band (0.7, 6.0); ratios [1.2, 8.0] -> in, out. Out-of-band tokens get zero grad
+    # (masked, not clamped); masked tokens stay in the denominator so grad_0 = -1.2/2.
+    loss_fn = PolicyLoss(loss_mode="sao", clip_eps_low=0.3, clip_eps_high=5.0)
+    log_probs = torch.log(torch.tensor([[1.2, 8.0]])).requires_grad_(True)
+    old_log_probs = torch.zeros(1, 2)
+
+    loss, *_ = loss_fn(
+        log_probs,
+        old_log_probs,
+        torch.ones(1, 2),
+        action_mask=torch.ones(1, 2, dtype=torch.bool),
+    )
+    loss.backward()
+
+    torch.testing.assert_close(log_probs.grad, torch.tensor([[-0.6, 0.0]]))
+
+
+def test_sao_clip_ratio_reports_fraction_masked_out_of_band():
+    # Band (0.7, 6.0); ratios [1.2, 8.0, 0.5] -> in, out, out -> 2/3 masked.
+    loss_fn = PolicyLoss(loss_mode="sao", clip_eps_low=0.3, clip_eps_high=5.0)
+    log_probs = torch.log(torch.tensor([[1.2, 8.0, 0.5]]))
+    old_log_probs = torch.zeros(1, 3)
+
+    _, _, clip_ratio, *_ = loss_fn(
+        log_probs,
+        old_log_probs,
+        torch.ones(1, 3),
+        action_mask=torch.ones(1, 3, dtype=torch.bool),
+    )
+
+    torch.testing.assert_close(clip_ratio, torch.tensor(2.0 / 3.0))
+
+
+def test_sao_in_band_gradient_flows_through_log_probs_like_cispo():
+    # In-band the masked ratio is stop-gradient'd, so grad = -detach(r)*A through log_probs.
+    # ratio = 1 -> grad = -A/N.
+    loss_fn = PolicyLoss(loss_mode="sao", clip_eps_low=0.3, clip_eps_high=5.0)
+    log_probs = torch.zeros(1, 2, requires_grad=True)
+    advantages = torch.tensor([[2.0, -3.0]])
+
+    loss, *_ = loss_fn(
+        log_probs,
+        torch.zeros(1, 2),
+        advantages,
+        action_mask=torch.ones(1, 2, dtype=torch.bool),
+    )
+    loss.backward()
+
+    torch.testing.assert_close(log_probs.grad, -advantages / 2.0)
+
+
+def test_sao_rejects_dual_clip_at_construction():
+    with pytest.raises(ValueError, match="no effect under loss_mode='sao'"):
+        PolicyLoss(loss_mode="sao", dual_clip=2.0)
+
+
 def test_policy_loss_registry_rejects_unknown_and_duplicate_names():
     from molt.models.loss import POLICY_LOSSES, get_policy_loss, register_policy_loss
 
-    assert {"ppo", "cispo"} <= set(POLICY_LOSSES)  # built-in surrogates are registered
+    assert {"ppo", "cispo", "sao"} <= set(POLICY_LOSSES)  # built-in surrogates are registered
     with pytest.raises(ValueError, match="Unknown policy loss"):
         get_policy_loss("nope")
     with pytest.raises(ValueError, match="Unknown policy loss"):

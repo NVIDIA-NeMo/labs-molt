@@ -273,6 +273,7 @@ class CriticModelActor(BaseModelActor):
             # Critic router freeze: its own --critic.freeze_moe_router, or inherit the actor's flag.
             freeze_moe_router=getattr(args.critic, "freeze_moe_router", False)
             or getattr(args.actor, "freeze_moe_router", False),
+            freeze_attention=getattr(args.critic, "freeze_attention", False),
             moe_aux_loss_coef=args.actor.aux_loss_coef,
         )
         strategy.print(critic)
