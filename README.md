@@ -354,10 +354,13 @@ the new delta, so a multi-turn episode stitches into one monotonic token-exact
 trajectory. But a long-horizon agent often **compacts** its context — summarizing
 or dropping old turns to stay under the window (e.g. a `/compact` step) — which
 *rewrites* the prefix, so it's no longer a clean extension of what was tokenized.
+The model's own chat template can rewrite the prefix too: Qwen3-style templates
+re-render a prior assistant turn without its `<think>` block once a newer user
+query follows.
 
 The server detects this automatically: when an incoming request rewrites the
 prefix instead of extending it, it **seals the current segment and starts a fresh
-token-exact segment** from the re-templated post-compaction conversation. One
+token-exact segment** from the re-templated conversation. One
 rollout therefore emits several segment trajectories — they share the rollout's
 reward and `rollout_id`, so group baselines (GRPO/RLOO/…) dedup them to *one
 reward per rollout* while each segment still contributes its own generated tokens

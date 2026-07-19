@@ -112,6 +112,22 @@ class _DriftyProc:
         return "".join(chr(i) for i in ids)
 
 
+class _PositionalThinkProc(_DriftyProc):
+    """Position-dependent history render (like Qwen3): an assistant turn keeps its <think>
+    block while it is the last message, but re-renders WITHOUT it once a newer user query
+    follows — so the prior-turn render does NOT cancel in the shared prefix."""
+
+    def apply_chat_template(self, chat, tokenize=False, add_generation_prompt=False, **kwargs):
+        last_query = max((i for i, m in enumerate(chat) if m["role"] == "user"), default=-1)
+        out = ""
+        for i, m in enumerate(chat):
+            content = m["content"]
+            if m["role"] == "assistant" and i < last_query and "</think>" in content:
+                content = content.split("</think>")[-1]
+            out += f"<{m['role']}>{content}</{m['role']}>"
+        return out + ("<gen>" if add_generation_prompt else "")
+
+
 class _DriftyEngine:
     def __init__(self, actions):  # actions: (action_ids, logprobs, finish, tag)
         self.actions = list(actions)
@@ -271,6 +287,43 @@ def test_compaction_starts_a_fresh_segment():
 
     out = stitch_session(state, "sid", Result(reward=1.0, score=0.5))
     assert len(out) == 2 and all(t.reward == 1.0 and t.scores == 0.5 for t in out)
+
+
+def test_template_rewritten_history_starts_fresh_segment():
+    # Qwen3-style templates re-render a PRIOR assistant turn without its <think> block once a
+    # newer user query follows, so the prior-turn render no longer cancels in the shared prefix
+    # and the suffix slice would silently drop or garble the new turn's feedback. The server must
+    # treat the re-rendered history like a compaction: fresh token-exact segment from the full
+    # render, with the feedback actually reaching the generation context.
+    a1, a2, a3 = "<think>T</think>ANS", "A2", "A3"
+    engine = _DriftyEngine(
+        [_dact(_ids(a1), [-0.1] * len(a1)), _dact(_ids(a2), [-0.2] * len(a2)), _dact(_ids(a3), [-0.3] * len(a3))]
+    )
+    proc = _PositionalThinkProc()
+    state = ChatServerState(engine, proc, "policy", 10000, _sampling())
+    state.open("sid", "P", "lab", None)
+    session = state.sessions["sid"]
+
+    msgs = [{"role": "user", "content": "Q0"}]
+    act1, _ = _drive(state, session, msgs)
+    assert act1 == a1
+    msgs = msgs + [{"role": "assistant", "content": act1}, {"role": "user", "content": "OBS1"}]
+    _drive(state, session, msgs)
+
+    assert len(session.trajectories) == 2  # rewritten history -> fresh segment, not a garbled delta
+    turn2_prompt = _ids(proc.apply_chat_template(msgs, add_generation_prompt=True))
+    assert engine.prompts[1] == turn2_prompt  # generated over the canonical re-render
+    assert "OBS1" in proc.decode(engine.prompts[1])  # the feedback reached the model
+    assert session.trajectories[1].observation_tokens == turn2_prompt + _ids(a2)
+
+    # A later turn whose prior renders are stable (a2 has no think block) extends segment 2.
+    msgs = msgs + [{"role": "assistant", "content": a2}, {"role": "user", "content": "OBS2"}]
+    _drive(state, session, msgs)
+    assert len(session.trajectories) == 2
+    assert [len(t.action_ranges) for t in session.trajectories] == [1, 2]
+
+    out = stitch_session(state, "sid", Result(reward=1.0))
+    assert len(out) == 2 and all(t.reward == 1.0 for t in out)
 
 
 def test_run_turn_replays_retried_turn_idempotently(monkeypatch):
