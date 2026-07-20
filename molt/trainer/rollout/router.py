@@ -294,10 +294,14 @@ class AgentRunnerActor:
         import aiohttp
 
         from molt.agents.base import load_agent_runner  # lazy: router.py is imported by _chat_server
+        from molt.trainer.rollout.samples_generator import SamplesGenerator
         from molt.utils import get_tokenizer
 
         self._runner = load_agent_runner(agent_path)
         self._tokenizer = get_tokenizer(model_path, None) if model_path else None
+        # Image/video placeholder ids, cached once — _process_response_into_experience uses them to
+        # detect an image dropped by max_len truncation (vit-embed misalignment) and count tokens.
+        self._media_ids = SamplesGenerator._media_token_ids(self._tokenizer) if self._tokenizer else set()
         # VLM image placeholder id (from the HF processor) — the transport uses it to align render's
         # mm features onto our canonical prompt's image-token run (see _align_features_to_canonical).
         image_token_id = getattr(self._tokenizer, "image_token_id", None)
@@ -317,9 +321,16 @@ class AgentRunnerActor:
         return True
 
     async def run_group(self, prompt, label, images, sampling_params, max_length, n_samples, tools=None):
-        """N rollouts of one prompt (unchanged runner) -> flattened Trajectories, tagged
-        group_id (per prompt; GRPO baseline) + rollout_id (per rollout; multi-turn
-        step-samples share it). A failed rollout is dropped, never sinks the group."""
+        """N rollouts of one prompt (unchanged runner) -> per step-sample ``(experience, drop_reason)``.
+
+        Each usable trajectory is built into a train-ready Experience HERE, on the producing runner,
+        then `offload`ed: its heavy tensors (images / token ids / rollout routing) stay in THIS
+        node's object store and only the lazy handle travels to the controller — so a 256-session
+        batch of screenshots never concentrates on one node. Tagged group_id (per prompt; GRPO
+        baseline) + rollout_id (per rollout; multi-turn step-samples share it). A failed/unusable
+        rollout is dropped, never sinks the group."""
+        from molt.trainer.rollout.samples_generator import SamplesGenerator
+
         group_id = uuid4().hex
         tasks = [
             self._runner.execute(
@@ -334,7 +345,7 @@ class AgentRunnerActor:
             )
             for _ in range(n_samples)
         ]
-        flattened = []
+        results = []
         for r in await asyncio.gather(*tasks, return_exceptions=True):  # a failed rollout must not sink the group
             if isinstance(r, BaseException):
                 print(f"[runner] dropping failed rollout in group {group_id}: {r!r}", flush=True)
@@ -342,8 +353,16 @@ class AgentRunnerActor:
             rollout_id = uuid4().hex
             for traj in r if isinstance(r, list) else [r]:
                 traj.group_id, traj.rollout_id = group_id, rollout_id
-                flattened.append(traj)
-        return flattened
+                exp, drop_reason = SamplesGenerator._process_response_into_experience(
+                    traj, self._media_ids, max_length
+                )
+                if exp is None:
+                    results.append((None, drop_reason))
+                    continue
+                # Offload the heavy tensors into THIS runner's object store; the controller receives
+                # a lazy Experience (a handle) and only its consuming rank calls reload() to fetch them.
+                results.append((exp.offload(), None))
+        return results
 
 
 def create_vllm_router(engines, *, policy="consistent_hash", port=30000):

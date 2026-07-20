@@ -21,7 +21,7 @@ import socket
 import time
 from contextlib import ExitStack
 from dataclasses import fields
-from typing import Dict, List, Optional, Union
+from typing import Dict, List
 
 import ray
 import torch
@@ -835,29 +835,29 @@ class PolicyModelActor(BaseModelActor):
             args.ckpt.output_dir,
         )
 
-    def forward(
-        self,
-        sequences: torch.LongTensor,
-        action_mask: Optional[Union[int, list[int]]] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        mm_train_inputs_list=None,
-        routed_experts=None,
-    ) -> torch.Tensor:
-        """Generate actor action log probabilities."""
+    def forward(self, experience) -> torch.Tensor:
+        """Old actor action log-probs for one rollout Experience — the old log-probs used off-policy
+        and the student side of the KL-as-reward path (on_policy_distill / reinforce-KL). reload()
+        first fetches the sample's heavy tensors (token ids / images / routing) from the producing
+        runner's shared-memory store — they reach this rank straight from the runner, never through
+        the controller. Called per sample by execute_batch; the controller attaches the result as
+        action_log_probs."""
+        experience = experience.reload()
         device = torch.cuda.current_device()
 
-        # VLM: merge pre-processed multimodal inputs from all samples in batch
+        # VLM: merge pre-processed multimodal inputs.
         mm_inputs = {}
-        if mm_train_inputs_list and getattr(self.actor, "is_vlm", False):
-            mm_inputs = merge_mm_train_inputs(mm_train_inputs_list, device)
+        if experience.mm_train_inputs and getattr(self.actor, "is_vlm", False):
+            mm_inputs = merge_mm_train_inputs(experience.mm_train_inputs, device)
 
+        routed_experts = experience.routed_experts
         self.actor.eval()
         with torch.no_grad():
             output = self.actor(
-                sequences.to(device),
-                action_mask.to(device),
-                attention_mask.to(device),
-                # R3: replay rollout routing for the old-logprob recompute too.
+                experience.sequences.to(device),
+                experience.action_mask.to(device),
+                experience.attention_mask.to(device),
+                # R3: replay rollout routing so old picks the same experts as training.
                 routed_experts=routed_experts.to(device) if routed_experts is not None else None,
                 **mm_inputs,
             )
@@ -871,7 +871,10 @@ class PolicyModelActor(BaseModelActor):
         return self.checkpoint_states
 
     def append(self, experience: Experience):
-        self.trainer.replay_buffer.append(experience)
+        # reload() fetches the sample's heavy tensors (images / token ids / routing) from the
+        # producing runner's shared-memory store — they reach this rank straight from the runner,
+        # never through the controller. A no-op for an already-local experience.
+        self.trainer.replay_buffer.append(experience.reload())
 
     def save_checkpoint(self, tag, client_states=None, metric_value=None, metric_key=None):
         args = self.strategy.args

@@ -33,7 +33,7 @@ gradient is mean-all-reduced over the DP(+CP) group once, right before the step.
 import os
 import time
 from contextlib import ExitStack
-from typing import Dict, Optional, Union
+from typing import Dict
 
 import ray
 import torch
@@ -329,33 +329,32 @@ class CriticModelActor(BaseModelActor):
         torch.cuda.synchronize()
         return status
 
-    def forward(
-        self,
-        sequences: torch.LongTensor,
-        action_mask: Optional[Union[int, list[int]]] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        mm_train_inputs_list=None,
-    ) -> torch.Tensor:
-        """Per-token value V(s) on the action span (collection-time old_values)."""
+    def forward(self, experience) -> torch.Tensor:
+        """Per-token value V(s) on the action span (collection-time old_values) for one rollout
+        Experience. reload() first fetches the sample's heavy tensors from the producing runner's
+        shared-memory store. Called per sample by execute_batch; the controller attaches values."""
+        experience = experience.reload()
         device = torch.cuda.current_device()
 
         mm_inputs = {}
-        if mm_train_inputs_list and getattr(self.critic, "is_vlm", False):
-            mm_inputs = merge_mm_train_inputs(mm_train_inputs_list, device)
+        if experience.mm_train_inputs and getattr(self.critic, "is_vlm", False):
+            mm_inputs = merge_mm_train_inputs(experience.mm_train_inputs, device)
 
         self.critic.eval()
         with torch.no_grad():
             output = self.critic(
-                sequences.to(device),
-                action_mask.to(device),
-                attention_mask.to(device),
+                experience.sequences.to(device),
+                experience.action_mask.to(device),
+                experience.attention_mask.to(device),
                 **mm_inputs,
             )
         self.critic.train()  # reset model state
         return output["action_values"].to("cpu")
 
     def append(self, experience: Experience):
-        self.trainer.replay_buffer.append(experience)
+        # reload() fetches the sample's heavy tensors from the producing runner's shared-memory
+        # store (a no-op if already local); mirrors PolicyModelActor.append.
+        self.trainer.replay_buffer.append(experience.reload())
 
     def get_checkpoint_states(self):
         return self.checkpoint_states

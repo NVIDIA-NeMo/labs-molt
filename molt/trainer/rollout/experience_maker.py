@@ -19,8 +19,6 @@
 from __future__ import annotations
 
 import itertools
-import time
-from datetime import timedelta
 from typing import TYPE_CHECKING, List
 
 import ray
@@ -32,9 +30,8 @@ from molt.trainer.algorithm.advantage import (
     AdvantageContext,
     get_advantage_estimator,
 )
-from molt.trainer.algorithm.experience import Experience, get_model_parallel_size
+from molt.trainer.algorithm.experience import Experience
 from molt.utils.logging_utils import init_logger
-from molt.utils.seqlen_balancing import get_minimum_num_micro_batch_size, get_seqlen_balanced_partitions
 
 if TYPE_CHECKING:
     from molt.trainer.workers.actor_group import RayActorGroup
@@ -67,198 +64,72 @@ class RemoteExperienceMaker:
         self.tokenizer = tokenizer
         self.kl_ctl = kl_controller
 
-    def split_rollout_samples(self, rollout_samples):
-        for i, sample in enumerate(rollout_samples):
-            sample.index = [i]
-
-        samples_list = []
-        if self.args.train.dynamic_batch_enable:
-            total_lengths = [int(s.total_length.item()) for s in rollout_samples]
-            actor_world_size = self.args.actor.num_nodes * self.args.actor.num_gpus_per_node
-            effective_actor_num = actor_world_size // get_model_parallel_size(self.args)
-            if effective_actor_num <= 0:
-                raise ValueError(f"Invalid effective actor count: {effective_actor_num}")
-            minimum_batch_num = get_minimum_num_micro_batch_size(
-                total_lengths,
-                self.args.rollout.max_tokens_per_gpu,
-                self.args.fsdp.cp_size,
-                self.args.fsdp.tp_size,
-            )
-            num_batch = max(minimum_batch_num, effective_actor_num)
-            batch_indexes = get_seqlen_balanced_partitions(total_lengths, num_batch, False)
-            for micro_index in batch_indexes:
-                micro_batch = [rollout_samples[idx] for idx in micro_index]
-                concat_samples = Experience.concat_experiences(micro_batch, self.tokenizer.pad_token_id)
-                samples_list.append(concat_samples)
-        else:
-            batch_size = self.args.rollout.micro_batch_size
-            for i in range(0, len(rollout_samples), batch_size):
-                concat_samples = Experience.concat_experiences(
-                    rollout_samples[i : i + batch_size], self.tokenizer.pad_token_id
-                )
-                samples_list.append(concat_samples)
-        return samples_list
+    def build_experiences(self, rollout_samples: List[Experience]) -> List[Experience]:
+        """Turn balanced rollout samples into train-ready experiences: recompute the log-probs and
+        values the loss needs (make_experience), then the advantages and returns."""
+        experiences = self.make_experience(rollout_samples)
+        return self.compute_advantages_and_returns(experiences)
 
     @torch.no_grad()
-    def build_experiences(self, rollout_samples) -> List[Experience]:
-        """Turn already-generated rollout samples into train-ready experiences.
-
-        Splits the rollout batch across DP ranks, runs the remote log-prob / KL
-        forwards, then computes advantages and returns. (Sequences and rewards
-        are produced earlier by the SamplesGenerator, not here.)
-        """
-        # Each batch of samples will be scheduled to a effective Ray Actor (i.e, a DP rank)
-        samples_list = self.split_rollout_samples(rollout_samples)
-
-        # Make experiences (models forward: logprobs and KL divergence)
-        experiences = self.make_experience(samples_list)
-
-        # Process experiences (reward shaping, etc.)
-        experiences = self.compute_advantages_and_returns(experiences)
-        return experiences
-
-    # Remote model dispatch helpers
-
-    def _dispatch_forward(self, group, sync_condition, **kwargs):
-        """Dispatch a batched forward call and optionally sync + empty cache."""
-        ref = group.async_run_method_batch(method_name="forward", **kwargs)
-        if sync_condition:
-            ray.get(ref)
-            ray.get(group.async_run_method(method_name="empty_cache"))
-        return ref
-
-    @torch.no_grad()
-    def make_experience(self, samples_list: List[Experience]) -> List[Experience]:
-        """Turn samples into experience by calculating logprobs and KL divergence."""
-        start_time = time.time()
-        logger.info(f"Starting experience making with {sum([len(s.sequences) for s in samples_list])} samples")
-
+    def make_experience(self, experiences: List[Experience]) -> List[Experience]:
+        """Recompute the log-probs and values the policy loss needs. Each model's forward runs on
+        its DP ranks, which fetch their samples with Experience.reload() — so the heavy tensors stay
+        in shared memory and never reach the controller. Attaches values (GAE critic),
+        base_action_log_probs (KL recipes), old action_log_probs, and the per-token kl, ready for
+        advantage estimation."""
         args = self.args
-        cp_tp_copies = get_model_parallel_size(args)
-        n_samples = len(samples_list)
+        if self.critic_model_group is not None:
+            self._dispatch_forward(experiences, self.critic_model_group, "values")
+        if self.initial_model_group is not None:
+            self._dispatch_forward(experiences, self.initial_model_group, "base_action_log_probs")
 
-        # Extract tensors for batch processing
-        sequences_list = [s.sequences for s in samples_list]
-        attention_mask_list = [s.attention_mask for s in samples_list]
-        action_mask_list = [s.action_mask for s in samples_list]
-        forward_kwargs = dict(
-            sequences=sequences_list, action_mask=action_mask_list, attention_mask=attention_mask_list
-        )
-
-        # VLM: pre-processed multimodal inputs needed by actor and reference models
-        vlm_forward_kwargs = dict(forward_kwargs)
-        if any(s.mm_train_inputs for s in samples_list):
-            vlm_forward_kwargs["mm_train_inputs_list"] = [s.mm_train_inputs for s in samples_list]
-
-        if any(samples.rewards is None for samples in samples_list):
-            raise ValueError(
-                "Rollout samples must include rewards. Use --train.agent_path and return "
-                "`rewards` or `reward` from the agent."
-            )
-
-        colocated_policy_workers = getattr(args.train, "colocate_fsdp_models", False) and (
-            self.initial_model_group is not None or self.critic_model_group is not None
-        )
-        # On-policy with no KL (kl_coef == 0): old == the training forward, so the PPO
-        # ratio is 1 and the loss is REINFORCE — the old-logprob recompute is redundant.
-        # Skip it; policy_train sets old = action.detach(), sharing the exact R3 routing.
-        # (A KL/distill reward, kl_coef > 0, still needs old to compare against the ref.)
+        # Old actor log-probs. Force-on-policy with no KL reward (kl_coef==0): old == the training
+        # forward, so the PPO ratio is 1 (REINFORCE) and policy_train recomputes old itself — skip
+        # the redundant pass. Otherwise (off-policy, or a KL/distill reward that compares old vs the
+        # ref) run the actor forward here.
         skip_actor_old = args.train.force_on_policy and args.algo.kl.init_coef == 0
         if not skip_actor_old:
-            actor_forward_kwargs = dict(vlm_forward_kwargs)
-            if any(s.routed_experts is not None for s in samples_list):
-                # R3: replay the rollout routing so old picks the same experts as training.
-                actor_forward_kwargs["routed_experts"] = [s.routed_experts for s in samples_list]
-            action_log_probs_ref = self._dispatch_forward(
-                self.actor_model_group,
-                colocated_policy_workers,
-                **actor_forward_kwargs,
-            )
+            self._dispatch_forward(experiences, self.actor_model_group, "action_log_probs")
 
-        # Reference model (also receives mm_train_inputs_list for VLM). If there is no
-        # reference, base log-probs stay None (filled below).
-        base_action_log_probs_ref = None
-        if self.initial_model_group is not None:
-            base_action_log_probs_ref = self._dispatch_forward(
-                self.initial_model_group,
-                colocated_policy_workers,
-                **vlm_forward_kwargs,
-            )
-
-        # Critic value model (PPO/gae only). Its own Ray group; CriticModelActor.forward
-        # returns the per-token V(s) on the action span — same dispatch shape as the ref.
-        use_critic = self.advantage_estimator == "gae"
-        if use_critic and self.critic_model_group is None:
-            raise ValueError("advantage_estimator=gae requires a critic_model_group.")
-        values_ref = (
-            self._dispatch_forward(self.critic_model_group, colocated_policy_workers, **vlm_forward_kwargs)
-            if use_critic
-            else None
-        )
-
-        # Gather each forward's per-sample results, dropping the duplicate CP/TP rank
-        # copies. A forward we didn't run (skipped actor / no reference / no critic)
-        # yields a per-sample None list.
-        if skip_actor_old:
-            action_log_probs_list = [None] * n_samples
-        else:
-            action_log_probs_list = list(itertools.chain.from_iterable(ray.get(action_log_probs_ref)[::cp_tp_copies]))
-
-        if base_action_log_probs_ref is not None:
-            base_action_log_probs_list = list(
-                itertools.chain.from_iterable(ray.get(base_action_log_probs_ref)[::cp_tp_copies])
-            )
-        else:
-            base_action_log_probs_list = [None] * n_samples
-
-        if use_critic:
-            values_list = list(itertools.chain.from_iterable(ray.get(values_ref)[::cp_tp_copies]))
-        else:
-            values_list = None
-
-        assert len(samples_list) == len(action_log_probs_list) == len(base_action_log_probs_list), (
-            f"len(samples_list): {len(samples_list)}, len(action_log_probs_list): {len(action_log_probs_list)}, len(base_action_log_probs_list): {len(base_action_log_probs_list)}"
-        )
-        if use_critic:
-            assert len(values_list) == len(samples_list), f"values {len(values_list)} != samples {len(samples_list)}"
-
-        # Compute KL and attach results to experiences
-
-        for i, (samples, action_log_probs, base_action_log_probs) in enumerate(
-            zip(samples_list, action_log_probs_list, base_action_log_probs_list)
-        ):
-            if (self.initial_model_group is not None) and (not args.algo.kl.use_loss) and action_log_probs is not None:
-                kl = compute_approx_kl(
-                    action_log_probs,
-                    base_action_log_probs,
+        for i, experience in enumerate(experiences):
+            experience.index = [i]
+            # KL-as-reward (on_policy_distill, or reinforce/gae with kl_coef>0 and KL kept off the
+            # loss): the advantage's per-token signal is the student->teacher KL. With KL in the loss
+            # (or no ref) the advantage sees no KL reward, so kl stays zero.
+            if (
+                self.initial_model_group is not None
+                and not args.algo.kl.use_loss
+                and experience.action_log_probs is not None
+            ):
+                experience.kl = compute_approx_kl(
+                    experience.action_log_probs,
+                    experience.base_action_log_probs,
                     kl_estimator=args.algo.kl.estimator,
                 )
-                logprobs_diff = action_log_probs.float() - base_action_log_probs.float()
+                logprobs_diff = experience.action_log_probs.float() - experience.base_action_log_probs.float()
             else:
-                # action_log_probs may be None (force_on_policy skipped the recompute),
-                # so size the zero KL / logprobs_diff from the always-present action mask.
-                kl = torch.zeros_like(samples.action_mask, dtype=torch.float32, device="cpu")
-                logprobs_diff = torch.zeros_like(samples.action_mask, dtype=torch.float32, device="cpu")
-            kl_mean = masked_mean(kl, samples.action_mask, dim=-1)
-            logprobs_diff_mean = masked_mean(logprobs_diff, samples.action_mask, dim=-1)
-
+                experience.kl = torch.zeros_like(experience.action_mask, dtype=torch.float32)
+                logprobs_diff = torch.zeros_like(experience.action_mask, dtype=torch.float32)
+            experience.info["kl"] = masked_mean(experience.kl, experience.action_mask, dim=-1)
+            experience.info["logprobs_diff"] = masked_mean(logprobs_diff, experience.action_mask, dim=-1)
+            # With KL as a reward (or no ref) the loss needs no separate KL term, so drop the ref
+            # log-probs; the KL-in-loss path keeps them for policy_train's loss.
             if not args.algo.kl.use_loss:
-                base_action_log_probs = None
+                experience.base_action_log_probs = None
+        return experiences
 
-            # Update experience with new information
-            samples.action_log_probs = action_log_probs
-            samples.base_action_log_probs = base_action_log_probs
-            samples.kl = kl
-            samples.info["kl"] = kl_mean
-            samples.info["logprobs_diff"] = logprobs_diff_mean
-            if use_critic:
-                # Collection-time V(s) on the action span; the PPO old_values that
-                # gae subtracts and the value loss clips around.
-                samples.values = values_list[i]
-
-        time_str = str(timedelta(seconds=time.time() - start_time)).split(".")[0]
-        logger.info(f"Experience making completed in {time_str}")
-        return samples_list
+    def _dispatch_forward(self, experiences: List[Experience], group: "RayActorGroup", result_attr: str) -> None:
+        """Run ``group``'s forward on every sample — distributed across its DP ranks, each reloading its
+        own heavy tensors so they never reach the controller — and store the per-sample result on the
+        Experience under ``result_attr`` ("values" / "base_action_log_probs" / "action_log_probs"). Every
+        cp/tp rank in a DP group returned the same per-sample results, so keep one copy per group (drop
+        the duplicates) and flatten to one result per sample, in ``experiences`` order. Frees the
+        forward's cache before the colocated actor trains on the same GPUs."""
+        refs = group.async_run_method_batch(method_name="forward", experience=experiences)
+        outputs = list(itertools.chain.from_iterable(ray.get(refs)[:: group.duplicate_actors]))
+        for experience, output in zip(experiences, outputs):
+            setattr(experience, result_attr, output)
+        ray.get(group.async_run_method(method_name="empty_cache"))
 
     # Advantage and return computation
 

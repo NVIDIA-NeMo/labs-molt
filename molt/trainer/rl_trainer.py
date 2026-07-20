@@ -284,47 +284,52 @@ class BaseRLTrainer:
         raise NotImplementedError("fit method is not implemented")
 
     def train_step(self, rollout_samples, global_step: int) -> Tuple[Dict, int]:
-        # Turn raw rollouts into policy-gradient trajectories with rewards.
+        # `rollout_samples` are lazy Experiences: each sample's heavy tensors (images / token ids /
+        # rollout routing) sit in shared memory (the producing runner's object store) behind a handle.
+        # The flow below is the ordinary single-controller RL step — balance, make experience, compute
+        # advantages, push, optimize — and only the ranks that consume a sample fetch its heavy tensors
+        # (Experience.reload()). So the controller works with light handles and a full image batch
+        # never concentrates on one node; the transfer is transparent (Ray resolves each handle where
+        # it is used).
         t0 = time.time()
-        experiences = self.experience_maker.build_experiences(rollout_samples)
+        experiences = balance_experiences(rollout_samples, self.args)
+        experiences = self.experience_maker.build_experiences(experiences)
         make_experience_time = time.time() - t0
 
-        # Peek at the first decoded sample for quick sanity check.
+        # Peek at the first sample's token ids for a sanity log. If it is still lazy, fetch its heavy
+        # blob from shared memory and read sequences out — leaving heavy_ref set so the sample still
+        # ships cheaply to its rank below; otherwise read the local tensor directly.
+        first = experiences[0]
+        if first.heavy_ref is not None:
+            first_seq = ray.get(first.heavy_ref)["sequences"]
+        else:
+            first_seq = first.sequences
         sample0 = [
-            self.tokenizer.decode(experiences[0].sequences[0], skip_special_tokens=True),
+            self.tokenizer.decode(first_seq[0], skip_special_tokens=True),
             experiences[0].info["reward"][0].item(),
         ]
         logger.info(f"Sample: {sample0}")
         if os.environ.get("MOLT_DEBUG_ROLLOUT") == "1":
             debug_rows = []
-            for exp_idx, exp in enumerate(experiences):
-                batch = exp.sequences.shape[0]
-                rewards = exp.info.get("reward")
-                returns = exp.info.get("return")
-                group_stds = exp.info.get("group_reward_std")
-                for row in range(batch):
-                    index = exp.index[row] if isinstance(exp.index, list) and row < len(exp.index) else row
-                    debug_rows.append(
-                        {
-                            "exp": exp_idx,
-                            "row": row,
-                            "index": int(index),
-                            "reward": rewards[row].item() if isinstance(rewards, torch.Tensor) else None,
-                            "return": returns[row].item() if isinstance(returns, torch.Tensor) else None,
-                            "group_reward_std": (
-                                group_stds[row].item() if isinstance(group_stds, torch.Tensor) else None
-                            ),
-                            "text": self.tokenizer.decode(exp.sequences[row], skip_special_tokens=True),
-                        }
-                    )
+            for exp in experiences:
+                info = exp.info
+                debug_rows.append(
+                    {
+                        "index": int(exp.index[0]) if exp.index else None,
+                        "reward": info["reward"][0].item() if "reward" in info else None,
+                        "return": info["return"][0].item() if "return" in info else None,
+                        "group_reward_std": info["group_reward_std"][0].item() if "group_reward_std" in info else None,
+                        "text": self.tokenizer.decode(exp.reload().sequences[0], skip_special_tokens=True),
+                    }
+                )
             logger.info(f"RolloutDebug: {debug_rows}")
 
-        # Compute ground-truth rollout stats BEFORE dynamic batch splitting.
-        all_rewards = torch.cat([exp.info["reward"] for exp in experiences if "reward" in exp.info])
-        all_response_lengths = torch.cat(
-            [exp.response_length for exp in experiences if exp.response_length is not None]
-        )
-        all_truncated = torch.cat([exp.truncated for exp in experiences if exp.truncated is not None])
+        # Ground-truth rollout stats over the FULL generated set — from the lightweight fields present
+        # on every rollout sample, and computed on `rollout_samples` (before balance_experiences drops
+        # the trailing remainder), so num_samples and the means reflect everything we generated.
+        all_rewards = torch.cat([s.info["reward"] for s in rollout_samples if "reward" in s.info])
+        all_response_lengths = torch.cat([s.response_length for s in rollout_samples if s.response_length is not None])
+        all_truncated = torch.cat([s.truncated for s in rollout_samples if s.truncated is not None])
         rollout_stats = {
             "rollout/reward_mean": all_rewards.float().mean().item(),
             "rollout/reward_std": all_rewards.float().std().item() if len(all_rewards) > 1 else 0.0,
@@ -333,16 +338,10 @@ class BaseRLTrainer:
             "rollout/num_samples": float(len(all_rewards)),
         }
 
-        # Balance experiences so every DP rank gets an equal sample count (both
-        # dynamic and static paths). Unequal counts -> different per-rank
-        # training-step counts -> mismatched collective shapes (per-microbatch
-        # global_token_count all-reduce and FSDP reduce-scatter) -> NCCL hang.
-        # Multi-turn agents (variable step-samples per rollout) and rollout counts
-        # not divisible by the DP degree both break this invariant without re-balance.
-        experiences = balance_experiences(experiences, self.args)
-
-        # Push experiences to actor shards (and the critic, which trains on the same
-        # batch with values + returns) before optimization.
+        # Push the experiences to the actor shards (and the critic, which trains on the same batch
+        # with values + returns) before optimization. Each rank fetches its samples' heavy tensors
+        # from the producing runner via reload() — the images reach the rank straight from the
+        # runner, never through the controller.
         refs = self.actor_model_group.async_run_method_batch(method_name="append", experience=experiences)
         if self.critic_model_group is not None:
             refs += self.critic_model_group.async_run_method_batch(method_name="append", experience=experiences)
