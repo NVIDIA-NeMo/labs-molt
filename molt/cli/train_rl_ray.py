@@ -468,8 +468,25 @@ if __name__ == "__main__":
         default=None,
         help="KL coefficient. Defaults to 0.01 (KL-to-init RL) or 1.0 (on_policy_distill reverse-KL reward).",
     )
-    parser.add_argument("--algo.kl.target", type=float, default=None)
-    parser.add_argument("--algo.kl.horizon", type=int, default=10000)
+    parser.add_argument(
+        "--algo.kl.target",
+        type=float,
+        default=None,
+        help=(
+            "Target KL for adaptive control. Set to a positive value to adjust the "
+            "KL coefficient so measured KL moves toward this target; leave unset "
+            "to keep the coefficient fixed at --algo.kl.init_coef."
+        ),
+    )
+    parser.add_argument(
+        "--algo.kl.horizon",
+        type=int,
+        default=10000,
+        help=(
+            "Adaptive-KL horizon in rollout samples; larger values produce slower "
+            "coefficient updates. Used only when --algo.kl.target is set."
+        ),
+    )
     parser.add_argument(
         "--algo.dynamic_filtering_enable", action="store_true", default=False, help="Enable dynamic filtering"
     )
