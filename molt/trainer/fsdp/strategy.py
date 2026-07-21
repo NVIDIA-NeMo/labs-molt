@@ -416,15 +416,18 @@ class FsdpStrategy:
                 if self.is_rank_0():
                     print("[MoE] MoEAuxLossAutoScaler import failed; aux-loss scaling skipped.")
             else:
-                # Normalize the aux gradient consistently with the main loss
-                # (NeMo-RL's Megatron convention). The gate injects coef*aux per
-                # microbatch and the autoscaler backward emits this scale as the
-                # gradient; FSDP's mean-reduce already averages over the dp_cp
-                # ranks, so 1/accum_steps makes the optimizer-step total
-                # coef * mean(aux) — invariant to cluster size and accumulation.
-                # The previous dp_cp scale compounded to coef*dp_cp*accum.
+                # Scale the aux gradient by the SAME factor the main loss backward
+                # gets (AutoModel's convention: main_loss_backward_scale must equal
+                # the main-loss multiplier). Under CP each gate sees only its local
+                # sequence shard, so summing the disjoint per-shard aux across CP
+                # ranks reconstructs the full-batch aux — but FSDP mean-reduces param
+                # grads over dp_cp, dividing by cp again. So without the cp_size factor
+                # the load-balance gradient is cp_size× too weak (the main loss carries
+                # the same * cp_size above; AutoModel sets this to dp_cp_size for the
+                # identical reason). The 1/accum averages the per-microbatch aux over
+                # the optimizer-step window. Net: coef * mean(aux), cluster-invariant.
                 MoEAuxLossAutoScaler.main_loss_backward_scale = torch.tensor(
-                    1.0 / max(1, self.accumulated_gradient),
+                    self.cp_size / max(1, self.accumulated_gradient),
                     device=loss.device,
                 )
         loss.backward()
