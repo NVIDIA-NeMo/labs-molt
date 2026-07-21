@@ -214,15 +214,17 @@ bash examples/scripts/docker_run.sh "python -c 'import vllm, transformer_engine;
 # build locally instead of pulling:  IMAGE_NAME=molt:local SKIP_BUILD=0 bash examples/scripts/docker_run.sh "pytest -q"
 ```
 
-For local (non-container) development:
+For local (non-container) development, prefer the editable install from this checkout —
+it pulls the exact git-pinned AutoModel this repo is validated against:
 
 ```bash
-pip install "molt-rl[vllm]"      # released package from PyPI, with the pinned vLLM
-pip install -e ".[vllm]"         # or editable, from this checkout (exact git-pinned AutoModel)
+pip install -e ".[vllm]"         # recommended: exact git-pinned deps, R3/Muon work out of the box
+pip install "molt-rl[vllm]"      # or the released package from PyPI
 ```
 
-(The PyPI release depends on AutoModel's PyPI release; source/editable installs pull the
-exact git pin automatically, which R3 routing replay and the Muon optimizer need.)
+> **Note**: PyPI forbids git-pinned dependencies, so `molt-rl` depends on AutoModel's PyPI
+> release instead — it can lag the pin in `requirements.txt`, and R3 routing replay needs
+> the newer pin (it fails fast with instructions when the installed AutoModel is too old).
 
 ## 🚀 Quick Start
 
