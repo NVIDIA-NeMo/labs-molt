@@ -16,6 +16,7 @@
 # Adapted from OpenRLHF (https://github.com/OpenRLHF/OpenRLHF),
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
+import copy
 import os
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
@@ -123,19 +124,20 @@ class SamplesGenerator:
         finished = getattr(self, "_finished_samples", None)
         if not getattr(self.args.ckpt, "warm_resume_rollouts", False) or not finished:
             return {}
-        # The rollout is held as lazy Experiences whose heavy tensors live in the runners' object
-        # stores (Experience.heavy_ref); those refs die when the runners restart, so a warm buffer
-        # can't seed a resumed run. Skip the save rather than persist dead refs (the resume
-        # regenerates the untrained tail instead).
-        if any(getattr(s, "heavy_ref", None) is not None for s in finished):
-            logger.warning("warm-resume: skipped (lazy rollout Experiences don't survive a restart)")
-            return {}
         try:
+            # The rollout is held as lazy Experiences whose heavy tensors (token ids / images /
+            # routing) live in the runners' object stores (Experience.heavy_ref); those refs die
+            # when the runners restart, so persisting the ref would seed a resumed run with dead
+            # handles. Materialize a LOCAL copy of each untrained group instead — copy + reload
+            # fetches the heavy tensors from the producing runner — and persist that. The reload
+            # runs on the COPY (copy.copy is shallow, reload rebinds its own fields), so the
+            # originals stay lazy and the current step still ships them cheaply.
+            local = [copy.copy(s).reload() for s in finished]
             d = os.path.join(os.path.dirname(self.args.ckpt.path.rstrip("/")), "rollout_warm")
             os.makedirs(d, exist_ok=True)
             self._warm_seq = getattr(self, "_warm_seq", 0) + 1
             path = os.path.join(d, f"{self._BUFFER}.{os.getpid()}.{self._warm_seq}")  # pid+seq: unique per step
-            torch.save(list(finished), path)
+            torch.save(local, path)
             for stale in sorted(os.scandir(d), key=lambda e: e.stat().st_mtime)[:-3]:  # keep newest 3; bound disk
                 os.remove(stale.path)
             return {"buffer_file": path}

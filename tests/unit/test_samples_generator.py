@@ -310,3 +310,62 @@ def test_process_response_skips_misaligned_rollout_logprobs():
 
     assert experience is None
     assert drop_reason == "logprob_misalign"
+
+
+def test_warm_resume_state_dict_materializes_lazy_samples(tmp_path, monkeypatch):
+    """Under distributed rollout every finished sample is offloaded (heavy_ref set). state_dict()
+    must MATERIALIZE a local copy (copy + reload) so the warm buffer survives a runner restart,
+    while leaving the originals lazy so the current step still ships them cheaply."""
+    import os
+
+    from molt.trainer.algorithm import experience as exp_mod
+    from molt.trainer.algorithm.experience import Experience
+
+    # Fake Ray object store so offload()/reload() work without a live Ray.
+    store, counter = {}, {"n": 0}
+
+    def fake_put(obj):
+        counter["n"] += 1
+        key = f"ref{counter['n']}"
+        store[key] = obj
+        return key
+
+    monkeypatch.setattr(exp_mod.ray, "put", fake_put)
+    monkeypatch.setattr(exp_mod.ray, "get", lambda ref: store[ref])
+
+    # A finished-but-untrained sample, offloaded (lazy) exactly as the runner leaves it.
+    e = Experience(
+        sequences=torch.tensor([[1, 2, 3]]),
+        attention_mask=torch.tensor([[1, 1, 1]]),
+        rewards=torch.tensor([1.0]),
+        group_ids=["g0"],
+        rollout_ids=["r0"],
+    )
+    e.offload()
+    assert e.heavy_ref is not None and e.sequences is None  # lazy: heavy tensors in the store
+
+    gen = object.__new__(SamplesGenerator)
+    gen.args = SimpleNamespace(ckpt=SimpleNamespace(warm_resume_rollouts=True, path=str(tmp_path / "ckpt")))
+    gen._finished_samples = [e]
+
+    sd = gen.state_dict()
+    assert sd.get("buffer_file") and os.path.exists(sd["buffer_file"])
+    # Original stays lazy — materialization happened on a copy, not in place.
+    assert e.heavy_ref is not None and e.sequences is None
+
+    # A fresh generator (post-restart) restores the untrained tail as fully-local Experiences.
+    gen2 = object.__new__(SamplesGenerator)
+    gen2.load_state_dict(sd)
+    restored = gen2._resumed_samples
+    assert len(restored) == 1
+    assert restored[0].heavy_ref is None  # local, not a dead handle
+    assert torch.equal(restored[0].sequences, torch.tensor([[1, 2, 3]]))
+    assert restored[0].group_ids == ["g0"]
+
+
+def test_warm_resume_state_dict_noop_when_disabled(tmp_path):
+    """The flag gates the whole feature: with warm_resume_rollouts off, no file is written."""
+    gen = object.__new__(SamplesGenerator)
+    gen.args = SimpleNamespace(ckpt=SimpleNamespace(warm_resume_rollouts=False, path=str(tmp_path / "ckpt")))
+    gen._finished_samples = [SimpleNamespace(group_ids=["g0"], heavy_ref=None)]
+    assert gen.state_dict() == {}
