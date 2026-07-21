@@ -526,6 +526,12 @@ class PolicyTrainer:
             metrics["entropy_loss"] = entropy_loss.detach()
             weights["entropy_loss"] = "token"
 
+        # Action-token-weighted mean of the policy advantages. The aggregate is
+        # near zero when batch whitening is enabled; otherwise it is the raw
+        # policy-signal mean.
+        metrics["advantage_mean"] = masked_mean(advantages, action_mask).detach()
+        weights["advantage_mean"] = "token"
+
         metrics["actor_lr"] = self.actor_scheduler.get_last_lr()[0]
         weights["actor_lr"] = None
         # grad_norm is meaningful only on the optimizer-step microbatch, where
