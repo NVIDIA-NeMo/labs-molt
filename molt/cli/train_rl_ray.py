@@ -512,7 +512,11 @@ if __name__ == "__main__":
         "--actor.entropy_coef",
         type=float,
         default=None,
-        help="Entropy loss coef, set to 0 means only enable entropy logs",
+        help=(
+            "Entropy coefficient. Any nonzero value enables entropy computation and "
+            "logs entropy_loss; positive values encourage higher entropy. "
+            "0 or unset skips entropy computation."
+        ),
     )
     parser.add_argument("--reward.clip_range", type=float, nargs=2, default=(-10, 10), help="Reward clip range")
 
