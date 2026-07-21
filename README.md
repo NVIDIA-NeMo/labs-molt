@@ -15,7 +15,7 @@ Ray · vLLM · NVIDIA AutoModel — the smallest PyTorch-native stack for
 ![NVIDIA AutoModel](https://img.shields.io/badge/Training-NVIDIA_AutoModel-76B900?style=flat-square&logo=nvidia&logoColor=white)
 ![vLLM](https://img.shields.io/badge/Rollout-vLLM-7c3aed?style=flat-square)
 ![Ray](https://img.shields.io/badge/Runtime-Ray-028CF0?style=flat-square)
-![RL code](https://img.shields.io/badge/RL_code-~8.6K_LOC-10b981?style=flat-square)
+![RL code](https://img.shields.io/badge/RL_code-~9.2K_LOC-10b981?style=flat-square)
 [![Tech Report](https://img.shields.io/badge/Tech_Report-ResearchGate-00CCBB?style=flat-square)](https://www.researchgate.net/publication/409325071_Molt_A_Scalable_PyTorch-Native_Training_Framework_for_Agentic_Reinforcement_Learning)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/NVIDIA-NeMo/labs-molt)
 
@@ -40,7 +40,7 @@ the trainer is a single actor; reward is any Python you write inside an `Env`
 or `ChatAgent` — graders, multi-turn tools, VLM environments, LLM-as-judge.
 Three components carry the rest — **Ray** for placement and async queues,
 **vLLM** for rollout, **NVIDIA AutoModel + FSDP2** for training in pure
-PyTorch. That is the whole stack: **~8.6K lines of RL code that scale to
+PyTorch. That is the whole stack: **~9.2K lines of RL code that scale to
 1T-class MoE** on vLLM with TP / EP / CP — think DeepSeek-V3 at
 `--fsdp.ep_size 256`, Adam CPU offload for the largest actors. One agent
 API, one trainable actor, clean enough to read end-to-end.
@@ -70,7 +70,7 @@ rollout.
 | 🎯 **Single-actor simplicity** | One actor, optional KL reference — the whole RL graph fits on a page | Every gradient is explicit; every loss term is one file away |
 | 🚀 **Frontier-scale MoE** | AutoModel + FSDP2 + TP / EP / CP + Adam CPU offload, MoE-native — e.g. DeepSeek-V3 with `--fsdp.ep_size 256` | The same script that trains 8B scales to 1T-class MoE — no rewrite between scales |
 | 🔗 **Token-first contract** | Aligned token ids, logprobs, action ranges, rewards, multimodal tensors | Multi-turn, VLM, and tool-call traces share one format end-to-end |
-| 🪶 **Small, hackable surface** | ~8.6K LOC of RL code across 3 thin layers | Fork one layer without touching the others — read it in an afternoon |
+| 🪶 **Small, hackable surface** | ~9.2K LOC of RL code across 3 thin layers | Fork one layer without touching the others — read it in an afternoon |
 
 ## 📊 How It Compares
 
@@ -87,7 +87,7 @@ that still drives fully-async agentic RL at frontier MoE scale on vLLM.
 | Parallelism | **TP / EP / CP**, MoE-native | ZeRO-3 / FSDP | TP / PP / EP / SP | TP / PP / DP / CP / EP |
 | Multimodal | VLM RL, multi-turn tool calls | VLM RL (v0.10+) | Qwen2.5-VL, Kimi-VL | geo3k VLM |
 | Config surface | **CLI flags only** | CLI + scripts | Hydra + YAML | CLI + YAML |
-| RL code size¹ | **~8.6K LOC** | ~7.2K | ~62K | ~25K |
+| RL code size¹ | **~9.2K LOC** | ~7.2K | ~62K | ~25K |
 | Design center | **agentic-first research** | RLHF coverage | production breadth | Megatron throughput |
 
 **One framework, one job.** Molt is the smallest PyTorch-native
@@ -106,7 +106,7 @@ RL on vLLM. Read every line that touches your gradients, in plain PyTorch.
 > Megatron/SGLang backends lazily, so its core `slime/` package plus its
 > `slime_plugins/` model-zoo (+~4.7K — the in-repo model code its RL path
 > uses, counted on the same basis as molt's `models/`) are counted, minus
-> SFT/distillation. Molt measured 2026-07-07 on this repo; the others
+> SFT/distillation. Molt measured 2026-07-20 on this repo; the others
 > measured 2026-06-16 at each repo's then-latest main HEAD
 > (verl `86e8123`, slime `243773c`, OpenRLHF `b3d2927`).
 
@@ -184,11 +184,14 @@ sequence-level masked IS, which motivates the `seq`/`geo` rejection filter).
 ## 📦 Installation
 
 First clone the repo — the launch scripts, agents, and recipes live here, and
-`examples/scripts/docker_run.sh` mounts this checkout into the container:
+`examples/scripts/docker_run.sh` mounts this checkout into the container. For local
+(non-container) development, add the editable install: it pulls the exact git-pinned
+AutoModel this repo is validated against, so R3 routing replay and Muon work out of the box:
 
 ```bash
 git clone https://github.com/NVIDIA-NeMo/labs-molt.git
 cd labs-molt
+pip install -e ".[vllm]"          # local development only — the container bakes everything in
 ```
 
 **The recommended path is the project container** (`dockerfile/Dockerfile`). It bakes the
@@ -197,7 +200,7 @@ NVIDIA AutoModel — built for A100 / H100 / H200 / B200·GB200, so it runs SFT 
 with no local dependency wrangling. Pull the prebuilt image from Docker Hub:
 
 ```bash
-docker pull hijkzzz/molt:latest   # or a pinned release: hijkzzz/molt:0.1.2
+docker pull hijkzzz/molt:latest   # or a pinned release: hijkzzz/molt:0.1.3
 ```
 
 ...or build it yourself from the Dockerfile (e.g. to change the CUDA / vLLM / AutoModel pins):
@@ -206,19 +209,15 @@ docker pull hijkzzz/molt:latest   # or a pinned release: hijkzzz/molt:0.1.2
 docker build -f dockerfile/Dockerfile -t hijkzzz/molt:latest .
 ```
 
-`examples/scripts/docker_run.sh` defaults to this image (build skipped), so a full-stack
-sanity check is one command:
+The released package is also on PyPI for checkout-free installs:
 
 ```bash
-bash examples/scripts/docker_run.sh "python -c 'import vllm, transformer_engine; print(vllm.__version__); print(transformer_engine.__version__)'"
-# build locally instead of pulling:  IMAGE_NAME=molt:local SKIP_BUILD=0 bash examples/scripts/docker_run.sh "pytest -q"
+pip install "molt-rl[vllm]"
 ```
 
-For local (non-container) development:
-
-```bash
-pip install -e ".[vllm]"
-```
+> **Note**: PyPI forbids git-pinned dependencies, so `molt-rl` depends on AutoModel's PyPI
+> release instead — it can lag the pin in `requirements.txt`, and R3 routing replay needs
+> the newer pin (it fails fast with instructions when the installed AutoModel is too old).
 
 ## 🚀 Quick Start
 
@@ -354,10 +353,13 @@ the new delta, so a multi-turn episode stitches into one monotonic token-exact
 trajectory. But a long-horizon agent often **compacts** its context — summarizing
 or dropping old turns to stay under the window (e.g. a `/compact` step) — which
 *rewrites* the prefix, so it's no longer a clean extension of what was tokenized.
+The model's own chat template can rewrite the prefix too: Qwen3-style templates
+re-render a prior assistant turn without its `<think>` block once a newer user
+query follows.
 
 The server detects this automatically: when an incoming request rewrites the
 prefix instead of extending it, it **seals the current segment and starts a fresh
-token-exact segment** from the re-templated post-compaction conversation. One
+token-exact segment** from the re-templated conversation. One
 rollout therefore emits several segment trajectories — they share the rollout's
 reward and `rollout_id`, so group baselines (GRPO/RLOO/…) dedup them to *one
 reward per rollout* while each segment still contributes its own generated tokens
@@ -612,9 +614,9 @@ optimization — all on PyTorch + AutoModel.
 If you use Molt in your research, please cite:
 
 ```bibtex
-@misc{molt2026,
+@article{hu2026molt,
   title        = {Molt: A Scalable PyTorch-Native Training Framework for Agentic Reinforcement Learning},
-  author       = {Molt Contributors},
+  author       = {Jian Hu and Molt Contributors},
   year         = {2026},
   howpublished = {\url{https://github.com/NVIDIA-NeMo/labs-molt}},
   doi          = {10.13140/RG.2.2.23375.65447}

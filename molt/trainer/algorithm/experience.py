@@ -17,6 +17,7 @@ import itertools
 from dataclasses import dataclass, field, fields
 from typing import Any, List, Union
 
+import ray
 import torch
 
 from molt.utils.logging_utils import init_logger
@@ -106,9 +107,9 @@ class Experience:
     truncated: torch.Tensor = tensor_field("episode", default=None)  # (B,) whether generation was truncated
     total_length: torch.Tensor = tensor_field("episode", default=None)  # (B,) prompt + response length
 
-    # Per-sample row id within the rollout batch (set to [i] per sample). After
-    # concat_experiences, len(index) = number of samples in this Experience —
-    # the advantage/merge logic relies on this count, so it is NOT pure metadata.
+    # Per-sample row id within the rollout batch (set to [i] per sample by
+    # make_experience). len(index) = number of samples in this Experience — the
+    # advantage/merge logic relies on this count, so it is NOT pure metadata.
     index: list[int] = None
 
     # Metadata (not part of RL computation)
@@ -123,6 +124,42 @@ class Experience:
     # rollout_id so the trainer dedups to one reward per rollout before grouping by group_id.
     group_ids: list[str] = field(default_factory=list)
     rollout_ids: list[str] = field(default_factory=list)
+
+    # Distributed rollout: when set, the heavy tensors below (HEAVY_FIELDS) live in the object
+    # store — produced and kept on the runner that generated the sample — and this holds the ref
+    # to them. The lightweight fields (masks, rewards, ids, info) stay in place, so the controller
+    # groups, scores and length-balances the sample without ever fetching its images. `reload()`
+    # restores the heavy tensors on whichever rank consumes the sample. None once the sample is local.
+    heavy_ref: Any = None
+
+    # The fields offloaded to `heavy_ref` — everything the training forward needs (image bytes +
+    # pixel_values, token ids, rollout routing) but the controller's advantage/length-balance logic
+    # does not, so they never reach the controller. Rule: keep only what the controller reads light;
+    # offload the rest (a byte-embedded `images` dataset column can be large).
+    HEAVY_FIELDS = ("sequences", "attention_mask", "rollout_log_probs", "routed_experts", "mm_train_inputs", "images")
+
+    def offload(self) -> "Experience":
+        """Move this sample's heavy fields into the object store (on the producing runner) and keep
+        only a ref, so the controller ships a handle, not images. Returns self. Undo with `reload()`.
+        Idempotent (like `reload()`): a no-op if already offloaded, so a second call never re-puts the
+        now-nulled fields and overwrites the ref."""
+        if self.heavy_ref is not None:
+            return self
+        heavy = {name: getattr(self, name) for name in self.HEAVY_FIELDS}
+        self.heavy_ref = ray.put(heavy)
+        for name in self.HEAVY_FIELDS:
+            setattr(self, name, None)  # only the ref remains on the controller now
+        return self
+
+    def reload(self) -> "Experience":
+        """Restore the heavy fields from the object store — fetched peer-to-peer from wherever they
+        live (the producing runner), never via the controller. Idempotent: a no-op if already local."""
+        if self.heavy_ref is not None:
+            heavy = ray.get(self.heavy_ref)
+            for name, value in heavy.items():
+                setattr(self, name, value)
+            self.heavy_ref = None
+        return self
 
     @classmethod
     def is_step_tensor_field(cls, name: str) -> bool:
@@ -144,70 +181,6 @@ class Experience:
                 setattr(self, name, to(value, device))
 
         return self
-
-    @staticmethod
-    def _merge_item(items: List, pad_value: int = 0) -> Union[torch.Tensor, list, dict, Any]:
-        """Merge a list of items into a single item.
-        Recursively merge tensors, lists and dicts.
-        For tensors, use zero_pad_sequences to merge sequences of different lengths.
-
-        Args:
-            items: List of items to merge
-            pad_value: Value used for padding tensors
-        """
-        if isinstance(items[0], torch.Tensor):
-            return zero_pad_sequences(items, side="right", value=pad_value)
-        elif isinstance(items[0], list):
-            return list(itertools.chain.from_iterable(items))
-        elif isinstance(items[0], dict):
-            result = {}
-            # Collect all values for each key
-            for d in items:
-                for key, value in d.items():
-                    if key not in result:
-                        result[key] = []
-                    result[key].append(value)
-            # Merge all values for each key at once
-            return {key: Experience._merge_item(values, pad_value) for key, values in result.items()}
-        elif items[0] is None:
-            return None
-        else:
-            raise ValueError(f"Unsupported type: {type(items[0])}")
-
-    @staticmethod
-    def concat_experiences(experiences_list: List["Experience"], pad_token_id) -> "Experience":
-        """Concatenate multiple experiences into one large experience.
-
-        Args:
-            experiences_list: List of Experience to concatenate
-            pad_token_id: Token id used for padding sequences
-
-        Returns:
-            A new Experience instance containing all the concatenated data
-        """
-        if not experiences_list:
-            return Experience()
-
-        # Get all field names from the dataclass
-        field_names = [f.name for f in fields(Experience)]
-
-        # Create result dictionary
-        result = {}
-
-        # A rollout with no captured routing has routed_experts=None; fill it (sized to its
-        # own sequence) before the field merge so a mix doesn't drop the batch's routing or
-        # crash on None.size(-1).
-        _fill_missing_routed_experts(experiences_list)
-
-        # Merge all fields
-        for name in field_names:
-            values = [getattr(e, name) for e in experiences_list]
-            # sequences pad with pad_token_id; routed_experts with the R3 -1 sentinel
-            # ("keep live routing" — 0 is a valid expert id); everything else with 0.
-            pad_value = pad_token_id if name == "sequences" else (-1 if name == "routed_experts" else 0)
-            result[name] = Experience._merge_item(values, pad_value)
-
-        return Experience(**result)
 
 
 # Batch manipulation utilities
@@ -310,50 +283,48 @@ def remove_padding_in_sequences(items: List[Experience]) -> List[Experience]:
 
 
 def balance_experiences(experiences, args):
-    """Balance samples across DP ranks by total sequence length, equal-count.
+    """Assign the rollout equally across DP ranks by total sequence length, returning the samples
+    reordered into contiguous per-rank blocks. ``async_run_method_batch``'s even slice then hands
+    each rank its block, and each rank restores its own heavy tensors via ``Experience.reload()``.
 
-    Every DP rank must receive the SAME number of samples: unequal counts yield different
-    ``num_steps`` per rank → mismatched collective shapes at the world all_reduces → NCCL
-    hang. So we use equal-size length balancing and drop the trailing remainder so the
-    global sample count divides evenly across ranks.
+    Every DP rank must receive the SAME number of samples — unequal counts give different
+    ``num_steps`` per rank -> mismatched collective shapes at the world all-reduces -> NCCL hang — so
+    the trailing remainder is dropped. Within a rank the block is sorted by length descending so the
+    k-th micro-batch is size-matched across ranks (else a straggler trips the 600s NCCL watchdog).
+    Metadata only — the heavy tensors stay in shared memory, so a full image batch never reaches the
+    controller.
     """
-    items_all = []
-    for item in experiences:
-        items_all.extend(split_experience_batch(item))
-
     actor_world_size = args.actor.num_nodes * args.actor.num_gpus_per_node
     effective_num = actor_world_size // get_model_parallel_size(args)
     if effective_num <= 0:
         raise ValueError(f"Invalid effective actor count: {effective_num}")
-    if len(items_all) < effective_num:
+    if len(experiences) < effective_num:
         raise ValueError(
-            f"Cannot balance {len(items_all)} samples across {effective_num} effective actor ranks. "
+            f"Cannot balance {len(experiences)} samples across {effective_num} DP ranks. "
             "Increase rollout.batch_size/n_samples_per_prompt or drop the final partial batch."
         )
 
-    # Equal counts per rank ⇒ identical num_steps on every rank. Drop the trailing
-    # remainder (< effective_num samples) so the total divides evenly.
-    remainder = len(items_all) % effective_num
+    lengths = []
+    for exp in experiences:
+        length = exp.total_length
+        lengths.append(int(length.item() if isinstance(length, torch.Tensor) else length))
+
+    # Drop the trailing partial batch so the count divides evenly across the DP ranks.
+    remainder = len(experiences) % effective_num
+    keep = len(experiences) - remainder
     if remainder:
         logger.warning(
-            f"[balance_experiences] dropping {remainder} trailing sample(s) so {len(items_all)} "
-            f"divides evenly across {effective_num} DP ranks."
+            f"[balance_experiences] dropping {remainder} trailing sample(s) so "
+            f"{len(experiences)} divides evenly across {effective_num} DP ranks."
         )
-        items_all = items_all[:-remainder]
+    partitions = get_seqlen_balanced_partitions(lengths[:keep], effective_num, equal_size=True)
 
-    lengths = [
-        int(item.total_length.item() if isinstance(item.total_length, torch.Tensor) else item.total_length)
-        for item in items_all
-    ]
-    # equal_size=True keeps each rank's sample count identical while still
-    # minimizing the per-rank total-token spread (Karmarkar–Karp).
-    partitions = get_seqlen_balanced_partitions(lengths, effective_num, equal_size=True)
-    # Sort each rank's items by length (descending) so the k-th microbatch is similarly
-    # sized on every rank. The k-th microbatch runs in lockstep at cross-node
-    # reduce-scatters (expert-grad over ep_shard, plus per-microbatch FSDP), so a size
-    # mismatch makes short ranks wait on a straggler long enough to trip the 600s NCCL
-    # watchdog → SIGABRT. KK balances each rank's total tokens/count but not within-rank
-    # order, so pairing was random. The dataloader preserves this order (no shuffle when
-    # model-parallel size > 1).
-    partitions = [sorted(partition, key=lambda idx: lengths[idx], reverse=True) for partition in partitions]
-    return [make_experience_batch([items_all[idx] for idx in partition]) for partition in partitions]
+    # Concatenate the per-rank blocks into one flat list. Within each rank, place the longest
+    # samples first so the k-th micro-batch is size-matched across ranks (a straggler otherwise
+    # makes short ranks wait long enough to trip the NCCL watchdog). async_run_method_batch's even
+    # slice then hands each rank its contiguous block.
+    balanced = []
+    for partition in partitions:
+        longest_first = sorted(partition, key=lambda i: lengths[i], reverse=True)
+        balanced.extend(experiences[i] for i in longest_first)
+    return balanced

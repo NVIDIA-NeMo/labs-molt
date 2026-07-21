@@ -19,7 +19,7 @@
 import logging
 import os
 import socket
-from typing import Dict, Optional, Type
+from typing import Dict, Type
 
 import ray
 import torch
@@ -146,27 +146,26 @@ class ReferenceModelActor(BaseModelActor):
         self.model = self.strategy.prepare(model)
         self.model.eval()
 
-    def forward(
-        self,
-        sequences: torch.LongTensor,
-        action_mask: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        mm_train_inputs_list=None,
-    ) -> torch.Tensor:
+    def forward(self, experience) -> torch.Tensor:
+        """Reference log-probs for one rollout Experience. reload() first fetches the sample's heavy
+        tensors (token ids / images) from the producing runner's shared-memory store — they reach
+        this rank straight from the runner, never through the controller. Called per sample by
+        execute_batch; the controller attaches the result as base_action_log_probs."""
+        experience = experience.reload()
         device = torch.cuda.current_device()
 
-        # VLM: merge pre-processed multimodal inputs from all samples in batch
+        # VLM: merge pre-processed multimodal inputs.
         mm_inputs = {}
-        if mm_train_inputs_list and getattr(self.model, "is_vlm", False):
+        if experience.mm_train_inputs and getattr(self.model, "is_vlm", False):
             from molt.utils.vlm_utils import merge_mm_train_inputs
 
-            mm_inputs = merge_mm_train_inputs(mm_train_inputs_list, device)
+            mm_inputs = merge_mm_train_inputs(experience.mm_train_inputs, device)
 
         with torch.no_grad():
             output = self.model(
-                sequences.to(device),
-                action_mask.to(device),
-                attention_mask.to(device),
+                experience.sequences.to(device),
+                experience.action_mask.to(device),
+                experience.attention_mask.to(device),
                 **mm_inputs,
             )
         return output["action_log_probs"].to("cpu")

@@ -285,17 +285,18 @@ def test_make_experience_batch_all_none_routed_experts_stays_none():
     assert make_experience_batch([a, b]).routed_experts is None
 
 
-def test_concat_experiences_mixed_none_routed_experts():
-    # The make_experience micro-batch path (concat_experiences over single-sample (1, ...)
-    # experiences) hits the same first-item dispatch. A None among tensors must merge, seq-
-    # aligned with sequences and right-padded by the -1 sentinel, not drop the batch or crash.
-    routed = torch.zeros(1, L, K, 2, dtype=torch.int16)
-    have = Experience(sequences=torch.tensor([[1, 2]]), attention_mask=torch.tensor([[1, 1]]), routed_experts=routed)
+def test_make_experience_batch_mixed_none_routed_experts_leading_none():
+    # A None routed_experts as the FIRST item (the make_experience_batch first-item dispatch)
+    # must still merge: the None is filled seq-aligned and right-padded by the -1 sentinel,
+    # not dropped or crashed on. Single-sample convention: per-sample tensors are 1D (T,) /
+    # (L, K, T), stacked to (B, ...).
+    routed = torch.zeros(L, K, 2, dtype=torch.int16)
+    have = Experience(sequences=torch.tensor([1, 2]), attention_mask=torch.tensor([1, 1]), routed_experts=routed)
     missing = Experience(  # leading None AND the longest sequence
-        sequences=torch.tensor([[3, 4, 5]]), attention_mask=torch.tensor([[1, 1, 1]]), routed_experts=None
+        sequences=torch.tensor([3, 4, 5]), attention_mask=torch.tensor([1, 1, 1]), routed_experts=None
     )
 
-    merged = Experience.concat_experiences([missing, have], pad_token_id=0)
+    merged = make_experience_batch([missing, have])
     assert merged.sequences.shape == (2, 3)
     assert merged.routed_experts.shape == (2, L, K, 3)  # seq dim tracks sequences
     assert (merged.routed_experts[0] == -1).all()  # unrouted sample -> natural routing everywhere

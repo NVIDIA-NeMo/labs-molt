@@ -78,18 +78,18 @@ def _prompt_loader(num_prompts):
 def _wire_fake_vllm(generator, monkeypatch, to_sample):
     """Wire the streaming generator to an in-memory vLLM that finishes rollouts FIFO.
 
-    Each dispatched prompt becomes one in-flight rollout handle tagged with its
-    prompt string; ray.wait hands them back in dispatch order and ray.get turns a
-    handle into its single response, which `to_sample` maps to an Experience.
+    Each dispatched prompt becomes one in-flight rollout handle tagged with its prompt
+    string; ray.wait hands them back in dispatch order and ray.get turns a handle into
+    the runner's result — a list of ``(light, drop_reason)`` (here one usable light that
+    ``to_sample`` maps from the prompt tag).
     """
     generator._dispatch_to_agent_runners = lambda prompts, labels, images, **kw: [
         SimpleNamespace(group_id=prompt) for prompt in prompts
     ]
-    generator._process_response_into_experience = lambda response, **kw: (to_sample(response.group_id), None)
     monkeypatch.setattr(
         samples_generator.ray, "wait", lambda handles, num_returns=1: ([handles[0]], list(handles[1:]))
     )
-    monkeypatch.setattr(samples_generator.ray, "get", lambda handle: [handle])
+    monkeypatch.setattr(samples_generator.ray, "get", lambda handle: [(to_sample(handle.group_id), None)])
 
 
 def test_generate_samples_returns_batch_as_rollouts_finish_and_keeps_pool_saturated(monkeypatch):
@@ -231,8 +231,9 @@ def test_dynamic_filtering_counts_compaction_segments_once_per_rollout(monkeypat
         SimpleNamespace(rollout_ids=[rollout_id], scores=torch.tensor([score]))
         for rollout_id, score in [("a", 1.0), ("a", 1.0), ("a", 1.0), ("b", 0.0)]
     ]
-    generator._process_response_into_experience = lambda response, **kwargs: (response, None)
-    monkeypatch.setattr(samples_generator.ray, "get", lambda _: samples)
+    # run_group now builds each response into a (light Experience, drop_reason) on the runner;
+    # _filter_group just unpacks and applies the DAPO group filter.
+    monkeypatch.setattr(samples_generator.ray, "get", lambda _: [(sample, None) for sample in samples])
     score_stats = defaultdict(float)
 
     kept = generator._filter_group(object(), True, defaultdict(int), score_stats=score_stats)
@@ -242,9 +243,7 @@ def test_dynamic_filtering_counts_compaction_segments_once_per_rollout(monkeypat
 
 
 def test_process_response_counts_only_action_tokens_for_multiturn_lengths():
-    generator = object.__new__(SamplesGenerator)
-
-    experience, drop_reason = generator._process_response_into_experience(
+    experience, drop_reason = SamplesGenerator._process_response_into_experience(
         Trajectory(
             prompt="p",
             label="l",
@@ -256,7 +255,8 @@ def test_process_response_counts_only_action_tokens_for_multiturn_lengths():
             reward=1.0,
             scores=1.0,
         ),
-        max_len=8,
+        media_ids=set(),
+        truncate_length=8,
     )
 
     assert drop_reason is None
@@ -273,10 +273,8 @@ def test_process_response_counts_only_action_tokens_for_multiturn_lengths():
 
 
 def test_process_response_rejects_action_ranges_outside_trajectory():
-    generator = object.__new__(SamplesGenerator)
-
     with pytest.raises(ValueError, match="Invalid action range"):
-        generator._process_response_into_experience(
+        SamplesGenerator._process_response_into_experience(
             Trajectory(
                 prompt="p",
                 label="l",
@@ -288,14 +286,13 @@ def test_process_response_rejects_action_ranges_outside_trajectory():
                 reward=1.0,
                 scores=1.0,
             ),
-            max_len=8,
+            media_ids=set(),
+            truncate_length=8,
         )
 
 
 def test_process_response_skips_misaligned_rollout_logprobs():
-    generator = object.__new__(SamplesGenerator)
-
-    experience, drop_reason = generator._process_response_into_experience(
+    experience, drop_reason = SamplesGenerator._process_response_into_experience(
         Trajectory(
             prompt="p",
             label="l",
@@ -307,8 +304,68 @@ def test_process_response_skips_misaligned_rollout_logprobs():
             reward=1.0,
             scores=1.0,
         ),
-        max_len=8,
+        media_ids=set(),
+        truncate_length=8,
     )
 
     assert experience is None
     assert drop_reason == "logprob_misalign"
+
+
+def test_warm_resume_state_dict_materializes_lazy_samples(tmp_path, monkeypatch):
+    """Under distributed rollout every finished sample is offloaded (heavy_ref set). state_dict()
+    must MATERIALIZE a local copy (copy + reload) so the warm buffer survives a runner restart,
+    while leaving the originals lazy so the current step still ships them cheaply."""
+    import os
+
+    from molt.trainer.algorithm import experience as exp_mod
+    from molt.trainer.algorithm.experience import Experience
+
+    # Fake Ray object store so offload()/reload() work without a live Ray.
+    store, counter = {}, {"n": 0}
+
+    def fake_put(obj):
+        counter["n"] += 1
+        key = f"ref{counter['n']}"
+        store[key] = obj
+        return key
+
+    monkeypatch.setattr(exp_mod.ray, "put", fake_put)
+    monkeypatch.setattr(exp_mod.ray, "get", lambda ref: store[ref])
+
+    # A finished-but-untrained sample, offloaded (lazy) exactly as the runner leaves it.
+    e = Experience(
+        sequences=torch.tensor([[1, 2, 3]]),
+        attention_mask=torch.tensor([[1, 1, 1]]),
+        rewards=torch.tensor([1.0]),
+        group_ids=["g0"],
+        rollout_ids=["r0"],
+    )
+    e.offload()
+    assert e.heavy_ref is not None and e.sequences is None  # lazy: heavy tensors in the store
+
+    gen = object.__new__(SamplesGenerator)
+    gen.args = SimpleNamespace(ckpt=SimpleNamespace(warm_resume_rollouts=True, path=str(tmp_path / "ckpt")))
+    gen._finished_samples = [e]
+
+    sd = gen.state_dict()
+    assert sd.get("buffer_file") and os.path.exists(sd["buffer_file"])
+    # Original stays lazy — materialization happened on a copy, not in place.
+    assert e.heavy_ref is not None and e.sequences is None
+
+    # A fresh generator (post-restart) restores the untrained tail as fully-local Experiences.
+    gen2 = object.__new__(SamplesGenerator)
+    gen2.load_state_dict(sd)
+    restored = gen2._resumed_samples
+    assert len(restored) == 1
+    assert restored[0].heavy_ref is None  # local, not a dead handle
+    assert torch.equal(restored[0].sequences, torch.tensor([[1, 2, 3]]))
+    assert restored[0].group_ids == ["g0"]
+
+
+def test_warm_resume_state_dict_noop_when_disabled(tmp_path):
+    """The flag gates the whole feature: with warm_resume_rollouts off, no file is written."""
+    gen = object.__new__(SamplesGenerator)
+    gen.args = SimpleNamespace(ckpt=SimpleNamespace(warm_resume_rollouts=False, path=str(tmp_path / "ckpt")))
+    gen._finished_samples = [SimpleNamespace(group_ids=["g0"], heavy_ref=None)]
+    assert gen.state_dict() == {}

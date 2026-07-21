@@ -367,11 +367,14 @@ def create_vllm_engines(
     # GPUs (vLLM spawns the worker/DP-replica processes itself, single node only).
     # ray executor: one single-GPU bundle per worker, so an engine's TP*PP group
     # can span nodes (cross-node TP+EP, e.g. Kimi-class 2x8, or TP-per-node + PP).
+    # GPU is the only exclusive resource to reserve; CPU is shared, so pinning CPU in the engine
+    # bundles (and on the actor below) only over-constrains PACK — with many small TP-per-node
+    # bundles it can leave the placement group infeasible even when GPUs are free. Reserve GPU only.
     if distributed_executor_backend == "mp":
         gpus_per_engine = tensor_parallel_size * data_parallel_size
-        bundles = [{"GPU": gpus_per_engine, "CPU": gpus_per_engine} for _ in range(num_engines)]
+        bundles = [{"GPU": gpus_per_engine} for _ in range(num_engines)]
     else:
-        bundles = [{"GPU": 1, "CPU": 1} for _ in range(num_engines * engine_world)]
+        bundles = [{"GPU": 1} for _ in range(num_engines * engine_world)]
     shared_pg = placement_group(bundles, strategy="PACK")
     ray.get(shared_pg.ready())
 
@@ -508,7 +511,7 @@ def create_vllm_engines(
 
         vllm_engines.append(
             RolloutRayActor.options(
-                num_cpus=num_gpus,
+                num_cpus=0,  # GPU-only actor: CPU is shared, so reserving it only over-constrains the PG
                 num_gpus=num_gpus,
                 scheduling_strategy=scheduling_strategy,
             ).remote(**actor_kwargs)
