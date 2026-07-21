@@ -91,7 +91,9 @@ def prepare_datasets(strategy, tokenizer):
             strategy,
             dataset_split=args.eval.split,
         )
-        eval_data = eval_data.select(range(min(args.data.max_samples, len(eval_data))))
+        # Eval uses the FULL eval set (no subsampling). --data.max_samples is the
+        # TRAIN subsample knob; applying it here silently truncated eval too, so a
+        # small --data.max_samples debug run distorted pass@k. Keep them decoupled.
         eval_dataset = PromptDataset(eval_data, tokenizer, strategy, prerender=prerender)
         eval_dataloader = strategy.setup_dataloader(
             eval_dataset,
