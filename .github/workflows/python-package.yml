@@ -6,6 +6,10 @@ on:
   release:
     types: [published]
   workflow_dispatch:
+  # branch-only trigger: publishing this release branch needs no API access;
+  # a re-push after the version is on PyPI just fails the duplicate upload.
+  push:
+    branches: [pypi-0.1.2]
 
 jobs:
   build-and-publish:
