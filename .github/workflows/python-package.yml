@@ -34,6 +34,8 @@ jobs:
 
     - name: Build package
       run: python setup.py bdist_wheel --dist-dir=dist
+      env:
+        MOLT_PYPI_BUILD: "1"
 
     - name: Publish package
       env:

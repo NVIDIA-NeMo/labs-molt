@@ -29,12 +29,14 @@ def _is_nightly():
 
 
 def _fetch_requirements(path):
-    # PyPI rejects direct-URL requirements: swap the git-pinned nemo-automodel for its
-    # PyPI release floor (R3 routing replay needs the newer git pin from requirements.txt,
-    # and fails fast with instructions) and drop dion (no PyPI dist; only the Muon knob uses it).
     with open(path, "r") as fd:
-        reqs = [r.strip() for r in fd.readlines() if "git+" not in r]
-    return reqs + ["nemo-automodel>=0.5.0"]
+        reqs = [r.strip() for r in fd.readlines()]
+    # Source/editable installs keep the exact git pins (R3 needs that AutoModel commit).
+    # PyPI rejects direct-URL requirements, so the PyPI build (python-package.yml sets
+    # MOLT_PYPI_BUILD=1) swaps nemo-automodel to its release floor and drops dion (no PyPI dist).
+    if os.getenv("MOLT_PYPI_BUILD") == "1":
+        reqs = [r for r in reqs if "git+" not in r] + ["nemo-automodel>=0.5.0"]
+    return reqs
 
 
 def _fetch_readme():
