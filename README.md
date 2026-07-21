@@ -40,7 +40,7 @@ the trainer is a single actor; reward is any Python you write inside an `Env`
 or `ChatAgent` — graders, multi-turn tools, VLM environments, LLM-as-judge.
 Three components carry the rest — **Ray** for placement and async queues,
 **vLLM** for rollout, **NVIDIA AutoModel + FSDP2** for training in pure
-PyTorch. That is the whole stack: **~8.6K lines of RL code that scale to
+PyTorch. That is the whole stack: **~9.2K lines of RL code that scale to
 1T-class MoE** on vLLM with TP / EP / CP — think DeepSeek-V3 at
 `--fsdp.ep_size 256`, Adam CPU offload for the largest actors. One agent
 API, one trainable actor, clean enough to read end-to-end.
@@ -106,7 +106,7 @@ RL on vLLM. Read every line that touches your gradients, in plain PyTorch.
 > Megatron/SGLang backends lazily, so its core `slime/` package plus its
 > `slime_plugins/` model-zoo (+~4.7K — the in-repo model code its RL path
 > uses, counted on the same basis as molt's `models/`) are counted, minus
-> SFT/distillation. Molt measured 2026-07-07 on this repo; the others
+> SFT/distillation. Molt measured 2026-07-20 on this repo; the others
 > measured 2026-06-16 at each repo's then-latest main HEAD
 > (verl `86e8123`, slime `243773c`, OpenRLHF `b3d2927`).
 
