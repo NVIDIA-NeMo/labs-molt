@@ -46,6 +46,17 @@ from .actor_group import BaseModelActor
 logger = init_logger(__name__)
 
 
+def _skip_tied_lm_head(config, name: str) -> bool:
+    """Whether to skip broadcasting this weight to vLLM as a redundant tied lm_head.
+
+    Tied-embedding models share lm_head with embed_tokens; vLLM receives the shared
+    weight through embed_tokens, so a separate lm_head.weight update is redundant and
+    would form an empty "loaded 0 of N" refit batch. Exact-match only (``lm_head.weight``)
+    so nested/auxiliary heads like ``mtp.lm_head.weight`` are still sent.
+    """
+    return bool(getattr(config, "tie_word_embeddings", False)) and name == "lm_head.weight"
+
+
 class PolicyTrainer:
     """Owns actor-side policy optimization on each Ray/FSDP worker."""
 
@@ -577,6 +588,7 @@ class PolicyTrainer:
         from torch.distributed.tensor import DTensor
 
         ep_size = getattr(self.strategy.args.fsdp, "ep_size", 1) or 1
+        model_config = getattr(model, "config", None)
 
         # Pack many small per-tensor broadcasts into large batched broadcasts.
         # Inspired by vLLM's `vllm.distributed.weight_transfer.packed_tensor`
@@ -670,6 +682,8 @@ class PolicyTrainer:
             for hf_name, hf_weight in hf_pairs:
                 if not torch.is_tensor(hf_weight) or not hf_weight.is_floating_point():
                     continue
+                if _skip_tied_lm_head(model_config, hf_name):
+                    continue  # redundant: vLLM gets the shared weight via embed_tokens
                 # Dtype-faithful refit: keep each param in its native/compute dtype
                 # instead of force-casting everything to a single `param_dtype`. vLLM's
                 # `load_weights` casts each tensor to *that param's own* target dtype via
