@@ -306,7 +306,8 @@ class BaseRLTrainer:
             return
 
         actor_root = os.path.join(self.args.ckpt.path, "_actor")
-        if not os.path.isdir(actor_root):
+        hf_root = os.path.join(self.args.ckpt.path, "_hf")
+        if not os.path.isdir(actor_root) or not os.path.isdir(hf_root):
             return
         retained_tags = {
             name
@@ -314,12 +315,9 @@ class BaseRLTrainer:
             if (name.startswith("global_step") or name.startswith("best_global_step"))
             and self.strategy.checkpoint._is_loadable_ckpt_dir(os.path.join(actor_root, name))
         }
-        for name in os.listdir(self.args.ckpt.path):
-            if not name.endswith("_hf"):
-                continue
-            tag = name[:-3]
+        for tag in os.listdir(hf_root):
             if (tag.startswith("global_step") or tag.startswith("best_global_step")) and tag not in retained_tags:
-                shutil.rmtree(os.path.join(self.args.ckpt.path, name), ignore_errors=True)
+                shutil.rmtree(os.path.join(hf_root, tag), ignore_errors=True)
 
     def fit(self, global_step: int = 0) -> None:
         raise NotImplementedError("fit method is not implemented")
@@ -520,10 +518,11 @@ class BaseRLTrainer:
                 checkpoint_roots.append(os.path.join(self.args.ckpt.path, "_critic"))
             copies = [(os.path.join(root, source_tag), os.path.join(root, tag), root) for root in checkpoint_roots]
             if self.args.ckpt.save_hf:
+                hf_root = os.path.join(self.args.ckpt.path, "_hf")
                 copies.append(
                     (
-                        os.path.join(self.args.ckpt.path, f"{source_tag}_hf"),
-                        os.path.join(self.args.ckpt.path, f"{tag}_hf"),
+                        os.path.join(hf_root, source_tag),
+                        os.path.join(hf_root, tag),
                         None,
                     )
                 )
@@ -1070,11 +1069,19 @@ class RLTrainer:
                 "the generation/refit race has a matching resumable checkpoint."
             )
         if delayed_best_possible:
-            max_num = getattr(strategy.args.ckpt, "max_num", 3)
             min_num = queue_size + 1
-            if max_num > 0 and max_num < min_num:
+            max_num = getattr(strategy.args.ckpt, "max_num", 3)
+            dcp_max_num = getattr(strategy.args.ckpt, "dcp_max_num", None)
+            if dcp_max_num is None:
+                dcp_max_num = max_num
+            if dcp_max_num > 0 and dcp_max_num < min_num:
                 raise ValueError(
-                    "Delayed best-checkpoint selection requires --ckpt.max_num at least "
+                    "Delayed best-checkpoint selection requires --ckpt.dcp_max_num at least "
+                    f"async_queue_size + 1 ({min_num}), or a non-positive value to disable count-based pruning."
+                )
+            if getattr(strategy.args.ckpt, "save_hf", False) and 0 < max_num < min_num:
+                raise ValueError(
+                    "Delayed best-checkpoint selection with --ckpt.save_hf requires --ckpt.max_num at least "
                     f"async_queue_size + 1 ({min_num}), or a non-positive value to disable count-based pruning."
                 )
             max_mem = getattr(strategy.args.ckpt, "max_mem", float("inf"))

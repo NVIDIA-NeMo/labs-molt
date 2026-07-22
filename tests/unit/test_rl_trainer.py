@@ -109,10 +109,11 @@ def _transaction_tree(tmp_path, previous_step):
             f"old-{role}",
         )
         sources[role] = source
-    sources["hf"] = tmp_path / f"{source_tag}_hf"
-    sources["hf"].mkdir()
+    hf_root = tmp_path / "_hf"
+    sources["hf"] = hf_root / source_tag
+    sources["hf"].mkdir(parents=True)
     (sources["hf"] / "model.safetensors").write_text("new-hf")
-    previous_hf = tmp_path / f"best_global_step{previous_step}_hf"
+    previous_hf = hf_root / f"best_global_step{previous_step}"
     previous_hf.mkdir()
     (previous_hf / "model.safetensors").write_text("old-hf")
     return source_tag, sources, previous_hf
@@ -128,8 +129,12 @@ def _controller_strategy(
     force_sync=False,
     queue_size=1,
     max_num=3,
+    dcp_max_num=None,
     max_mem=float("inf"),
+    save_hf=False,
 ):
+    if dcp_max_num is None:
+        dcp_max_num = max_num
     return SimpleNamespace(
         args=SimpleNamespace(
             eval=SimpleNamespace(dataset=eval_dataset, steps=eval_steps),
@@ -137,7 +142,9 @@ def _controller_strategy(
                 save_steps=save_steps,
                 best_metric_key=best_metric_key,
                 max_num=max_num,
+                dcp_max_num=dcp_max_num,
                 max_mem=max_mem,
+                save_hf=save_hf,
             ),
             train=SimpleNamespace(
                 partial_rollout_enable=partial,
@@ -343,7 +350,7 @@ def test_delayed_best_copies_actor_critic_and_hf_from_the_eval_step(tmp_path):
         assert not (tmp_path / f"_{role}" / "best_global_step1").exists()
         assert (sources[role] / "model" / "shard").exists()
 
-    assert (tmp_path / "best_global_step5_hf" / "model.safetensors").read_text() == "new-hf"
+    assert (tmp_path / "_hf" / "best_global_step5" / "model.safetensors").read_text() == "new-hf"
     assert (sources["hf"] / "model.safetensors").exists()
     assert not old_hf.exists()
     assert not [path for path in tmp_path.rglob("*") if path.name.endswith((".tmp", ".old"))]
@@ -372,7 +379,7 @@ def test_delayed_best_copy_failure_leaves_no_partial_promotion(monkeypatch, tmp_
     assert all((tmp_path / f"_{role}" / "best_global_step1").exists() for role in ("actor", "critic"))
     assert old_hf.exists()
     assert not list(tmp_path.rglob("best_global_step5"))
-    assert not (tmp_path / "best_global_step5_hf").exists()
+    assert not (tmp_path / "_hf" / "best_global_step5").exists()
     assert not [path for path in tmp_path.rglob("*") if path.name.endswith((".tmp", ".old"))]
     assert trainer.best_eval_metric_key == ""
     assert trainer.best_eval_metric_value == float("-inf")
@@ -409,7 +416,7 @@ def test_delayed_best_publish_failure_rolls_back_every_role(monkeypatch, tmp_pat
     pending = {
         "actor": tmp_path / "_actor" / "best_global_step5.tmp",
         "critic": tmp_path / "_critic" / "best_global_step5.tmp",
-        "hf": tmp_path / "best_global_step5_hf.tmp",
+        "hf": tmp_path / "_hf" / "best_global_step5.tmp",
     }
 
     def fail_publish(source, destination):
@@ -467,8 +474,8 @@ def test_restore_prefers_durable_best_metadata_over_stale_latest(tmp_path):
     )
     trainer = _trainer(tmp_path, _ActorGroup({"step": 6}), load=True)
     trainer.args.ckpt.save_hf = True
-    orphan_hf = tmp_path / "best_global_step1_hf"
-    orphan_hf.mkdir()
+    orphan_hf = tmp_path / "_hf" / "best_global_step1"
+    orphan_hf.mkdir(parents=True)
     (orphan_hf / "model.safetensors").write_text("orphan")
     for suffix in (".tmp", ".old"):
         pending = tmp_path / "_actor" / f"best_global_step9{suffix}"
@@ -503,15 +510,16 @@ def test_fresh_run_ignores_best_metadata_left_in_output_directory(tmp_path):
 
 
 def test_hf_exports_follow_retained_actor_checkpoints(tmp_path):
+    hf_root = tmp_path / "_hf"
     retained = {"global_step2", "global_step3", "best_global_step2"}
     for tag in retained:
         checkpoint = tmp_path / "_actor" / tag
         _write_checkpoint(checkpoint)
-        export = tmp_path / f"{tag}_hf"
-        export.mkdir()
+        export = hf_root / tag
+        export.mkdir(parents=True)
         (export / "model.safetensors").write_text(tag)
     for tag in ("global_step1", "best_global_step1"):
-        export = tmp_path / f"{tag}_hf"
+        export = hf_root / tag
         export.mkdir()
         (export / "model.safetensors").write_text(tag)
 
@@ -519,7 +527,7 @@ def test_hf_exports_follow_retained_actor_checkpoints(tmp_path):
     trainer.args.ckpt.save_hf = True
     trainer._prune_hf_checkpoints()
 
-    assert {path.name for path in tmp_path.glob("*_hf")} == {f"{tag}_hf" for tag in retained}
+    assert {path.name for path in hf_root.iterdir()} == retained
 
 
 def test_rolling_retention_uses_monotonic_best_metric(monkeypatch, tmp_path):
@@ -539,6 +547,10 @@ def test_rolling_retention_uses_monotonic_best_metric(monkeypatch, tmp_path):
     "config",
     [
         pytest.param({"queue_size": 2}, id="async-best"),
+        pytest.param(
+            {"queue_size": 2, "dcp_max_num": 3, "max_num": 1},
+            id="dcp-retention-decoupled-from-hf",
+        ),
         pytest.param({"save_steps": -1, "force_sync": True}, id="force-sync"),
         pytest.param({"save_steps": 5, "partial": True, "max_num": 1, "max_mem": 100}, id="partial"),
         pytest.param({"eval_steps": 25, "save_steps": 1000, "best_metric_key": "none"}, id="best-disabled"),
@@ -576,7 +588,11 @@ def test_async_best_requires_a_rolling_checkpoint_for_every_policy_step(config):
 @pytest.mark.parametrize(
     ("config", "message"),
     [
-        ({"queue_size": 2, "max_num": 2}, "max_num"),
+        ({"queue_size": 2, "dcp_max_num": 2}, "dcp_max_num"),
+        (
+            {"queue_size": 2, "dcp_max_num": 3, "max_num": 2, "save_hf": True},
+            "--ckpt.max_num",
+        ),
         ({"queue_size": 2, "max_mem": 100}, "max_mem"),
     ],
 )
