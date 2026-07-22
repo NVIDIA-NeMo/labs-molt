@@ -889,7 +889,7 @@ class PolicyModelActor(BaseModelActor):
             self.actor.model,
             os.path.join(args.ckpt.path, "_actor"),
             tag,
-            args.ckpt.max_num,
+            args.ckpt.dcp_max_num,
             args.ckpt.max_mem,
             client_states,
             metric_value=metric_value,
@@ -898,10 +898,9 @@ class PolicyModelActor(BaseModelActor):
             scheduler=self.actor_scheduler,
         )
         if self.save_hf_ckpt:
-            save_path = os.path.join(args.ckpt.path, f"{tag}_hf")
-            self.strategy.save_model(
-                self.actor,
-                self.tokenizer,
-                save_path,
-            )
+            # Versioned HF export mirrors the DCP layout (_actor/<tag>) and gets its own
+            # recency pruning, so save_hf can run every step without unbounded disk growth.
+            hf_root = os.path.join(args.ckpt.path, "_hf")
+            self.strategy.save_model(self.actor, self.tokenizer, os.path.join(hf_root, tag))
+            self.strategy.prune_checkpoints(hf_root, tag, args.ckpt.max_num, args.ckpt.max_mem)
         torch_dist_barrier_and_cuda_sync()

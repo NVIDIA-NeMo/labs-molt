@@ -253,7 +253,13 @@ def train(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    from molt.cli.common_args import add_ckpt_args, add_fsdp_args, add_logger_args, add_optimizer_args
+    from molt.cli.common_args import (
+        add_ckpt_args,
+        add_fsdp_args,
+        add_logger_args,
+        add_optimizer_args,
+        resolve_ckpt_retention,
+    )
 
     # ====================== Shared blocks (same surface as train_sft) ======================
     # FSDP2 / AutoModel backend.
@@ -824,6 +830,7 @@ if __name__ == "__main__":
     from molt.utils.config import hierarchize
 
     args = hierarchize(args)
+    resolve_ckpt_retention(args.ckpt)
 
     # ============================ Validate / derive arguments ============================
     # NOTE: ordering matters where a check derives state a later check reads — the

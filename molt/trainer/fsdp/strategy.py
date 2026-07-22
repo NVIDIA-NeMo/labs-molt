@@ -713,5 +713,13 @@ class FsdpStrategy:
             model, ckpt_path, tag, max_num=max_num, max_mem=max_mem, client_states=client_states, **kwargs
         )
 
+    def prune_checkpoints(self, ckpt_path: str, keep_tag: str, max_num: int, max_mem: float = 0) -> None:
+        """Retain at most ``max_num`` versioned subdirs under ``ckpt_path`` (rank-0 only).
+        Gives the HF-export dir the same recency-based retention that ``save_ckpt`` applies
+        to DCP checkpoints — ``save_model`` alone never prunes. ``keep_tag`` is always kept.
+        """
+        if self.is_rank_0():
+            self.checkpoint._prune_checkpoints(ckpt_path, keep_tag, max_num, max_mem, is_best=False)
+
     def load_ckpt(self, model: nn.Module, ckpt_path: str, optimizer=None, scheduler=None, **kwargs):
         return self.checkpoint.load_ckpt(model, ckpt_path, optimizer=optimizer, scheduler=scheduler, **kwargs)

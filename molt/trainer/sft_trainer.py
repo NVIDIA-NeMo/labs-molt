@@ -329,15 +329,16 @@ class SFTTrainer:
                 self.model,
                 args.ckpt.path,
                 tag,
-                args.ckpt.max_num,
+                args.ckpt.dcp_max_num,
                 args.ckpt.max_mem,
                 client_states,
                 optimizer=self.optimizer,
                 scheduler=self.scheduler,
             )
             if self.save_hf_ckpt:
-                save_path = os.path.join(args.ckpt.path, f"{tag}_hf")
-                self.strategy.save_model(self.model, self.tokenizer, save_path)
+                hf_root = os.path.join(args.ckpt.path, "_hf")
+                self.strategy.save_model(self.model, self.tokenizer, os.path.join(hf_root, tag))
+                self.strategy.prune_checkpoints(hf_root, tag, args.ckpt.max_num, args.ckpt.max_mem)
 
     def evaluate(self, eval_dataloader, steps=0):
         self.model.eval()
