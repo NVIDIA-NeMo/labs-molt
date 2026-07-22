@@ -103,6 +103,22 @@ def test_filter_vllm_engine_kwargs_keeps_speculative_config(monkeypatch):
     assert filtered == {"model": "m", "speculative_config": {"num_speculative_tokens": 1}}
 
 
+def test_filter_vllm_engine_kwargs_keeps_disable_custom_all_reduce(monkeypatch):
+    # --vllm.disable_custom_all_reduce threads through as this kwarg; it is a real
+    # AsyncEngineArgs field, so it must survive the whitelist filter (a rename/typo
+    # would otherwise let it be silently dropped -> flag becomes a no-op).
+    @dataclass
+    class FakeAsyncEngineArgs:
+        model: str
+        disable_custom_all_reduce: bool = False
+
+    monkeypatch.setattr(vllm_engine.vllm, "AsyncEngineArgs", FakeAsyncEngineArgs)
+
+    filtered = vllm_engine._filter_vllm_engine_kwargs({"model": "m", "disable_custom_all_reduce": True})
+
+    assert filtered == {"model": "m", "disable_custom_all_reduce": True}
+
+
 def test_ray_visible_device_flag_is_cuda_only():
     assert vllm_engine.ray_noset_visible_devices({"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"})
     assert not vllm_engine.ray_noset_visible_devices({"RAY_EXPERIMENTAL_NOSET_OTHER_VISIBLE_DEVICES": "1"})

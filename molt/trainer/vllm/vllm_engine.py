@@ -275,6 +275,7 @@ def create_vllm_engines(
     mamba_ssm_cache_dtype: Optional[str] = None,
     distributed_executor_backend: Optional[str] = None,
     enable_expert_parallel: bool = False,
+    disable_custom_all_reduce: bool = False,
     # vLLM 0.21 EngineArgs accept None and resolve internally to its own default
     # (prefix_caching True, chunked_prefill True, async_scheduling True for
     # mp/uniproc executors). We override only `enable_prefix_caching` to False:
@@ -469,6 +470,13 @@ def create_vllm_engines(
             # vLLM TP+EP hybrid: non-MoE layers stay TP-sharded across `tensor_parallel_size`
             # ranks; MoE experts are EP-distributed across the same ranks (one group per rank).
             actor_kwargs["enable_expert_parallel"] = True
+
+        if disable_custom_all_reduce:
+            # Fall back from vLLM's custom all-reduce to NCCL for cross-GPU TP reductions.
+            # The custom kernel needs supported GPU P2P / CUDA IPC, which can be unavailable
+            # or incompatible on some multi-GPU / container hosts (e.g. custom_all_reduce.cuh
+            # "invalid argument"), where TP>1 rollout otherwise crashes at engine init.
+            actor_kwargs["disable_custom_all_reduce"] = True
 
         if data_parallel_size > 1:
             # vLLM EP = TP * DP: raising DP is the only way a rollout engine gets

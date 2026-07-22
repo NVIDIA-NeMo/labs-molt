@@ -89,6 +89,7 @@ def train(args):
             mamba_ssm_cache_dtype=args.vllm.mamba_ssm_cache_dtype,
             distributed_executor_backend=args.vllm.distributed_executor_backend,
             enable_expert_parallel=args.vllm.enable_expert_parallel,
+            disable_custom_all_reduce=args.vllm.disable_custom_all_reduce,
             enable_prefix_caching=args.vllm.enable_prefix_caching,
             enable_chunked_prefill=args.vllm.enable_chunked_prefill,
             max_num_batched_tokens=args.vllm.max_num_batched_tokens,
@@ -645,6 +646,16 @@ if __name__ == "__main__":
         action="store_true",
         default=False,
         help="Enable vLLM TP+EP hybrid: experts EP-sharded across the TP ranks (Qwen3.5/3.6 MoE).",
+    )
+    parser.add_argument(
+        "--vllm.disable_custom_all_reduce",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable vLLM's custom all-reduce kernel and fall back to NCCL. "
+            "Useful when custom all-reduce fails because GPU P2P or CUDA IPC "
+            "is unavailable or incompatible."
+        ),
     )
     # vLLM throughput features. We leave `chunked_prefill` and `async_scheduling`
     # at None so vLLM 0.21's own auto-resolution decides (both default ON for
