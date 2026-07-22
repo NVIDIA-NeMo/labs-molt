@@ -118,23 +118,22 @@ def train(args):
 
     from molt.trainer.rl_trainer import RLTrainer
 
+    # Rollout sampling kwargs shared by the eval-only and training controllers.
+    gen_kwargs = dict(
+        do_sample=True,
+        max_len=max_len,
+        max_new_tokens=args.rollout.max_new_tokens,
+        temperature=args.rollout.temperature,
+        top_p=args.rollout.top_p,
+    )
+
     # Eval-only: score --eval.dataset once and exit, with NO training. vLLM already holds the HF
     # weights, so passing None actors keeps the whole training side unbuilt inside RLTrainer — the
     # policy/ref/critic FSDP models never load and their GPUs go to the eval.
     if args.eval.eval_only:
         assert args.eval.dataset, "--eval.eval_only requires --eval.dataset."
         eval_trainer = RLTrainer.remote(
-            args.actor.model_name_or_path,
-            strategy,
-            None,
-            None,
-            vllm_engines,
-            router_url=router_url,
-            do_sample=True,
-            max_len=max_len,
-            max_new_tokens=args.rollout.max_new_tokens,
-            temperature=args.rollout.temperature,
-            top_p=args.rollout.top_p,
+            args.actor.model_name_or_path, strategy, None, None, vllm_engines, router_url=router_url, **gen_kwargs
         )
         print(f"[eval-only] {ray.get(eval_trainer.run_eval_only.remote())}", flush=True)
         return
@@ -234,12 +233,7 @@ def train(args):
         vllm_engines,
         critic_model_group=critic_model,
         router_url=router_url,
-        # generate kwargs
-        do_sample=True,
-        max_len=max_len,
-        max_new_tokens=args.rollout.max_new_tokens,
-        temperature=args.rollout.temperature,
-        top_p=args.rollout.top_p,
+        **gen_kwargs,
     )
 
     # training update steps
