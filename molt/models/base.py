@@ -28,8 +28,10 @@ import torch.nn as nn
 
 from molt.trainer.fsdp.packing import (
     cp_dtensor_full_sequence,
+    cp_local_seq_index,
     is_automodel_custom_model,
     pack_padded_batch,
+    pad_to_cp_multiple,
     unpack_to_padded,
 )
 
@@ -559,10 +561,13 @@ class BaseModel(nn.Module):
         global_ids = self._moe_layer_global_ids
         routing = routed_experts  # (B, vllm_layers, topk, S), seq last
         if cp_forward:
-            # Shard the rollout routing ids to this rank's forward token order via the
-            # AutoModel sharder (same head-tail layout the logits take). The -1 fill keeps
-            # CP pad tokens out of expert 0 so RouterReplay leaves them at the live choice.
-            routing = self._cp_sharder.shard_token_tensor(routing, seq_dim=3, fill=-1)
+            # Take this rank's CP shard of the rollout routing ids, in the same head-tail
+            # round-robin order the logits take (cp_local_seq_index — the shard peer of the
+            # cp_dtensor_full_sequence gather). Pad the seq dim with the -1 sentinel so CP pad
+            # tokens stay out of expert 0 and RouterReplay leaves them at the live choice.
+            routing = pad_to_cp_multiple(routing, self.cp_size, seq_dim=3, value=-1)
+            local_positions = cp_local_seq_index(routing.shape[3] // self.cp_size, self.cp_mesh, routing.device)
+            routing = routing.index_select(3, local_positions)
         b, n_layers, topk, s = routing.shape
         if n_layers <= max(global_ids):
             raise ValueError(
@@ -601,7 +606,6 @@ class BaseModel(nn.Module):
         indices = None
         cp_forward = False
         cp_ctx_factory = nullcontext
-        self._cp_sharder = None  # set below under CP; read by _restore_full_sequence / _build_routing_targets
         if self.packing_samples:
             sequences, position_ids, rolled_sequences, indices, attn_kwargs = pack_padded_batch(
                 sequences, attention_mask, style=self._packing_style
@@ -688,10 +692,8 @@ class BaseModel(nn.Module):
                     "labels": rolled_sequences,
                     **mm_inputs,
                 }
-                self._cp_sharder = ContextParallelSharder(
-                    self.model, self.device_mesh, cp_batch, invoke_pre_embed=True
-                )
-                cp_ctx_factory, cp_batch = self._cp_sharder.shard(cp_batch)
+                cp_sharder = ContextParallelSharder(self.model, self.device_mesh, cp_batch, invoke_pre_embed=True)
+                cp_ctx_factory, cp_batch = cp_sharder.shard(cp_batch)
                 position_ids = cp_batch.pop("position_ids", None)
                 # The sharder pads `labels` with -100 (CE ignore_index), but molt reuses
                 # rolled_sequences as gather targets for log_probs_from_logits — a -100 index

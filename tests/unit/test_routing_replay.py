@@ -164,35 +164,31 @@ def test_build_routing_targets_selects_sparse_hybrid_global_layer_ids():
         assert targets[i][:, 0].tolist() == expected
 
 
-def test_build_routing_targets_cp_delegates_to_sharder():
-    # Under CP the head-tail shard is owned by the AutoModel sharder; _build_routing_targets
-    # just hands it the routing (seq_dim=3, -1 fill so CP pad tokens keep live routing) and
-    # gate-selects on the returned local shard exactly like the non-CP path. The stub sharder
-    # emulates rank 0 of cp=2 (head chunk [0] + mirrored tail chunk [3] of a length-4 seq).
-    S = 4
+def test_build_routing_targets_cp_takes_this_ranks_local_shard():
+    # cp=2, rank 0 holds the head chunk [0] and the mirrored tail chunk [3] of a length-4
+    # sequence (cp_local_seq_index head-tail layout — the shard peer of the gather). The local
+    # length is S/cp = 2; _build_routing_targets must take exactly those tokens.
+    from types import SimpleNamespace as NS
+
+    cp_size, S = 2, 4
+    cp_mesh = NS(size=lambda: cp_size, get_local_rank=lambda: 0)
     routed = torch.zeros(1, L, K, S, dtype=torch.int16)
     for layer in range(L):
         for t in range(S):
             routed[0, layer, 0, t] = 10 * layer + t
 
-    calls = {}
-
-    def _shard(tensor, seq_dim=1, fill=None):
-        calls["seq_dim"], calls["fill"] = seq_dim, fill
-        return tensor.index_select(seq_dim, torch.tensor([0, 3]))  # head[0] + tail[3]
-
     stub = SimpleNamespace(
         packing_samples=False,
         _num_routing_gates=L,
         _moe_layer_global_ids=list(range(L)),
-        _cp_sharder=SimpleNamespace(shard_token_tensor=_shard),
+        cp_size=cp_size,
+        cp_mesh=cp_mesh,
     )
     targets = BaseModel._build_routing_targets(stub, routed, indices=None, cp_forward=True)
 
-    assert calls == {"seq_dim": 3, "fill": -1}  # -1 fill keeps CP pad tokens on live routing
     assert len(targets) == L
     for layer in range(L):
-        assert targets[layer].shape == (2, K)  # this rank's local tokens
+        assert targets[layer].shape == (S // cp_size, K)  # this rank's local tokens
         assert targets[layer][:, 0].tolist() == [10 * layer + 0, 10 * layer + 3]  # head[0] + tail[3]
 
 

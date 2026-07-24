@@ -46,6 +46,20 @@ def unshard_dtensor(tensor: torch.Tensor) -> torch.Tensor:
     return tensor.full_tensor() if isinstance(tensor, DTensor) else tensor
 
 
+def pad_to_cp_multiple(tensor: torch.Tensor, cp_size: int, seq_dim: int = 1, value: int | float = 0) -> torch.Tensor:
+    """Right-pad a sequence tensor to DTensor CP's ``2 * cp_size`` requirement."""
+    if cp_size <= 1:
+        return tensor
+    multiple = 2 * cp_size
+    pad_len = (-tensor.shape[seq_dim]) % multiple
+    if pad_len == 0:
+        return tensor
+    pad_shape = list(tensor.shape)
+    pad_shape[seq_dim] = pad_len
+    pad = tensor.new_full(pad_shape, value)
+    return torch.cat([tensor, pad], dim=seq_dim)
+
+
 def cp_local_seq_index(local_len: int, cp_mesh, device) -> torch.Tensor:
     """Global sequence positions this CP rank holds, in local (head+tail) order.
 
