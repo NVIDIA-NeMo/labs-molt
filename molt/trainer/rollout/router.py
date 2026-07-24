@@ -292,7 +292,7 @@ class AgentRunnerActor:
     (``--rollout.num_runners``) parallelizes that work; the trainer round-robins prompts
     across them (no pool wrapper — just a list + an index)."""
 
-    async def __init__(self, agent_path, router_url, *, model_path=None, model_name="policy"):
+    def __init__(self, agent_path, router_url, *, model_path=None, model_name="policy"):
         import aiohttp
 
         from molt.agents.base import load_agent_runner  # lazy: router.py is imported by _chat_server

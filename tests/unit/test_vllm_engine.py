@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import inspect
 import sys
 from dataclasses import dataclass
 from types import ModuleType
@@ -122,3 +123,9 @@ def test_filter_vllm_engine_kwargs_keeps_disable_custom_all_reduce(monkeypatch):
 def test_ray_visible_device_flag_is_cuda_only():
     assert vllm_engine.ray_noset_visible_devices({"RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES": "1"})
     assert not vllm_engine.ray_noset_visible_devices({"RAY_EXPERIMENTAL_NOSET_OTHER_VISIBLE_DEVICES": "1"})
+
+
+def test_rollout_ray_actor_init_is_synchronous():
+    """Ray actor constructors are synchronous; an async __init__ would not be awaited."""
+    actor_cls = getattr(vllm_engine.RolloutRayActor, "__ray_actor_class__", vllm_engine.RolloutRayActor)
+    assert not inspect.iscoroutinefunction(actor_cls.__init__)

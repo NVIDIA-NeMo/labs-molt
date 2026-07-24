@@ -15,6 +15,7 @@
 
 import asyncio
 import base64
+import inspect
 import io
 from types import SimpleNamespace
 
@@ -23,6 +24,7 @@ import numpy as np
 import pytest
 
 from molt.trainer.rollout.router import (
+    AgentRunnerActor,
     RouterGenerateClient,
     _align_features_to_canonical,
     _decode_routed_experts,
@@ -258,3 +260,9 @@ def test_align_features_multi_image_finds_separated_runs():
 def test_decode_routed_experts_handles_both_encodings():
     assert _decode_routed_experts(_npy_b64([[1], [2]])).tolist() == [[1], [2]]  # base64 .npy
     assert _decode_routed_experts([[3], [4]]).tolist() == [[3], [4]]  # nested JSON lists
+
+
+def test_agent_runner_actor_init_is_synchronous():
+    """Ray actor constructors are synchronous; an async __init__ would not be awaited."""
+    actor_cls = getattr(AgentRunnerActor, "__ray_actor_class__", AgentRunnerActor)
+    assert not inspect.iscoroutinefunction(actor_cls.__init__)

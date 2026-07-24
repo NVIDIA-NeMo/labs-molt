@@ -101,7 +101,7 @@ def _filter_vllm_engine_kwargs(kwargs: dict) -> dict:
 class RolloutRayActor:
     """Async vLLM-backed actor that exposes generation utilities."""
 
-    async def __init__(self, *args, bundle_indices: list = None, **kwargs):
+    def __init__(self, *args, bundle_indices: list = None, **kwargs):
         backend = kwargs.get("distributed_executor_backend")
         num_gpus = kwargs.pop("num_gpus")
         self._configure_device_env(
