@@ -27,6 +27,7 @@ import torch
 import torch.nn as nn
 
 from molt.trainer.fsdp.packing import (
+    cp_dtensor_full_sequence,
     is_automodel_custom_model,
     pack_padded_batch,
     unpack_to_padded,
@@ -268,8 +269,8 @@ class BaseModel(nn.Module):
         self.packing_samples = packing_samples
         self.device_mesh = device_mesh
         mesh_dims = getattr(device_mesh, "mesh_dim_names", ()) or ()
-        cp_mesh = device_mesh["cp"] if device_mesh is not None and "cp" in mesh_dims else None
-        self.cp_size = cp_mesh.size() if cp_mesh is not None else 1
+        self.cp_mesh = device_mesh["cp"] if device_mesh is not None and "cp" in mesh_dims else None
+        self.cp_size = self.cp_mesh.size() if self.cp_mesh is not None else 1
 
         if not isinstance(pretrain_or_model, str):
             self.model = pretrain_or_model
@@ -533,11 +534,11 @@ class BaseModel(nn.Module):
         padded ``[B, seqlen]``). No-op when neither CP nor packing is active.
         """
         if cp_forward:
-            # Differentiable all-gather of this rank's CP shard, reordered to global
-            # sequence order and trimmed back to the caller's original length. Same
-            # head-tail load-balance layout molt used to invert by hand, now owned by
-            # the AutoModel sharder (grads route back to each owning shard).
-            t = self._cp_sharder.gather_token_tensor(t, seq_dim=1, trim=True)
+            # DTensor slice-backward gather (see cp_dtensor_full_sequence): forward-identical
+            # to the sharder's gather_token_tensor, but its backward SLICES the grad to each
+            # rank's shard instead of summing across CP — required by the `loss *= cp_size`
+            # compensation in FsdpStrategy.backward (the summing all_gather made grad cp_size× big).
+            t = cp_dtensor_full_sequence(t, self.cp_mesh, seq_dim=1)[:, :seqlen]
         if self.packing_samples:
             t = unpack_to_padded(t, indices, batch, seqlen)
         return t
