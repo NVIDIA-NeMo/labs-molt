@@ -151,11 +151,14 @@ def reinforce(
         token_reward = token_reward * mask
 
         # discounted reverse-cumulative returns: G_t = r_t + gamma * G_{t+1}
-        seq_returns = torch.zeros_like(token_reward)
-        running = torch.zeros(token_reward.size(0), device=token_reward.device)
-        for t in reversed(range(token_reward.size(1))):
-            running = token_reward[:, t] + ctx.gamma * running
-            seq_returns[:, t] = running
+        if ctx.gamma == 1.0:
+            seq_returns = token_reward.flip(1).cumsum(1).flip(1)
+        else:
+            seq_returns = torch.zeros_like(token_reward)
+            running = torch.zeros(token_reward.size(0), device=token_reward.device)
+            for t in reversed(range(token_reward.size(1))):
+                running = token_reward[:, t] + ctx.gamma * running
+                seq_returns[:, t] = running
         returns.append(seq_returns)
 
     return normalize_advantages(returns, ctx), returns

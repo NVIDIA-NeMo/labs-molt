@@ -276,6 +276,41 @@ def test_reinforce_returns_and_advantages():
     assert torch.allclose(advantages[0], torch.tensor([[1.0, 1.0, 1.0], [-1.0, -1.0, -1.0]]), atol=1e-5)
 
 
+def test_reinforce_returns_match_reverse_recursion_with_masked_kl_rewards():
+    """The gamma=1 fast path and discounted fallback preserve the token-level
+    reverse recurrence across masked observation tokens."""
+    reinforce = adv_mod.get_advantage_estimator("reinforce")
+    mask = torch.tensor([[1, 0, 1, 1, 0], [0, 1, 1, 0, 0]], dtype=torch.float32)
+    kl = torch.tensor([[0.5, 9.0, -0.25, 0.75, -4.0], [3.0, -0.5, 0.25, 8.0, -2.0]])
+    rewards = torch.tensor([2.0, -1.0])
+    token_reward = -0.2 * kl * mask
+    token_reward[0, 3] += rewards[0]
+    token_reward[1, 2] += rewards[1]
+
+    for gamma in (1.0, 0.75):
+        expected = torch.zeros_like(token_reward)
+        running = torch.zeros(token_reward.size(0))
+        for t in reversed(range(token_reward.size(1))):
+            running = token_reward[:, t] + gamma * running
+            expected[:, t] = running
+
+        ctx = AdvantageContext(
+            sample_to_rollout=torch.arange(2),
+            exp_len=[2],
+            action_masks=[mask],
+            kl_coef=0.2,
+            gamma=gamma,
+            lam=1.0,
+            kls=[kl],
+            values=None,
+            no_whiten=True,
+        )
+        advantages, returns = reinforce(rewards, [[0], [1]], ctx)
+
+        torch.testing.assert_close(returns[0], expected)
+        torch.testing.assert_close(advantages[0], expected)
+
+
 def test_value_loss_matches_reference():
     """ValueLoss must equal 0.5 * max(clipped^2, unclipped^2) (the standard PPO
     0.5 factor), aggregated as a plain masked mean over the active tokens."""
