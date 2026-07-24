@@ -89,6 +89,7 @@ def train(args):
             mamba_ssm_cache_dtype=args.vllm.mamba_ssm_cache_dtype,
             distributed_executor_backend=args.vllm.distributed_executor_backend,
             enable_expert_parallel=args.vllm.enable_expert_parallel,
+            disable_custom_all_reduce=args.vllm.disable_custom_all_reduce,
             enable_prefix_caching=args.vllm.enable_prefix_caching,
             enable_chunked_prefill=args.vllm.enable_chunked_prefill,
             max_num_batched_tokens=args.vllm.max_num_batched_tokens,
@@ -101,6 +102,42 @@ def train(args):
             pipeline_parallel_size=getattr(args.vllm, "pipeline_parallel_size", 1),
             data_parallel_size=getattr(args.vllm, "data_parallel_size", 1),
         )
+
+    # Rollout gateway: serve each engine's OpenAI API + the real vllm-router in front of them.
+    # Rollouts run through a runner pool -> gateway (generation); weight sync still goes straight to
+    # the engine workers (bypasses the gateway). Built before the FSDP models so --eval.eval_only can
+    # score a checkpoint and return here without ever creating a policy actor.
+    router_url = None
+    vllm_router = None  # MUST stay in scope for the whole run — the router actor dies if GC'd
+    if vllm_engines:
+        from molt.trainer.rollout.router import create_vllm_router
+
+        vllm_router, router_url = create_vllm_router(
+            vllm_engines, policy=getattr(args.vllm, "router_policy", "consistent_hash")
+        )
+        print(f"[rollout] gateway up at {router_url} fronting {len(vllm_engines)} engines", flush=True)
+
+    from molt.trainer.rl_trainer import RLTrainer
+
+    # Rollout sampling kwargs shared by the eval-only and training controllers.
+    gen_kwargs = dict(
+        do_sample=True,
+        max_len=max_len,
+        max_new_tokens=args.rollout.max_new_tokens,
+        temperature=args.rollout.temperature,
+        top_p=args.rollout.top_p,
+    )
+
+    # Eval-only: score --eval.dataset once and exit, with NO training. vLLM already holds the HF
+    # weights, so passing None actors keeps the whole training side unbuilt inside RLTrainer — the
+    # policy/ref/critic FSDP models never load and their GPUs go to the eval.
+    if args.eval.eval_only:
+        assert args.eval.dataset, "--eval.eval_only requires --eval.dataset."
+        eval_trainer = RLTrainer.remote(
+            args.actor.model_name_or_path, strategy, None, None, vllm_engines, router_url=router_url, **gen_kwargs
+        )
+        print(f"[eval-only] {ray.get(eval_trainer.run_eval_only.remote())}", flush=True)
+        return
 
     # init actor / reference / critic models
     # Colocating only affects FSDP models (actor + reference + critic); they
@@ -188,21 +225,6 @@ def train(args):
     else:
         critic_model = None
 
-    # Rollout gateway: serve each engine's OpenAI API + the real vllm-router in front of them.
-    # Rollouts run through a runner pool -> gateway (generation); weight sync still goes straight
-    # to the engine workers (bypasses the gateway).
-    router_url = None
-    vllm_router = None  # MUST stay in scope for the whole run — the router actor dies if GC'd
-    if vllm_engines:
-        from molt.trainer.rollout.router import create_vllm_router
-
-        vllm_router, router_url = create_vllm_router(
-            vllm_engines, policy=getattr(args.vllm, "router_policy", "consistent_hash")
-        )
-        print(f"[rollout] gateway up at {router_url} fronting {len(vllm_engines)} engines", flush=True)
-
-    from molt.trainer.rl_trainer import RLTrainer
-
     # init RL trainer (single controller)
     policy_trainer = RLTrainer.remote(
         args.actor.model_name_or_path,
@@ -212,12 +234,7 @@ def train(args):
         vllm_engines,
         critic_model_group=critic_model,
         router_url=router_url,
-        # generate kwargs
-        do_sample=True,
-        max_len=max_len,
-        max_new_tokens=args.rollout.max_new_tokens,
-        temperature=args.rollout.temperature,
-        top_p=args.rollout.top_p,
+        **gen_kwargs,
     )
 
     # training update steps
@@ -253,7 +270,13 @@ def train(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    from molt.cli.common_args import add_ckpt_args, add_fsdp_args, add_logger_args, add_optimizer_args
+    from molt.cli.common_args import (
+        add_ckpt_args,
+        add_fsdp_args,
+        add_logger_args,
+        add_optimizer_args,
+        resolve_ckpt_retention,
+    )
 
     # ====================== Shared blocks (same surface as train_sft) ======================
     # FSDP2 / AutoModel backend.
@@ -536,7 +559,11 @@ if __name__ == "__main__":
         "--actor.entropy_coef",
         type=float,
         default=None,
-        help="Entropy loss coef, set to 0 means only enable entropy logs",
+        help=(
+            "Entropy coefficient. Any nonzero value enables entropy computation and "
+            "logs entropy_loss; positive values encourage higher entropy. "
+            "0 or unset skips entropy computation."
+        ),
     )
     parser.add_argument("--reward.clip_range", type=float, nargs=2, default=(-10, 10), help="Reward clip range")
 
@@ -643,6 +670,16 @@ if __name__ == "__main__":
         action="store_true",
         default=False,
         help="Enable vLLM TP+EP hybrid: experts EP-sharded across the TP ranks (Qwen3.5/3.6 MoE).",
+    )
+    parser.add_argument(
+        "--vllm.disable_custom_all_reduce",
+        action="store_true",
+        default=False,
+        help=(
+            "Disable vLLM's custom all-reduce kernel and fall back to NCCL. "
+            "Useful when custom all-reduce fails because GPU P2P or CUDA IPC "
+            "is unavailable or incompatible."
+        ),
     )
     # vLLM throughput features. We leave `chunked_prefill` and `async_scheduling`
     # at None so vLLM 0.21's own auto-resolution decides (both default ON for
@@ -835,6 +872,13 @@ if __name__ == "__main__":
         "Fresh runs only — gated on the consumed-prompt counter being 0, so a resume (which loads a "
         "non-zero step) does not add a redundant eval.",
     )
+    parser.add_argument(
+        "--eval.eval_only",
+        action="store_true",
+        help="Score --eval.dataset once and exit — no training. vLLM already holds the HF weights, so "
+        "the policy/ref/critic FSDP actors are never built and their GPUs go to the eval (use all nodes "
+        "for vLLM engines / env runners, or fewer nodes). Requires --eval.dataset.",
+    )
 
     # Runtime / misc
     parser.add_argument("--local_rank", type=int, default=-1, help="local_rank from torchrun")
@@ -844,6 +888,7 @@ if __name__ == "__main__":
     from molt.utils.config import hierarchize
 
     args = hierarchize(args)
+    resolve_ckpt_retention(args.ckpt)
 
     # ============================ Validate / derive arguments ============================
     # NOTE: ordering matters where a check derives state a later check reads — the
@@ -896,7 +941,9 @@ if __name__ == "__main__":
         args.rollout.vllm_generate_batch_size = args.rollout.batch_size
 
     # --- Algorithm checks ---
-    if args.algo.advantage.estimator in ["rloo", "reinforce_baseline", "grpo", "dr_grpo"]:
+    # Group-relative estimators need >1 sample per prompt to form a baseline during training;
+    # eval-only never trains, so skip that gate (eval uses --eval.n_samples_per_prompt).
+    if not args.eval.eval_only and args.algo.advantage.estimator in ["rloo", "reinforce_baseline", "grpo", "dr_grpo"]:
         assert args.rollout.n_samples_per_prompt > 1, (
             f"{args.algo.advantage.estimator} requires n_samples_per_prompt > 1"
         )

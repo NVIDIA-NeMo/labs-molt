@@ -368,7 +368,7 @@ class CriticModelActor(BaseModelActor):
             self.critic.model,
             os.path.join(args.ckpt.path, "_critic"),
             tag,
-            args.ckpt.max_num,
+            args.ckpt.dcp_max_num,
             args.ckpt.max_mem,
             client_states or {},
             # Forward the actor's eval metric so the critic's retention/pruning

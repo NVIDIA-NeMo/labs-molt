@@ -98,7 +98,20 @@ def add_ckpt_args(parser, default_ckpt_path: str) -> None:
         help="Directory for resumable FSDP/DCP training checkpoints (optimizer + scheduler state).",
     )
     parser.add_argument(
-        "--ckpt.max_num", type=int, default=3, help="Keep at most this many resumable checkpoints (older ones pruned)."
+        "--ckpt.max_num",
+        type=int,
+        default=3,
+        help="How many checkpoints to keep; older ones pruned (<=0 keeps all). Applies to the HF "
+        "exports (--ckpt.save_hf, versioned under ckpt.path/_hf/<step>) and, unless --ckpt.dcp_max_num "
+        "is set, to the DCP resumable checkpoints too.",
+    )
+    parser.add_argument(
+        "--ckpt.dcp_max_num",
+        type=int,
+        default=None,
+        help="Override --ckpt.max_num for DCP resumable checkpoints only; unset -> --ckpt.max_num. "
+        "DCP checkpoints carry optimizer state and are large, so keep this small (e.g. 2) while "
+        "--ckpt.max_num keeps many cheap HF exports for eval.",
     )
     parser.add_argument(
         "--ckpt.max_mem",
@@ -112,6 +125,15 @@ def add_ckpt_args(parser, default_ckpt_path: str) -> None:
         default=False,
         help="Resume from the latest checkpoint in --ckpt.path if present.",
     )
+
+
+def resolve_ckpt_retention(ckpt) -> None:
+    """Fill the per-kind checkpoint counts from --ckpt.max_num when left unset.
+
+    Call once after ``hierarchize`` so callers can read ``ckpt.dcp_max_num`` directly.
+    """
+    if ckpt.dcp_max_num is None:
+        ckpt.dcp_max_num = ckpt.max_num
 
 
 def add_optimizer_args(parser, prefix: str = "", default_adam_lr: float = 5e-6) -> None:

@@ -58,6 +58,12 @@ class CheckpointManager:
         # requires it (raises "No checkpointer provided" otherwise). Outputs
         # consolidated HF safetensors that vLLM can hot-load.
         model = self.strategy._unwrap_model(model)
+        # Declare the export precision on the config and every nested sub-config: loaders (vLLM/HF)
+        # build each submodule at its config dtype, so a stale fp32 `dtype` (an fp32 master) left on
+        # the training config makes that submodule fp32 and mismatch the param_dtype weights on load.
+        from molt.utils.utils import convert_to_torch_dtype
+
+        self._set_config_dtype(model.config, convert_to_torch_dtype(self.strategy.param_dtype))
         ckpt = self._build_checkpointer(output_dir, save_consolidated=True, model=model)
         ckpt.save_model(model=model, weights_path=output_dir, tokenizer=tokenizer)
         if dist.is_initialized():
@@ -65,6 +71,16 @@ class CheckpointManager:
         self._promote_hf_export(output_dir)
         if dist.is_initialized():
             dist.barrier()
+
+    @staticmethod
+    def _set_config_dtype(config, dtype: torch.dtype) -> None:
+        """Set ``torch_dtype`` on an HF config and every nested sub-config (vision/audio/text)."""
+        from transformers import PretrainedConfig
+
+        config.torch_dtype = dtype
+        for value in vars(config).values():
+            if isinstance(value, PretrainedConfig):
+                CheckpointManager._set_config_dtype(value, dtype)
 
     @staticmethod
     def _promote_hf_export(output_dir: str) -> None:

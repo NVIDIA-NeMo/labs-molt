@@ -681,16 +681,6 @@ class GenerateSamplesActor:
                     self._last_eval_step = global_step
                     self._next_eval_step = (global_step // eval_steps + 1) * eval_steps
                     logger.info(f"Starting async evaluation at step {global_step}...")
-                    # Independent eval sampling: each knob left unset (None) falls back to the
-                    # rollout value in generate_kwargs; override only what's set for eval.
-                    eval_n = self.args.eval.n_samples_per_prompt
-                    if eval_n is None:
-                        eval_n = self.args.rollout.n_samples_per_prompt
-                    eval_kwargs = {**self.generate_kwargs, "n_samples_per_prompt": eval_n}
-                    for key in ("temperature", "top_p", "max_new_tokens"):
-                        override = getattr(self.args.eval, key)
-                        if override is not None:
-                            eval_kwargs[key] = override
                     # Under partial rollout the rollout path (below) deliberately
                     # skips vllm_lock so the trainer's broadcast_to_vllm refit can
                     # interleave via pause/resume. Eval must follow the same
@@ -700,11 +690,10 @@ class GenerateSamplesActor:
                     if not self._partial_rollout:
                         ray.get(self.vllm_lock.acquire.remote())
                     try:
-                        samples_list = self.samples_generator.generate_eval_samples(**eval_kwargs)
+                        eval_metrics = self._run_eval()
                     finally:
                         if not self._partial_rollout:
                             ray.get(self.vllm_lock.release.remote())
-                    eval_metrics = compute_eval_metrics(self.eval_dataloader, samples_list, eval_n)
                     logger.info(f"Async evaluation completed: {eval_metrics}")
                     self.rollout_queue.put(("eval", global_step, eval_metrics), block=True)
                     continue
@@ -764,6 +753,28 @@ class GenerateSamplesActor:
             pbar.close()
 
         self.rollout_queue.put("done", block=True)
+
+    def _run_eval(self) -> dict:
+        # Independent eval sampling: each knob left unset (None) falls back to the rollout value in
+        # generate_kwargs; override only what's set for eval. Shared by the in-training eval cadence
+        # (fit) and the standalone --eval.eval_only run.
+        eval_n = self.args.eval.n_samples_per_prompt
+        if eval_n is None:
+            eval_n = self.args.rollout.n_samples_per_prompt
+        eval_kwargs = {**self.generate_kwargs, "n_samples_per_prompt": eval_n}
+        for key in ("temperature", "top_p", "max_new_tokens"):
+            override = getattr(self.args.eval, key)
+            if override is not None:
+                eval_kwargs[key] = override
+        samples_list = self.samples_generator.generate_eval_samples(**eval_kwargs)
+        return compute_eval_metrics(self.eval_dataloader, samples_list, eval_n)
+
+    def run_eval_only(self) -> dict:
+        # eval-only entrypoint: one eval pass, no vllm_lock/queue (no training runs alongside).
+        assert self.eval_dataloader is not None, "--eval.eval_only needs --eval.dataset."
+        metrics = self._run_eval()
+        logger.info(f"Eval-only completed: {metrics}")
+        return metrics
 
 
 @ray.remote
@@ -929,17 +940,24 @@ class RLTrainer:
             **generate_kwargs,
         )
 
-        self.trainer_actor = TrainingActor.remote(
-            pretrain=pretrain,
-            strategy=strategy,
-            actor_model_group=actor_model_group,
-            reference_model_group=reference_model_group,
-            vllm_engines=vllm_engines,
-            vllm_lock=vllm_lock,
-            rollout_queue=self.rollout_queue,
-            rollout_slots=self.rollout_slots,
-            critic_model_group=critic_model_group,
-        )
+        # Eval-only runs pass actor_model_group=None: keep only the generator actor (vLLM + env) and
+        # never build the training side, so no policy/ref/critic FSDP model is loaded.
+        self.trainer_actor = None
+        if actor_model_group is not None:
+            self.trainer_actor = TrainingActor.remote(
+                pretrain=pretrain,
+                strategy=strategy,
+                actor_model_group=actor_model_group,
+                reference_model_group=reference_model_group,
+                vllm_engines=vllm_engines,
+                vllm_lock=vllm_lock,
+                rollout_queue=self.rollout_queue,
+                rollout_slots=self.rollout_slots,
+                critic_model_group=critic_model_group,
+            )
+
+    def run_eval_only(self) -> dict:
+        return ray.get(self.generator_actor.run_eval_only.remote())
 
     def fit(self) -> None:
         checkpoint_states = ray.get(self.trainer_actor.load_checkpoint_states_or_default.remote())
