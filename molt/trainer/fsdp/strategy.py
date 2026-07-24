@@ -399,14 +399,13 @@ class FsdpStrategy:
         if accumulate and self.accumulated_gradient > 1:
             if kwargs.get("scale_loss_by_accumulation", True):
                 loss = loss / self.accumulated_gradient
-        # Context-parallel gradient compensation. FSDP averages param grads over
-        # dp_cp = dp_size * cp_size, but the loss is token-mean-normalized over dp_size
-        # only and every CP rank computes the full-sequence loss (full_tensor() backward
-        # slices, doesn't sum, across CP). So without this the gradient is cp_size× too
-        # small. Scale only the backward loss (reported loss untouched) to match
-        # AutoModel's `(loss * dp_cp_size).backward()`. No-op when cp_size == 1.
-        if self.cp_size > 1:
-            loss = loss * self.cp_size
+        # Context-parallel gradient: molt gathers per-token logprobs with the AutoModel
+        # sharder's gather_token_tensor, whose differentiable all-gather SUMS the gradient
+        # across CP (local grad = cp_size× the single replicated-loss grad — see AutoModel's
+        # cp-sharder token-verb functional test). FSDP then mean-reduces param grads over
+        # dp_cp (÷cp_size), so the gather-sum and the FSDP-mean cancel and the main-loss
+        # gradient is already correct — NO explicit cp_size multiply. (The MoE aux loss
+        # below is per-shard WITHOUT a gather, so it still carries the cp_size factor.)
         sync_gradients = kwargs.get("sync_gradients", True)
         self._set_fsdp_backward_sync(unwrapped, sync_gradients)
         if self.moe_mesh is not None:
@@ -422,9 +421,9 @@ class FsdpStrategy:
                 # sequence shard, so summing the disjoint per-shard aux across CP
                 # ranks reconstructs the full-batch aux — but FSDP mean-reduces param
                 # grads over dp_cp, dividing by cp again. So without the cp_size factor
-                # the load-balance gradient is cp_size× too weak (the main loss carries
-                # the same * cp_size above; AutoModel sets this to dp_cp_size for the
-                # identical reason). The 1/accum averages the per-microbatch aux over
+                # the load-balance gradient is cp_size× too weak (the main loss gets its
+                # matching cp_size from the gather-sum backward above; AutoModel sets this
+                # to dp_cp_size for the identical reason). The 1/accum averages the per-microbatch aux over
                 # the optimizer-step window. Net: coef * mean(aux), cluster-invariant.
                 MoEAuxLossAutoScaler.main_loss_backward_scale = torch.tensor(
                     self.cp_size / max(1, self.accumulated_gradient),
