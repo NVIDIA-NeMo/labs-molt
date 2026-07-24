@@ -694,9 +694,12 @@ class BaseModel(nn.Module):
                 position_ids = cp_batch.pop("position_ids", None)
                 # The sharder pads `labels` with -100 (CE ignore_index), but molt reuses
                 # rolled_sequences as gather targets for log_probs_from_logits — a -100 index
-                # trips the CUDA gather bounds-check. Clamp the pad tail to a valid id; those
-                # positions are trimmed after the CP gather, so the value is immaterial.
-                rolled_sequences = cp_batch.pop("labels").clamp_min(0)
+                # trips the CUDA gather bounds-check. Clamp the pad to a valid id (trimmed
+                # after the CP gather, so its value is immaterial). Must be IN-PLACE: the CP
+                # context shards this labels tensor in-place at context entry, so an
+                # out-of-place clamp copy would stay full-length while the logits are local,
+                # and log_probs_from_logits silently misaligns (it has no length check).
+                rolled_sequences = cp_batch.pop("labels").clamp_min_(0)
                 forward_attention_mask = cp_batch.pop("attention_mask", None)
                 sequences = cp_batch.pop("input_ids")
                 # Residual = media the hook left/promoted; keep only real forward kwargs
