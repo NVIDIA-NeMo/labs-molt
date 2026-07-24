@@ -28,7 +28,7 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
-from torch.distributed.tensor import DTensor, Shard
+from torch.distributed.tensor import DTensor
 
 
 def unshard_dtensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -44,73 +44,6 @@ def unshard_dtensor(tensor: torch.Tensor) -> torch.Tensor:
     sharded one); ok for activation-side tensors at training resolution.
     """
     return tensor.full_tensor() if isinstance(tensor, DTensor) else tensor
-
-
-def pad_to_cp_multiple(tensor: torch.Tensor, cp_size: int, seq_dim: int = 1, value: int | float = 0) -> torch.Tensor:
-    """Right-pad a sequence tensor to DTensor CP's ``2 * cp_size`` requirement."""
-    if cp_size <= 1:
-        return tensor
-    multiple = 2 * cp_size
-    pad_len = (-tensor.shape[seq_dim]) % multiple
-    if pad_len == 0:
-        return tensor
-    pad_shape = list(tensor.shape)
-    pad_shape[seq_dim] = pad_len
-    pad = tensor.new_full(pad_shape, value)
-    return torch.cat([tensor, pad], dim=seq_dim)
-
-
-def cp_local_seq_index(local_len: int, cp_mesh, device) -> torch.Tensor:
-    """Global sequence positions this CP rank holds, in local (head+tail) order.
-
-    PyTorch context-parallel load balancing gives each rank a head chunk and the
-    mirrored tail chunk, concatenated. ``local_len`` is this rank's local sequence
-    length (= ``global_len / cp_size``). Gathering a full-sequence tensor's seq dim
-    with the returned index reproduces exactly what this rank's forward sees — the
-    same mapping :func:`cp_dtensor_full_sequence` inverts. Used both to restore CP
-    outputs and to shard the R3 routing-replay ids to match each rank.
-    """
-    if local_len % 2 != 0:
-        raise ValueError(f"CP local sequence length must be even, got {local_len}.")
-    cp_size = cp_mesh.size()
-    try:
-        cp_rank = cp_mesh.get_local_rank()
-    except AttributeError:
-        cp_rank = dist.get_rank(group=cp_mesh.get_group())
-    chunk = local_len // 2
-    tail_chunk = 2 * cp_size - cp_rank - 1
-    return torch.cat(
-        [
-            torch.arange(cp_rank * chunk, (cp_rank + 1) * chunk, device=device),
-            torch.arange(tail_chunk * chunk, (tail_chunk + 1) * chunk, device=device),
-        ],
-        dim=0,
-    )
-
-
-def cp_dtensor_full_sequence(tensor: torch.Tensor, cp_mesh, seq_dim: int = 1) -> torch.Tensor:
-    """Restore a CP-local load-balanced sequence shard via DTensor autograd.
-
-    PyTorch context parallel stores each rank's local sequence as head/tail
-    chunks. We wrap that local tensor as a CP-sharded DTensor, gather the
-    logical sequence, and use the gathered ``seq_index`` to recover original
-    token order. Keeping the gather in DTensor autograd matters for training:
-    every CP rank computes the same full-sequence loss while gradients are routed
-    back to the owning local shard.
-    """
-    if cp_mesh is None or cp_mesh.size() <= 1:
-        return tensor
-
-    local_len = tensor.shape[seq_dim]
-    global_len = local_len * cp_mesh.size()
-    local_seq_index = cp_local_seq_index(local_len, cp_mesh, tensor.device)
-    if local_seq_index.numel() != local_len or int(local_seq_index.max().item()) >= global_len:
-        raise RuntimeError("Invalid CP seq_index construction.")
-
-    seq_index = DTensor.from_local(local_seq_index, device_mesh=cp_mesh, placements=[Shard(0)]).full_tensor()
-    restore_index = torch.argsort(seq_index)
-    restored = DTensor.from_local(tensor, device_mesh=cp_mesh, placements=[Shard(seq_dim)]).full_tensor()
-    return restored.index_select(seq_dim, restore_index)
 
 
 def is_automodel_custom_model(model: Any) -> bool:

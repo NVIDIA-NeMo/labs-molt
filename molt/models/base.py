@@ -27,11 +27,8 @@ import torch
 import torch.nn as nn
 
 from molt.trainer.fsdp.packing import (
-    cp_dtensor_full_sequence,
-    cp_local_seq_index,
     is_automodel_custom_model,
     pack_padded_batch,
-    pad_to_cp_multiple,
     unpack_to_padded,
 )
 
@@ -271,8 +268,8 @@ class BaseModel(nn.Module):
         self.packing_samples = packing_samples
         self.device_mesh = device_mesh
         mesh_dims = getattr(device_mesh, "mesh_dim_names", ()) or ()
-        self.cp_mesh = device_mesh["cp"] if device_mesh is not None and "cp" in mesh_dims else None
-        self.cp_size = self.cp_mesh.size() if self.cp_mesh is not None else 1
+        cp_mesh = device_mesh["cp"] if device_mesh is not None and "cp" in mesh_dims else None
+        self.cp_size = cp_mesh.size() if cp_mesh is not None else 1
 
         if not isinstance(pretrain_or_model, str):
             self.model = pretrain_or_model
@@ -479,18 +476,15 @@ class BaseModel(nn.Module):
         # VLM: optionally freeze the vision encoder so only the language backbone
         # trains (language params live under "language_model.*" / "lm_head.*").
         #
-        # CP>1 forces freezing: PyTorch CP attention runs `resize_` on the sharded
-        # inputs_embeds and rejects requires_grad=True. The pre-embed already runs
-        # under no_grad, so no gradient reaches the vision tower anyway; freezing
-        # just keeps optimizer state from holding never-updated vision params.
+        # CP>1 forces freezing the vision tower: the established VLM+CP recipe trains
+        # only the language stack (the model now embeds + shards the sequence inside
+        # its own forward), and freezing keeps optimizer state off never-updated vision
+        # params. Matches the pre-migration behavior, so CP metrics stay comparable.
         effective_freeze_visual = freeze_visual_encoder
         if self.is_vlm and self.cp_size > 1 and not freeze_visual_encoder:
             effective_freeze_visual = True
             if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-                print(
-                    "[VLM] cp_size>1 forces freeze_visual_encoder=True "
-                    "(PyTorch CP requires inputs_embeds.requires_grad=False)."
-                )
+                print("[VLM] cp_size>1 forces freeze_visual_encoder=True (CP trains the language stack only).")
         if self.is_vlm and effective_freeze_visual:
             for name, param in self.model.named_parameters():
                 if "language_model" not in name and "lm_head" not in name:
@@ -539,7 +533,11 @@ class BaseModel(nn.Module):
         padded ``[B, seqlen]``). No-op when neither CP nor packing is active.
         """
         if cp_forward:
-            t = cp_dtensor_full_sequence(t, self.cp_mesh, seq_dim=1)[:, :seqlen]
+            # Differentiable all-gather of this rank's CP shard, reordered to global
+            # sequence order and trimmed back to the caller's original length. Same
+            # head-tail load-balance layout molt used to invert by hand, now owned by
+            # the AutoModel sharder (grads route back to each owning shard).
+            t = self._cp_sharder.gather_token_tensor(t, seq_dim=1, trim=True)
         if self.packing_samples:
             t = unpack_to_padded(t, indices, batch, seqlen)
         return t
@@ -560,12 +558,10 @@ class BaseModel(nn.Module):
         global_ids = self._moe_layer_global_ids
         routing = routed_experts  # (B, vllm_layers, topk, S), seq last
         if cp_forward:
-            # Take this rank's CP shard: pad the seq dim as the forward did, with the -1
-            # sentinel (so CP pad tokens aren't force-routed to expert 0), then gather this
-            # rank's chunks. Local length = padded / cp_size, from `routing` (pre-shard).
-            routing = pad_to_cp_multiple(routing, self.cp_size, seq_dim=3, value=-1)
-            local_positions = cp_local_seq_index(routing.shape[3] // self.cp_size, self.cp_mesh, routing.device)
-            routing = routing.index_select(3, local_positions)
+            # Shard the rollout routing ids to this rank's forward token order via the
+            # AutoModel sharder (same head-tail layout the logits take). The -1 fill keeps
+            # CP pad tokens out of expert 0 so RouterReplay leaves them at the live choice.
+            routing = self._cp_sharder.shard_token_tensor(routing, seq_dim=3, fill=-1)
         b, n_layers, topk, s = routing.shape
         if n_layers <= max(global_ids):
             raise ValueError(
@@ -604,7 +600,7 @@ class BaseModel(nn.Module):
         indices = None
         cp_forward = False
         cp_ctx_factory = nullcontext
-        inputs_embeds = None
+        self._cp_sharder = None  # set below under CP; read by _restore_full_sequence / _build_routing_targets
         if self.packing_samples:
             sequences, position_ids, rolled_sequences, indices, attn_kwargs = pack_padded_batch(
                 sequences, attention_mask, style=self._packing_style
@@ -651,22 +647,17 @@ class BaseModel(nn.Module):
                     position_ids.masked_fill_(attention_mask == 0, 1)
 
             if self.cp_size > 1 and attention_mask is not None:
-                from nemo_automodel.components.distributed.cp_utils import make_cp_batch_and_ctx
+                from nemo_automodel.components.distributed.context_parallel import ContextParallelSharder
+                from nemo_automodel.components.utils.model_utils import filter_forward_kwargs
 
-                # VLM + CP: the vision tower must run before CP shards the sequence,
-                # which AutoModel supports only via its pre-embed hook
-                # (`prepare_model_inputs_for_cp` — NVIDIA-NeMo/Automodel#2125). Models
-                # without the hook run at cp=1 (use TP/EP for memory). Pre-embed here via
-                # `_pre_embed_only` under no_grad (PyTorch CP resize_s the sharded buffer).
-                #
-                # Pre-embed UNCONDITIONALLY (do not gate on `mm_inputs`): it fires an FSDP
-                # all-gather over the dp_cp group, so gating on per-rank images would let
-                # image-free ranks skip it -> divergent collective -> NCCL deadlock. A
-                # text-only microbatch just embeds its tokens, keeping ranks in lockstep.
+                # VLM + CP is model-owned: the model's `prepare_model_inputs_for_cp` hook
+                # embeds + scatters vision and round-robin-shards the primary inside its own
+                # forward; the sharder shards only the aux streams (labels/position_ids).
+                # A VLM without the hook can't shard a vision sequence -> fail fast.
                 if getattr(self, "is_vlm", False):
                     if not hasattr(self.model, "prepare_model_inputs_for_cp"):
                         raise RuntimeError(
-                            "VLM + CP requires the model's AutoModel pre-embed hook "
+                            "VLM + CP requires the model's AutoModel CP hook "
                             "(prepare_model_inputs_for_cp); this model lacks it — run with "
                             "cp_size=1 (use TP/EP for memory)."
                         )
@@ -678,43 +669,36 @@ class BaseModel(nn.Module):
                         n_img = int((sequences == self._image_token_id).sum().item())
                         if n_img:
                             raise RuntimeError(
-                                f"VLM+CP pre-embed: {n_img} image placeholder token(s) present but no "
+                                f"VLM+CP: {n_img} image placeholder token(s) present but no "
                                 "multimodal inputs — the rollout dropped the image. Structured-content "
                                 "VLMs render <image> to a model placeholder, so agents that interleave "
                                 "images at a literal <image> marker attach nothing. Fix the chat agent "
                                 "(attach images marker-independently) or use the step runner (geo3k.py)."
                             )
-                    with torch.no_grad():
-                        inputs_embeds = self.model(input_ids=sequences, **mm_inputs, _pre_embed_only=True)[
-                            "inputs_embeds"
-                        ]
-                    mm_inputs = {}
 
-                # Pad to CP's 2*cp_size divisor before make_cp_batch_and_ctx injects
-                # position_ids, so the arange stays dense and shifted-token gather
-                # targets stay valid in the pad tail.
-                sequences = pad_to_cp_multiple(sequences, self.cp_size, seq_dim=1, value=0)
-                attention_mask = pad_to_cp_multiple(attention_mask, self.cp_size, seq_dim=1, value=0)
-                rolled_sequences = pad_to_cp_multiple(rolled_sequences, self.cp_size, seq_dim=1, value=0)
-                if inputs_embeds is not None:
-                    inputs_embeds = pad_to_cp_multiple(inputs_embeds, self.cp_size, seq_dim=1, value=0)
-
-                primary_key, primary_tensor = (
-                    ("inputs_embeds", inputs_embeds) if inputs_embeds is not None else ("input_ids", sequences)
-                )
+                # Hand the full-length batch to the sharder: the model embeds/scatters/shards
+                # the primary in forward (aux-only models) or the sharder shards input_ids too
+                # (generic text models); `labels` carries the shifted next-token targets on the
+                # same round-robin shard as the logits. No manual pre-embed / pad — the sharder
+                # pads to 2*cp and injects position_ids (mRoPE for qwen3.6, 1-D for omni3).
                 cp_batch = {
-                    primary_key: primary_tensor,
+                    "input_ids": sequences,
                     "attention_mask": attention_mask,
                     "labels": rolled_sequences,
+                    **mm_inputs,
                 }
-                cp_ctx_factory, cp_batch = make_cp_batch_and_ctx(self.device_mesh, cp_batch)
-                position_ids = cp_batch.get("position_ids")
-                rolled_sequences = cp_batch["labels"]
-                forward_attention_mask = cp_batch.get("attention_mask")
-                if inputs_embeds is not None:
-                    inputs_embeds = cp_batch["inputs_embeds"]
-                else:
-                    sequences = cp_batch["input_ids"]
+                self._cp_sharder = ContextParallelSharder(
+                    self.model, self.device_mesh, cp_batch, invoke_pre_embed=True
+                )
+                cp_ctx_factory, cp_batch = self._cp_sharder.shard(cp_batch)
+                position_ids = cp_batch.pop("position_ids", None)
+                rolled_sequences = cp_batch.pop("labels")
+                forward_attention_mask = cp_batch.pop("attention_mask", None)
+                sequences = cp_batch.pop("input_ids")
+                # Residual = media the hook left/promoted; keep only real forward kwargs
+                # (the hook may add metadata like a nulled mm_token_type_ids), matching
+                # AutoModel's own recipe (filter_forward_kwargs before model(**batch)).
+                mm_inputs = filter_forward_kwargs(self.model, cp_batch)
                 cp_forward = True
 
         # No forward-level torch.autocast: FSDP2's MixedPrecisionPolicy already
@@ -747,20 +731,17 @@ class BaseModel(nn.Module):
         with forward_ctx:
             # Always pass sequences as keyword `input_ids`: some VLM forwards
             # declare `pixel_values` first positional, so a bare positional would
-            # collide with it. In the pre-embed CP path we pass inputs_embeds
-            # directly (the model auto-detects it and skips multimodal scatter).
+            # collide with it. Under CP the model embeds/scatters/shards input_ids
+            # in its own forward (no caller-side pre-embed).
             forward_kwargs = dict(
                 attention_mask=forward_attention_mask,
                 position_ids=position_ids,
+                input_ids=sequences,
                 **attn_kwargs,
                 **mm_inputs,
             )
             if output_hidden_states:
                 forward_kwargs["output_hidden_states"] = True
-            if cp_forward and inputs_embeds is not None:
-                forward_kwargs["inputs_embeds"] = inputs_embeds
-            else:
-                forward_kwargs["input_ids"] = sequences
             with replay_ctx:
                 output = self.model(**forward_kwargs)
         # AutoModel's custom MoE/LLM models (e.g. Qwen3MoeForCausalLM) return a
