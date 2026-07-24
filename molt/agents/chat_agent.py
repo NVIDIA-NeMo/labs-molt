@@ -145,6 +145,34 @@ def _pil_data_uri(pil) -> str:
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
+def _extract_text_from_content(content) -> str:
+    """Flatten a message's content to a plain-text string without loading images."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return "" if content is None else str(content)
+    parts = []
+    for item in content:
+        if isinstance(item, dict) and item.get("type") == "text":
+            parts.append(item.get("text") or "")
+    return "".join(parts)
+
+
+def _extract_prompt_text(prompt) -> str:
+    """Return a scalar text view of the last user turn in a prompt row."""
+    raw = prompt if isinstance(prompt, list) else [{"role": "user", "content": str(prompt)}]
+    user_texts = [
+        m["content"] for m in raw if m.get("role") == "user" and isinstance(m.get("content"), str)
+    ]
+    if user_texts:
+        return user_texts[-1]
+
+    last_user = next((m for m in reversed(raw) if m.get("role") == "user"), None)
+    if last_user is None:
+        return ""
+    return _extract_text_from_content(last_user.get("content"))
+
+
 def _wire_messages(prompt, images) -> list:
     """Dataset row -> OpenAI wire-format messages, ready to send verbatim.
 
@@ -231,9 +259,7 @@ class ChatAgentRunner(Runner):
         messages = _wire_messages(prompt, images)
         # Scalar view of the task for grading/logging (and Trajectory.prompt): the last user
         # turn's text — taken from the RAW row (wire messages may have inlined its images).
-        raw = prompt if isinstance(prompt, list) else [{"role": "user", "content": str(prompt)}]
-        user_texts = [m["content"] for m in raw if m.get("role") == "user" and isinstance(m.get("content"), str)]
-        prompt_text = user_texts[-1] if user_texts else prompt
+        prompt_text = _extract_prompt_text(prompt)
         # Pass THIS call's sampling_params so the server defaults each turn to the right train-vs-eval
         # temperature/max_tokens even if the agent doesn't re-send them (see _Session.sampling_params).
         self._state.open(session_id, prompt_text, label, images, sampling_params)
