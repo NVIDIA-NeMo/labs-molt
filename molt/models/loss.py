@@ -228,6 +228,18 @@ def cispo_policy_loss(ratio, advantages, log_probs, action_mask, *, clip_eps_hig
     return loss, clip_ratio
 
 
+@register_policy_loss("sao")
+def sao_policy_loss(ratio, advantages, log_probs, action_mask, *, clip_eps_low, clip_eps_high, **_):
+    """SAO double-sided token masking (arXiv:2607.07508 Eq. 1/3): f(r)=r inside the trust
+    region (1-eps_low, 1+eps_high), 0 outside — out-of-band tokens get zero gradient
+    (masked, not clamped); survivors REINFORCE through log-probs like CISPO."""
+    in_band = (ratio > 1 - clip_eps_low) & (ratio < 1 + clip_eps_high)
+    masked_ratio = torch.where(in_band, ratio, torch.zeros_like(ratio)).detach()
+    loss = -masked_ratio * advantages * log_probs
+    clip_ratio = masked_mean((~in_band).float(), action_mask, dim=None)
+    return loss, clip_ratio
+
+
 class PolicyLoss(nn.Module):
     """
     Clipped policy-gradient loss for non-critic RL.
@@ -282,6 +294,9 @@ class PolicyLoss(nn.Module):
             # doesn't compute; reject rather than silently ignore it.
             if dual_clip is not None:
                 raise ValueError("dual_clip is a PPO-only extra bound; it has no effect under loss_mode='cispo'")
+        if self.loss_mode == "sao" and dual_clip is not None:
+            # SAO masks the ratio (no min surrogate), so the dual-clip lower bound is inert.
+            raise ValueError("dual_clip is a PPO-only extra bound; it has no effect under loss_mode='sao'")
 
         if self.is_correction_level not in {"off", "token", "seq", "geo"}:
             raise ValueError(f"is_correction_level must be off/token/seq/geo, got {self.is_correction_level}")

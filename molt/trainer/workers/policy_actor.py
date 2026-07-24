@@ -90,7 +90,7 @@ class PolicyTrainer:
             clip_eps_low=self.args.actor.eps_clip_low_high[0],
             clip_eps_high=self.args.actor.eps_clip_low_high[1],
             dual_clip=self.args.actor.dual_clip,
-            loss_mode=self.args.actor.loss_mode,
+            loss_mode="sao" if self.args.algo.sao else self.args.actor.loss_mode,
             is_correction_level=self.args.algo.advantage.is_correction_level,
             is_correction_mode=self.args.algo.advantage.is_correction_mode,
             is_correction_threshold=(
@@ -414,12 +414,20 @@ class PolicyTrainer:
                         f.write(f"{j}\t{t}\t{v:.6f}\t{a:.6f}\t{m}\n")
                 logger.info(f"MOLT_DUMP_ROLLOUT_LOGPROBS: wrote token-level logprob dump to {dump_path}")
 
+        # SAO: ratio denominator is pi_rollout (vLLM), collapsing pi_old into it.
+        if self.args.algo.sao:
+            if rollout_log_probs is None:
+                raise ValueError("--algo.sao needs rollout_log_probs (pi_rollout); none were captured")
+            denom_log_probs = rollout_log_probs
+        else:
+            denom_log_probs = old_action_log_probs
+
         # Stage 3: compute policy loss and metric-only policy diagnostics.
         # reported_actor_loss is a plain per-token mean for logging, decoupled
         # from the global token-mean used for the gradient (actor_loss).
         actor_loss, reported_actor_loss, clip_ratio, policy_kl, vllm_kl, is_filter_ratio = self.actor_loss_fn(
             action_log_probs,
-            old_action_log_probs,
+            denom_log_probs,
             advantages,
             action_mask=action_mask,
             rollout_log_probs=rollout_log_probs,

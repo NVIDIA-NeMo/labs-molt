@@ -83,11 +83,15 @@ class RemoteExperienceMaker:
         if self.initial_model_group is not None:
             self._dispatch_forward(experiences, self.initial_model_group, "base_action_log_probs")
 
-        # Old actor log-probs. Force-on-policy with no KL reward (kl_coef==0): old == the training
-        # forward, so the PPO ratio is 1 (REINFORCE) and policy_train recomputes old itself — skip
-        # the redundant pass. Otherwise (off-policy, or a KL/distill reward that compares old vs the
-        # ref) run the actor forward here.
-        skip_actor_old = args.train.force_on_policy and args.algo.kl.init_coef == 0
+        colocated_policy_workers = getattr(args.train, "colocate_fsdp_models", False) and (
+            self.initial_model_group is not None or self.critic_model_group is not None
+        )
+        # On-policy with no KL (kl_coef == 0): old == the training forward, so the PPO
+        # ratio is 1 and the loss is REINFORCE — the old-logprob recompute is redundant.
+        # Skip it; policy_train sets old = action.detach(), sharing the exact R3 routing.
+        # (A KL/distill reward, kl_coef > 0, still needs old to compare against the ref.)
+        # SAO ratios divide by pi_rollout, so pi_old is never read — skip it too.
+        skip_actor_old = (args.train.force_on_policy or args.algo.sao) and args.algo.kl.init_coef == 0
         if not skip_actor_old:
             self._dispatch_forward(experiences, self.actor_model_group, "action_log_probs")
 
@@ -232,6 +236,7 @@ class RemoteExperienceMaker:
             lam=args.algo.advantage.lam,
             values=[exp.values for exp in experiences] if needs_values else None,
             no_whiten=args.algo.advantage.no_whiten,
+            lam_alpha=args.algo.advantage.lam_alpha,
         )
         advantages, returns = get_advantage_estimator(self.advantage_estimator)(rewards, rollouts["groups"], ctx)
 

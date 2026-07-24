@@ -366,6 +366,13 @@ if __name__ == "__main__":
         "(also inherited when the actor's flag is set).",
     )
     parser.add_argument(
+        "--critic.freeze_attention",
+        action="store_true",
+        default=False,
+        help="Freeze the critic's self-attention weights, training only the MoE/FFN projections "
+        "(the value model's attention layers drive its grad-norm instability).",
+    )
+    parser.add_argument(
         "--critic.max_epochs",
         type=int,
         default=None,
@@ -437,7 +444,15 @@ if __name__ == "__main__":
         "--algo.advantage.lam",
         type=float,
         default=1.0,
-        help="GAE lambda (PPO only). 1.0 = Monte-Carlo return minus the value baseline.",
+        help="GAE lambda (PPO only). 1.0 = Monte-Carlo return minus the value baseline. With "
+        "--algo.advantage.lam_alpha set, this is lambda_critic (the value-target lambda) only.",
+    )
+    parser.add_argument(
+        "--algo.advantage.lam_alpha",
+        type=float,
+        default=None,
+        help="Length-adaptive GAE for the advantages: lambda_policy = 1 - 1/(alpha*l) per sequence "
+        "(l = action-token count). Unset uses the fixed --algo.advantage.lam. Defaulted to 1.5 by --algo.sao.",
     )
     parser.add_argument(
         "--algo.advantage.no_whiten",
@@ -472,6 +487,15 @@ if __name__ == "__main__":
         nargs=2,
         default=[0.5, 5.0],
         help="Low and high bounds [low, high] for the off-policy IS ratio pi_train/pi_rollout.",
+    )
+    parser.add_argument(
+        "--algo.sao",
+        action="store_true",
+        default=False,
+        help="Enable SAO (Single-rollout Asynchronous Optimization, arXiv:2607.07508). Umbrella flag: "
+        "builds the policy ratio directly against rollout_log_probs (pi_rollout) with double-sided "
+        "token masking, runs single-rollout groups with a critic baseline, and skip-observation GAE. "
+        "Related hyperparameters (clip_eps_low/high, critic K, length-adaptive alpha) stay their own knobs.",
     )
     parser.add_argument(
         "--algo.kl.use_loss", action="store_true", default=False, help="whether to use KL loss from GRPO"
@@ -1041,6 +1065,49 @@ if __name__ == "__main__":
         if args.rollout.max_tokens_per_gpu is None:
             print("[Warning] Set --rollout.max_tokens_per_gpu to --train.max_tokens_per_gpu.")
             args.rollout.max_tokens_per_gpu = args.train.max_tokens_per_gpu
+
+    if args.algo.sao and args.algo.advantage.is_correction_level != "off":
+        raise ValueError(
+            "--algo.sao already divides the ratio by pi_rollout, so the off-policy IS correction "
+            "(--algo.advantage.is_correction_level) corrects a mismatch that no longer exists. "
+            "Set is_correction_level=off."
+        )
+
+    if args.algo.sao and args.actor.loss_mode != "ppo":
+        raise ValueError(
+            f"--algo.sao sets the policy surrogate to sao; drop --actor.loss_mode "
+            f"{args.actor.loss_mode} (leave it at the ppo default)."
+        )
+
+    if args.algo.sao:
+        # Single rollout per prompt (group_size=1); baseline comes from the critic only.
+        if args.rollout.n_samples_per_prompt != 1:
+            raise ValueError(
+                f"--algo.sao is single-rollout (group_size=1); set --rollout.n_samples_per_prompt 1, "
+                f"got {args.rollout.n_samples_per_prompt}."
+            )
+        if args.algo.advantage.estimator != "gae":
+            raise ValueError(
+                f"--algo.sao needs the critic as the sole baseline; set --algo.advantage.estimator gae, "
+                f"got {args.algo.advantage.estimator}."
+            )
+        if args.critic.max_epochs is None:
+            # TTUR: K=2 value passes per policy pass keeps the critic ahead of the
+            # high-variance single-rollout advantages. Explicit overrides are respected.
+            args.critic.max_epochs = 2
+            print("[Info] --algo.sao defaulted --critic.max_epochs to 2 (K value updates per policy update).")
+        if not args.critic.freeze_attention:
+            print("[Warning] --algo.sao without --critic.freeze_attention deviates from the paper.")
+        if args.algo.advantage.lam_alpha is None:
+            args.algo.advantage.lam_alpha = 1.5
+            print("[Info] --algo.sao defaulted --algo.advantage.lam_alpha to 1.5 (length-adaptive lambda_policy).")
+        if args.actor.freezing_steps == 0:
+            print("[Warning] --algo.sao: the paper uses 10 critic-warmup steps, but --actor.freezing_steps is 0.")
+        if not args.algo.advantage.no_whiten:
+            raise ValueError(
+                "--algo.sao runs single-rollout async; batch advantage whitening couples unrelated "
+                "samples on a noisy moving mean/std. Set --algo.advantage.no_whiten."
+            )
 
     if args.train.force_on_policy and args.train.max_epochs != 1:
         raise ValueError(
