@@ -617,12 +617,10 @@ class BaseModel(nn.Module):
             )
             forward_attention_mask = None
         else:
-            # Every CP layout shards a full [B, S] row, so S must divide by cp_size (the
-            # round-robin sharder pads internally, GLM's THD verb asserts instead). Pad here,
-            # before anything derives from the batch — labels, VLM token-type ids, positions
-            # and the R3 ids all have to describe the same rows — and the restore trims the
-            # tail back off. The pad id is the one the sharder masks by: a THD backend turns
-            # it into the padding_mask that decides what the MoE dispatch skips.
+            # CP shards a full [B, S] row, so S must divide by cp_size. Pad before anything
+            # derives from the batch — labels, VLM token-type ids, positions and the R3 ids
+            # must describe the same rows — with the pad id the sharder masks by; the restore
+            # trims the tail back off.
             if self.cp_size > 1 and attention_mask is not None:
                 pad = -seqlen % self.cp_size
                 if pad:
@@ -701,12 +699,10 @@ class BaseModel(nn.Module):
                                 "(attach images marker-independently) or use the step runner (geo3k.py)."
                             )
 
-                # Padded [B,S] batch to the sharder — one layout for all CP models.
-                # round_robin (omni3/qwen3.6): sharder shards the aux streams, pads to
-                # 2*cp, injects position_ids; the model embeds/scatters/shards the primary.
-                # THD DSA (GLM, packing_samples): sharder flattens [B,S] to [B*S] and
-                # contiguous-shards from seq_lens (per-row real length) — the recipe's
-                # fixed-length+padding CP (packed sequences aren't CP-compatible).
+                # One padded [B,S] batch for every CP model. round_robin (omni3/qwen3.6):
+                # the sharder takes the aux streams and the model shards its own primary.
+                # THD DSA (GLM): the sharder flattens [B,S] to [B*S] and contiguous-shards
+                # from seq_lens, matching the recipe's fixed-length+padding CP.
                 if self.packing_samples:
                     seq_lens = attention_mask.sum(-1, keepdim=True).to(torch.int32)
                     cp_batch = {
@@ -741,13 +737,10 @@ class BaseModel(nn.Module):
             )
             cp_ctx_factory, cp_batch = self._cp_sharder.shard(cp_batch)
             position_ids = cp_batch.pop("position_ids", None)
-            # The sharder pads `labels` with -100 (CE ignore_index), but molt reuses
-            # rolled_sequences as gather targets for log_probs_from_logits — a -100 index
-            # trips the CUDA gather bounds-check. Clamp the pad to a valid id (trimmed
-            # after the CP gather, so its value is immaterial). Must be IN-PLACE: the CP
-            # context shards this labels tensor in-place at context entry, so an
-            # out-of-place clamp copy would stay full-length while the logits are local,
-            # and log_probs_from_logits silently misaligns (it has no length check).
+            # The sharder pads `labels` with -100, which trips the CUDA gather bounds-check
+            # when molt reuses them as log_probs_from_logits targets; clamp to a valid id
+            # (trimmed after the gather anyway). IN-PLACE: the CP context shards this tensor
+            # at context entry, so a copy would stay full-length and silently misalign.
             rolled_sequences = cp_batch.pop("labels").clamp_min_(0)
             forward_attention_mask = cp_batch.pop("attention_mask", None)
             sequences = cp_batch.pop("input_ids")

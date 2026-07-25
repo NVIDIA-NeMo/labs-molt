@@ -194,21 +194,12 @@ RUN if [ "$INSTALL_TEST_DEPS" = "1" ]; then python -m pip install coverage pytes
     python -c "import importlib.util as u; assert u.find_spec('fla.ops.cp') and u.find_spec('fla.modules.convolution') and u.find_spec('fla.ops.gated_delta_rule'), 'fla CP ops missing'" && \
     rm -f /tmp/requirements.txt /tmp/req.filtered.txt
 
-# --- DSA sparse-attention kernels + image invariants ---------------------------
-# AutoModel's `cuda` extra (pyproject) is what enables backend.attn="tilelang"; molt builds
-# TE / mamba / causal-conv1d from source above, so install only the DSA part of it here.
-# The version matters: tilelang 0.1.9 still compiles the sparse-MLA kernels but its backward
-# returns NaN as soon as an index block mixes real keys with the -1 sentinel — which causal
-# top-k always produces, so DSA gradients are poisoned while the forward looks healthy.
-# apache-tvm-ffi is capped per upstream (0.1.12 is incompatible with tilelang's bundled TVM,
-# and is why AutoModel's own image keeps INSTALL_FA4=false). tile-kernels supplies the MHC
-# sinkhorn. vLLM and mamba-ssm pin older tilelang for their own kernels; the DSA training
-# path is the stricter consumer, so this pin wins image-wide.
-# finalize_pip.sh owns the post-install invariants (nvshmem ABI, z3 on the loader path) so
-# that an incremental rebuild re-applies them too — see its header.
+# --- DSA sparse-attention kernels (the tilelang part of AutoModel's `cuda` extra) ---
+# The pin is load-bearing: tilelang 0.1.9 compiles the sparse-MLA kernels but its backward
+# returns NaN once an index block mixes real keys with the -1 sentinel, which causal top-k
+# always produces. finalize_pip.sh re-applies the image invariants after any pip install.
 COPY dockerfile/finalize_pip.sh /opt/finalize_pip.sh
-RUN chmod a+x /opt/finalize_pip.sh && \
-    /opt/finalize_pip.sh "tilelang==0.1.11" "tile-kernels==1.0.0" "apache-tvm-ffi<=0.1.11"
+RUN /opt/finalize_pip.sh "tilelang==0.1.11" "tile-kernels==1.0.0" "apache-tvm-ffi<=0.1.11"
 
 # Register torch's bundled nvidia libs on the loader path (vLLM pulls nvidia-* wheels).
 RUN find ${SITE}/nvidia -mindepth 2 -maxdepth 2 -type d -name lib | sort \
