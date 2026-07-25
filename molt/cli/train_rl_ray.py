@@ -1006,13 +1006,6 @@ if __name__ == "__main__":
                 "pin already includes it)."
             ) from exc
 
-    if args.train.routing_replay and args.fsdp.cp_size > 1 and args.fsdp.packing_samples:
-        raise ValueError(
-            "--train.routing_replay is not yet supported with cp_size > 1 + packing (THD DSA CP): the "
-            "rollout routing ids can't be sharded to the packed THD token order. Run cp_size=1 for "
-            "routing replay, or drop --train.routing_replay for THD CP."
-        )
-
     if args.fsdp.packing_samples:
         assert args.vllm.num_engines > 0, "Only support `--fsdp.packing_samples` with vLLM."
         # tilelang joins te/fa2: DSA (glm_moe_dsa) is THD-native and *requires* packing.

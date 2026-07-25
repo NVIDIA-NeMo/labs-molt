@@ -559,21 +559,25 @@ class BaseModel(nn.Module):
         n_gates = self._num_routing_gates
         global_ids = self._moe_layer_global_ids
         routing = routed_experts  # (B, vllm_layers, topk, S), seq last
-        if cp_forward:
-            # Shard the rollout routing ids to this rank's forward token order via the
-            # AutoModel sharder (same head-tail layout the logits take). The -1 fill keeps
-            # CP pad tokens out of expert 0 so RouterReplay leaves them at the live choice.
-            routing = self._cp_sharder.shard_token_tensor(routing, seq_dim=3, fill=-1)
-        b, n_layers, topk, s = routing.shape
-        if n_layers <= max(global_ids):
+        # The -1 fill keeps CP pad tokens out of expert 0, so RouterReplay leaves them at
+        # the live selection.
+        if cp_forward and self.packing_samples:
+            # THD layouts shard the flattened [B*S] stream and take the token axes leading,
+            # so hand the verb a token-major view; the shard returns one row per local token.
+            per_token = self._cp_sharder.shard_token_tensor(routing.permute(0, 3, 1, 2), fill=-1).long()
+        else:
+            if cp_forward:
+                routing = self._cp_sharder.shard_token_tensor(routing, seq_dim=3, fill=-1)
+            b, n_layers, topk, s = routing.shape
+            # (B, layers, topk, S) seq-last -> (B*S, layers, topk) token-major, one row per token
+            per_token = routing.permute(0, 3, 1, 2).reshape(b * s, n_layers, topk).long()
+            if self.packing_samples:
+                per_token = per_token.index_select(0, indices)  # drop pad tokens for the packed order
+        if per_token.shape[1] <= max(global_ids):
             raise ValueError(
-                f"rollout routing has {n_layers} layers but a MoE gate maps to global "
+                f"rollout routing has {per_token.shape[1]} layers but a MoE gate maps to global "
                 f"layer {max(global_ids)} (have {n_gates} gates at ids {global_ids})."
             )
-        # (B, layers, topk, S) seq-last -> (B*S, layers, topk) token-major, one row per token
-        per_token = routing.permute(0, 3, 1, 2).reshape(b * s, n_layers, topk).long()
-        if self.packing_samples:
-            per_token = per_token.index_select(0, indices)  # drop pad tokens to match the packed order
         return [per_token[:, gid, :].contiguous() for gid in global_ids]
 
     def _forward_backbone(

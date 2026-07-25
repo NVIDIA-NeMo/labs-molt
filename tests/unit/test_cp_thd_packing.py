@@ -173,17 +173,29 @@ def _cp_gather_worker(rank, world, port):
         assert torch.equal(gathered.detach(), input_ids.to(torch.float32))  # reconstructs [B,S]
         gathered.sum().backward()
         assert torch.allclose(proxy.grad, torch.full_like(proxy.grad, float(world)))  # all-gather sums ×cp
+
+        # R3: the rollout routing ids arrive as (B, layers, topk, S) seq-last, and a THD
+        # layout shards the flattened [B*S] stream, so molt hands the verb the token-major
+        # view. Each row must carry the global token id this rank actually forwards.
+        layers, topk = 2, 3
+        token_ids = torch.arange(B * S).view(B, S)
+        routing = token_ids.view(B, 1, 1, S).expand(B, layers, topk, S).contiguous()
+        local_routing = sharder.shard_token_tensor(routing.permute(0, 3, 1, 2), fill=-1)
+        assert local_routing.shape == (B * S // world, layers, topk)
+        expected = token_ids.reshape(-1).chunk(world)[rank]
+        assert torch.equal(local_routing[:, 0, 0], expected)
     finally:
         dist.barrier()
         dist.destroy_process_group()
 
 
-def test_cp_gather_roundtrip_across_ranks_glm():
+def test_cp_gather_and_r3_shard_across_ranks_glm():
     # The cross-rank half the stub tests can't reach: drive molt's real
     # ContextParallelSharder + gather_token_tensor over a live CP group with the real
     # GLM DSA sharder. Asserts the gather reconstructs molt's [B,S] input coordinate
     # and the differentiable all-gather sums grads ×cp_size (the factor that cancels
-    # FSDP's mean over dp_cp). cp2 for CI speed; cp4/cp8 verified out of band.
+    # FSDP's mean over dp_cp), plus the R3 routing shard landing in the same token order.
+    # cp2 for CI speed; cp4/cp8 verified out of band.
     pytest.importorskip("nemo_automodel.components.models.glm_moe_dsa.model")
     import torch.multiprocessing as mp
 
