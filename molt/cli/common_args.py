@@ -55,6 +55,15 @@ def add_fsdp_args(parser) -> None:
         "--fsdp.param_dtype", type=str, default="bf16", choices=["bf16", "fp16"], help="Model data type"
     )
     parser.add_argument(
+        "--fsdp.bf16_master_weights",
+        action="store_true",
+        default=False,
+        help="Store parameters in param_dtype instead of fp32 master weights. Needed by models whose "
+        "FSDP wrapper keys its per-unit compute dtype off the stored dtype (DeepSeek-V4 / GLM DSA: "
+        "fp32 storage makes their sparse-attention kernels receive fp32 and fail). Costs AdamW "
+        "precision at small LR, so keep it off elsewhere.",
+    )
+    parser.add_argument(
         "--fsdp.attn_implementation",
         type=str,
         default="flash_attention_2",

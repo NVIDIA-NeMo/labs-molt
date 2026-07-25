@@ -136,10 +136,10 @@ class ReferenceModelActor(BaseModelActor):
             activation_checkpointing=False,
             packing_samples=strategy.args.fsdp.packing_samples,
             temperature=strategy.args.rollout.temperature,
-            # Keep reference numerics on the same AutoModel path as the
-            # trainable actor. Custom AutoModel Llama is not fp32/bf16 forward
-            # equivalent under autocast, so bf16 ref makes step-0 KL non-zero.
-            use_fp32_master_weights=True,
+            # Track the actor's storage dtype: custom AutoModel Llama is not
+            # fp32/bf16 forward equivalent under autocast, so a ref that differs
+            # from the actor makes step-0 KL non-zero.
+            use_fp32_master_weights=not strategy.args.fsdp.bf16_master_weights,
         )
         strategy.print(model)
 
