@@ -226,17 +226,29 @@ def _bare_strategy(cp_size, accumulated_gradient=1):
     return strat
 
 
-def test_backward_applies_cp_size_grad_compensation():
-    # FSDP averages grads over dp_cp = dp_size * cp_size, while the loss is
-    # normalized for dp_size only. backward() must multiply the backward loss by
-    # cp_size so the post-FSDP gradient is correct; the gather's autograd slices
-    # (does not sum) grads across CP. Plain nn.Module => no FSDP grad sync, so we
-    # observe the raw cp_size factor on a leaf param's grad.
+def test_backward_does_not_scale_main_loss_by_cp_size():
+    # The CP gradient factor comes from the sharder's gather_token_tensor, whose
+    # differentiable all-gather SUMS grads across CP (local grad = cp_size× the
+    # replicated-loss grad); that cancels FSDP's mean over dp_cp. So backward()
+    # must NOT itself multiply the main loss by cp_size — a plain leaf param's
+    # grad is cp_size-invariant. (The ungathered MoE aux loss keeps its cp factor
+    # via main_loss_backward_scale, exercised only when moe_mesh is set.)
     model = torch.nn.Linear(1, 1)
 
-    for cp_size, expected in ((1, 3.0), (2, 6.0), (4, 12.0)):
+    for cp_size in (1, 2, 4):
         strat = _bare_strategy(cp_size)
         w = torch.tensor([1.0], requires_grad=True)
         loss = (w * 3.0).sum()
         strat.backward(loss, model, optimizer=None)
-        assert w.grad.item() == expected, f"cp_size={cp_size}: {w.grad.item()} != {expected}"
+        assert w.grad.item() == 3.0, f"cp_size={cp_size}: {w.grad.item()} != 3.0 (no cp scaling)"
+
+
+def test_backward_divides_main_loss_by_accumulated_gradient():
+    # Gradient accumulation still averages the per-microbatch loss over the window;
+    # cp_size does not enter (see above). w.grad = 3 / accum, not 3 * cp_size / accum.
+    model = torch.nn.Linear(1, 1)
+    strat = _bare_strategy(cp_size=2, accumulated_gradient=4)
+    w = torch.tensor([1.0], requires_grad=True)
+    loss = (w * 3.0).sum()
+    strat.backward(loss, model, optimizer=None)
+    assert w.grad.item() == 3.0 / 4

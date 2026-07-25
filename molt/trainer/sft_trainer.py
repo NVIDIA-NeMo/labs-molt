@@ -139,9 +139,10 @@ class SFTTrainer:
             # Count tokens on the full (unsharded) sequence. Reduced over DP only
             # — CP ranks share the sample, so global_token_count (the loss
             # denominator) must not double count them. The loss-value scale below
-            # is dp_size (correct for the reported/logged mean). The *gradient*
-            # compensation for FSDP averaging over the extra CP dim is applied
-            # separately in FsdpStrategy.backward (loss *= cp_size).
+            # is dp_size (correct for the reported/logged mean). The CP gradient
+            # needs no compensation here: Actor.forward gathers log-probs with the
+            # sharder, whose all-gather backward sums grads ×cp_size and cancels
+            # FSDP's mean over dp_cp — see FsdpStrategy.backward.
             local_num_tokens += shifted_loss_mask.sum()
             prepared.append((inputs, attention_mask, shifted_loss_mask, mm_inputs))
 
