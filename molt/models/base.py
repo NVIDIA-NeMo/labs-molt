@@ -683,12 +683,17 @@ class BaseModel(nn.Module):
                                 "(attach images marker-independently) or use the step runner (geo3k.py)."
                             )
 
+                # The sharder pads and masks by this id (a THD backend derives its
+                # padding_mask from it, which decides what the MoE dispatch skips), and
+                # molt's own pad below must agree with it.
+                cp_pad_id = getattr(getattr(self.model, "config", None), "pad_token_id", None) or 0
+
                 # Every CP layout shards a full [B,S] row, so S must divide by cp_size.
                 # round_robin pads internally, GLM's THD verb asserts instead — pad once
                 # here for both; the restore trims the tail back off.
                 pad = -seqlen % self.cp_size
                 if pad:
-                    sequences = F.pad(sequences, (0, pad))
+                    sequences = F.pad(sequences, (0, pad), value=cp_pad_id)
                     rolled_sequences = F.pad(rolled_sequences, (0, pad))
                     attention_mask = F.pad(attention_mask, (0, pad))
                     if position_ids is not None:  # None for VLMs: the CP hook builds mRoPE
@@ -729,7 +734,9 @@ class BaseModel(nn.Module):
             from nemo_automodel.components.distributed.context_parallel import ContextParallelSharder
             from nemo_automodel.components.utils.model_utils import filter_forward_kwargs
 
-            self._cp_sharder = ContextParallelSharder(self.model, self.device_mesh, cp_batch, invoke_pre_embed=True)
+            self._cp_sharder = ContextParallelSharder(
+                self.model, self.device_mesh, cp_batch, invoke_pre_embed=True, padding_token_id=cp_pad_id
+            )
             cp_ctx_factory, cp_batch = self._cp_sharder.shard(cp_batch)
             position_ids = cp_batch.pop("position_ids", None)
             # The sharder pads `labels` with -100 (CE ignore_index), but molt reuses
