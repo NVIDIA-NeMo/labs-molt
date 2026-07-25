@@ -198,6 +198,9 @@ RUN if [ "$INSTALL_TEST_DEPS" = "1" ]; then python -m pip install coverage pytes
 # load-bearing — 0.1.9 compiles the kernels but its backward NaNs once an index block mixes
 # real keys with the -1 sentinel, which causal top-k always produces.
 RUN python -m pip install --no-cache-dir "tilelang==0.1.11" "tile-kernels==1.0.0" "apache-tvm-ffi<=0.1.11"
+# Keep the kernel JIT cache under the bind-mounted /root/.cache; the default ~/.tilelang
+# is container-local, so every job would recompile the DSA kernels from scratch.
+ENV TILELANG_CACHE_DIR=/root/.cache/tilelang
 
 # --- restore DeepEP's NVSHMEM ABI ----------------------------------------------
 # DeepEP (step c) built deep_ep_cpp.so against nvidia-nvshmem-cu13==3.6.5, but vLLM hard-pins
