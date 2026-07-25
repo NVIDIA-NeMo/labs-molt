@@ -145,32 +145,21 @@ def _pil_data_uri(pil) -> str:
     return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
-def _extract_text_from_content(content) -> str:
-    """Flatten a message's content to a plain-text string without loading images."""
+def _extract_prompt_text(prompt) -> str:
+    """Scalar text view of the last user turn: its text parts joined, images skipped.
+
+    Multimodal rows carry list content ([{type:text}, {type:image_url}, ...]); keeping only
+    the text guarantees ChatContext.prompt / grading always receive a plain string.
+    """
+    if not isinstance(prompt, list):
+        return str(prompt)
+    last_user = next((m for m in reversed(prompt) if m.get("role") == "user"), None)
+    content = last_user.get("content") if last_user else ""
     if isinstance(content, str):
         return content
     if not isinstance(content, list):
         return "" if content is None else str(content)
-    parts = []
-    for item in content:
-        if isinstance(item, dict) and item.get("type") == "text":
-            parts.append(item.get("text") or "")
-    return "".join(parts)
-
-
-def _extract_prompt_text(prompt) -> str:
-    """Return a scalar text view of the last user turn in a prompt row."""
-    raw = prompt if isinstance(prompt, list) else [{"role": "user", "content": str(prompt)}]
-    user_texts = [
-        m["content"] for m in raw if m.get("role") == "user" and isinstance(m.get("content"), str)
-    ]
-    if user_texts:
-        return user_texts[-1]
-
-    last_user = next((m for m in reversed(raw) if m.get("role") == "user"), None)
-    if last_user is None:
-        return ""
-    return _extract_text_from_content(last_user.get("content"))
+    return "".join(part.get("text") or "" for part in content if isinstance(part, dict) and part.get("type") == "text")
 
 
 def _wire_messages(prompt, images) -> list:

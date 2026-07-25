@@ -59,3 +59,20 @@ def test_extract_prompt_text_extracts_text_from_structured_content():
 def test_extract_prompt_text_returns_empty_string_when_no_user_turn():
     _extract_prompt_text = _import_helpers()
     assert _extract_prompt_text([{"role": "system", "content": "system only"}]) == ""
+
+
+def test_extract_prompt_text_follows_last_user_turn_over_earlier_string():
+    """The scalar view is the LAST user turn's text, even when an earlier user turn was a
+    plain string and the final one carries structured (text + image) content."""
+    _extract_prompt_text = _import_helpers()
+    prompt = [
+        {"role": "user", "content": "earlier"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "final"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+            ],
+        },
+    ]
+    assert _extract_prompt_text(prompt) == "final"
