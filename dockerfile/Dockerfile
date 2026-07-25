@@ -194,6 +194,21 @@ RUN if [ "$INSTALL_TEST_DEPS" = "1" ]; then python -m pip install coverage pytes
     python -c "import importlib.util as u; assert u.find_spec('fla.ops.cp') and u.find_spec('fla.modules.convolution') and u.find_spec('fla.ops.gated_delta_rule'), 'fla CP ops missing'" && \
     rm -f /tmp/requirements.txt /tmp/req.filtered.txt
 
+# --- DSA sparse-attention kernels (DeepSeek-V4 / GLM-5.2) ----------------------
+# AutoModel's `cuda` extra (pyproject) is what enables backend.attn="tilelang"; molt builds
+# TE / mamba / causal-conv1d from source above, so install only the DSA part of it here.
+# The version matters: tilelang 0.1.9 still compiles the sparse-MLA kernels but its backward
+# returns NaN as soon as an index block mixes real keys with the -1 sentinel — which causal
+# top-k always produces, so DSA gradients are poisoned while the forward looks healthy.
+# apache-tvm-ffi is capped per upstream (0.1.12 is incompatible with tilelang's bundled TVM,
+# and is why AutoModel's own image keeps INSTALL_FA4=false). tile-kernels supplies
+# DeepSeek-V4's MHC sinkhorn. vLLM and mamba-ssm pin older tilelang for their own kernels;
+# the DSA training path is the stricter consumer, so this pin wins image-wide.
+RUN python -m pip install --no-cache-dir "tilelang==0.1.11" "tile-kernels==1.0.0" "apache-tvm-ffi<=0.1.11" && \
+    python -c "import os, z3; print(os.path.join(os.path.dirname(z3.__file__), 'lib'))" > /etc/ld.so.conf.d/z3.conf && \
+    ldconfig && \
+    python -c "import tilelang; assert tilelang.__version__ == '0.1.11', tilelang.__version__"
+
 # --- restore DeepEP's NVSHMEM ABI ----------------------------------------------
 # DeepEP (step c) built deep_ep_cpp.so against nvidia-nvshmem-cu13==3.6.5, but vLLM hard-pins
 # ==3.4.5, so its install above DOWNGRADED the wheel -> deep_ep_cpp.so then fails to load with
