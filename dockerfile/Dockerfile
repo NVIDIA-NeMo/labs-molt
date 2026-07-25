@@ -194,13 +194,10 @@ RUN if [ "$INSTALL_TEST_DEPS" = "1" ]; then python -m pip install coverage pytes
     python -c "import importlib.util as u; assert u.find_spec('fla.ops.cp') and u.find_spec('fla.modules.convolution') and u.find_spec('fla.ops.gated_delta_rule'), 'fla CP ops missing'" && \
     rm -f /tmp/requirements.txt /tmp/req.filtered.txt
 
-# DSA sparse attention (backend.attn="tilelang"), the tilelang part of AutoModel's `cuda`
-# extra. The pin is load-bearing: 0.1.9 compiles the kernels but its backward returns NaN
-# once an index block mixes real keys with the -1 sentinel, which causal top-k always
-# produces. tvm-ffi is capped upstream; z3 ships libz3 without exposing it to the loader.
-RUN python -m pip install --no-cache-dir "tilelang==0.1.11" "tile-kernels==1.0.0" "apache-tvm-ffi<=0.1.11" && \
-    python -c "import os, z3; print(os.path.join(os.path.dirname(z3.__file__), 'lib'))" > /etc/ld.so.conf.d/z3.conf && \
-    ldconfig
+# DSA sparse attention (backend.attn="tilelang"): AutoModel's `cuda` extra. The pin is
+# load-bearing — 0.1.9 compiles the kernels but its backward NaNs once an index block mixes
+# real keys with the -1 sentinel, which causal top-k always produces.
+RUN python -m pip install --no-cache-dir "tilelang==0.1.11" "tile-kernels==1.0.0" "apache-tvm-ffi<=0.1.11"
 
 # --- restore DeepEP's NVSHMEM ABI ----------------------------------------------
 # DeepEP (step c) built deep_ep_cpp.so against nvidia-nvshmem-cu13==3.6.5, but vLLM hard-pins
@@ -213,8 +210,9 @@ RUN python -m pip install --no-deps --force-reinstall nvidia-nvshmem-cu13==3.6.5
     NVSHMEM_LIB_PATH=$(pip show nvidia-nvshmem-cu13 | awk '/^Location:/{print $2}')/nvidia/nvshmem/lib && \
     ln -sf ${NVSHMEM_LIB_PATH}/libnvshmem_host.so.3 ${NVSHMEM_LIB_PATH}/libnvshmem_host.so
 
-# Register torch's bundled nvidia libs on the loader path (vLLM pulls nvidia-* wheels).
-RUN find ${SITE}/nvidia -mindepth 2 -maxdepth 2 -type d -name lib | sort \
+# Register torch's bundled nvidia libs on the loader path (vLLM pulls nvidia-* wheels),
+# plus z3's, which ships libz3 that tvm-ffi (tilelang) loads at import.
+RUN { find ${SITE}/nvidia -mindepth 2 -maxdepth 2 -type d -name lib | sort; echo ${SITE}/z3/lib; } \
         > /etc/ld.so.conf.d/python-nvidia-libs.conf && ldconfig
 
 # --- Entrypoint -----------------------------------------------------------------
