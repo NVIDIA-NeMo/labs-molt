@@ -749,7 +749,6 @@ class PolicyModelActor(BaseModelActor):
             freeze_moe_router=getattr(strategy.args.actor, "freeze_moe_router", False),
             moe_aux_loss_coef=args.actor.aux_loss_coef,
             routing_replay=getattr(args.train, "routing_replay", False),
-            use_fp32_master_weights=not strategy.args.fsdp.bf16_master_weights,
         )
         if vllm_engines is not None:
             adapter = getattr(actor.model, "state_dict_adapter", None)

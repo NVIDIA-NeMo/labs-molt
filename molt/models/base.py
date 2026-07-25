@@ -140,10 +140,8 @@ def _class_source_supports_thd_packing(model_cls) -> bool:
         source = Path(source_path).read_text(errors="ignore")
     except OSError:
         return False
-    # THD packing is signalled by qkv_format='thd'; the per-sequence metadata is
-    # either cu_seqlens (TE / GLM DSA) or seq_lens (DeepSeek-V4 model-owned CP,
-    # which builds cu_seqlens from seq_lens inside its sharder).
-    return "qkv_format" in source and ("cu_seqlens" in source or "seq_lens" in source)
+    # THD packing is signalled by qkv_format='thd' plus per-sequence cu_seqlens.
+    return "qkv_format" in source and "cu_seqlens" in source
 
 
 def _automodel_arch_supports_thd_packing(pretrain_or_model) -> bool:
@@ -538,9 +536,8 @@ class BaseModel(nn.Module):
         if cp_forward:
             # Differentiable all-gather of this rank's CP shard back to the caller's
             # [B, seqlen] coordinates via the sharder layout (narrow for round_robin,
-            # reshape for THD input_row_shape, position-map for DSv4). `fill` is
-            # required by DSv4's repad layout; unused by the others. The trailing slice
-            # drops the cp-multiple pad the forward added.
+            # reshape for THD input_row_shape). The trailing slice drops the
+            # cp-multiple pad the forward added.
             return self._cp_sharder.gather_token_tensor(t, seq_dim=1, trim=True, fill=0.0)[:, :seqlen]
         if self.packing_samples:
             # cp1 packing: scatter the packed [1, total] rows back to padded [B, seqlen].
@@ -683,8 +680,8 @@ class BaseModel(nn.Module):
                             )
 
                 # Every CP layout shards a full [B,S] row, so S must divide by cp_size.
-                # round_robin and DSv4 pad internally, GLM's THD verb asserts instead —
-                # pad once here for all of them; the restore trims the tail back off.
+                # round_robin pads internally, GLM's THD verb asserts instead — pad once
+                # here for both; the restore trims the tail back off.
                 pad = -seqlen % self.cp_size
                 if pad:
                     sequences = F.pad(sequences, (0, pad))
@@ -695,7 +692,7 @@ class BaseModel(nn.Module):
                 # Padded [B,S] batch to the sharder — one layout for all CP models.
                 # round_robin (omni3/qwen3.6): sharder shards the aux streams, pads to
                 # 2*cp, injects position_ids; the model embeds/scatters/shards the primary.
-                # THD DSA (GLM/DSv4, packing_samples): sharder flattens [B,S] to [B*S] and
+                # THD DSA (GLM, packing_samples): sharder flattens [B,S] to [B*S] and
                 # contiguous-shards from seq_lens (per-row real length) — the recipe's
                 # fixed-length+padding CP (packed sequences aren't CP-compatible).
                 if self.packing_samples:

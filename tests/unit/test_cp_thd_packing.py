@@ -104,75 +104,46 @@ def test_glm_sharder_accepts_padded_thd_cp_batch():
     assert layout.padded_seq_len == B * S
 
 
-def test_dsv4_sharder_accepts_padded_thd_cp_batch_repad_layout():
-    # DSv4: consumes BSHD seq_lens (rejects a pre-flattened cu_seqlens), self-pads the
-    # compression windows, and reports a repositioned input_token_stream_positions
-    # layout (why molt's gather passes fill). Positions cover molt's [B,S] input.
-    dsv4_cp = pytest.importorskip("nemo_automodel.components.models.deepseek_v4.cp")
-    B, S = 2, 4
-    _ctx, sharded, layout = dsv4_cp.make_dsv4_contiguous_shard_cp_batch_and_ctx(
-        _FakeMesh(), None, _padded_thd_cp_batch(B, S), pad_multiple=2, sync_packed_length=False
-    )
-
-    assert sharded["qkv_format"] == "thd"
-    assert "_dsv4_cp_group" in sharded  # injected by the sharder for K/V all-gather
-    assert layout.input_token_stream_positions is not None
-    assert layout.input_token_stream_positions.shape[0] == B
-
-
-def test_dsv4_sharder_rejects_pre_flattened_cu_seqlens():
-    # Guards molt's contract choice: molt feeds seq_lens (BSHD), never cu_seqlens.
-    dsv4_cp = pytest.importorskip("nemo_automodel.components.models.deepseek_v4.cp")
-    bad = {
-        "input_ids": torch.arange(8).view(1, 8),
-        "labels": torch.arange(8).view(1, 8),
-        "position_ids": torch.arange(8).view(1, 8),
-        "cu_seqlens": torch.tensor([0, 3, 8], dtype=torch.int32),
-        "qkv_format": "thd",
-    }
-    with pytest.raises(NotImplementedError, match="seq_lens"):
-        dsv4_cp.make_dsv4_contiguous_shard_cp_batch_and_ctx(_FakeMesh(), None, bad, pad_multiple=2)
-
-
-def _tiny_dsv4_model():
+def _tiny_glm_model():
     from nemo_automodel.components.models.common import BackendConfig
-    from nemo_automodel.components.models.deepseek_v4.config import DeepseekV4Config
-    from nemo_automodel.components.models.deepseek_v4.model import DeepseekV4ForCausalLM
+    from nemo_automodel.components.models.glm_moe_dsa.model import GlmMoeDsaForCausalLM
+    from transformers.models.glm_moe_dsa.configuration_glm_moe_dsa import GlmMoeDsaConfig
 
-    cfg = DeepseekV4Config(
+    cfg = GlmMoeDsaConfig(
         vocab_size=256,
         hidden_size=64,
+        intermediate_size=64,
         moe_intermediate_size=32,
         num_hidden_layers=2,
         num_attention_heads=4,
-        num_key_value_heads=1,
-        head_dim=16,
+        num_key_value_heads=4,
+        qk_nope_head_dim=16,
         qk_rope_head_dim=8,
+        v_head_dim=16,
         q_lora_rank=32,
-        o_lora_rank=32,
-        o_groups=2,
+        kv_lora_rank=16,
         index_head_dim=8,
         index_n_heads=2,
         index_topk=4,
         n_routed_experts=8,
-        n_shared_experts=0,
+        n_shared_experts=1,
         num_experts_per_tok=2,
+        first_k_dense_replace=1,
         max_position_embeddings=256,
-        compress_ratios=[0, 4],
-        sliding_window=16,
-        num_hash_layers=0,
+        indexer_types=["full", "shared"],
+        mlp_layer_types=["dense", "sparse"],
         num_nextn_predict_layers=0,
         rms_norm_eps=1e-6,
-        torch_dtype="float32",
+        dtype="float32",
     )
-    return DeepseekV4ForCausalLM.from_config(
+    return GlmMoeDsaForCausalLM.from_config(
         cfg,
         backend=BackendConfig(attn="tilelang", linear="torch", experts="torch", dispatcher="torch", rms_norm="torch"),
     )
 
 
 def _cp_gather_worker(rank, world, port):
-    # Runs molt's exact CP data path in a gloo worker: resolve the model-owned DSv4
+    # Runs molt's exact CP data path in a gloo worker: resolve the model-owned GLM DSA
     # sharder on a padded [B,S] THD cp_batch, shard, then gather_token_tensor back.
     import torch.distributed as dist
     from nemo_automodel.components.distributed.context_parallel import ContextParallelSharder
@@ -183,7 +154,7 @@ def _cp_gather_worker(rank, world, port):
     try:
         mesh = init_device_mesh("cpu", (world,), mesh_dim_names=("cp",))
         torch.manual_seed(0)
-        model = _tiny_dsv4_model()
+        model = _tiny_glm_model()
         B, S = 1, 8 * world  # B*S = 8*world divisible by cp=world; all real (no intra-row pad)
         input_ids = (torch.arange(B * S) % 251 + 3).view(B, S)
         seq_lens = torch.full((B, 1), S, dtype=torch.int32)
@@ -207,13 +178,13 @@ def _cp_gather_worker(rank, world, port):
         dist.destroy_process_group()
 
 
-def test_cp_gather_roundtrip_across_ranks_dsv4():
+def test_cp_gather_roundtrip_across_ranks_glm():
     # The cross-rank half the stub tests can't reach: drive molt's real
     # ContextParallelSharder + gather_token_tensor over a live CP group with the real
-    # DeepSeek-V4 sharder. Asserts the gather reconstructs molt's [B,S] input coordinate
+    # GLM DSA sharder. Asserts the gather reconstructs molt's [B,S] input coordinate
     # and the differentiable all-gather sums grads ×cp_size (the factor that cancels
     # FSDP's mean over dp_cp). cp2 for CI speed; cp4/cp8 verified out of band.
-    pytest.importorskip("nemo_automodel.components.models.deepseek_v4.model")
+    pytest.importorskip("nemo_automodel.components.models.glm_moe_dsa.model")
     import torch.multiprocessing as mp
 
     if (os.cpu_count() or 1) < 2:

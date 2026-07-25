@@ -43,7 +43,6 @@ def train(args):
         packing_samples=args.fsdp.packing_samples,
         freeze_visual_encoder=args.model.freeze_visual_encoder,
         moe_aux_loss_coef=args.model.aux_loss_coef,
-        use_fp32_master_weights=not args.fsdp.bf16_master_weights,
     )
     tokenizer = get_tokenizer(
         args.model.model_name_or_path, model.model, "right", use_fast=not args.data.disable_fast_tokenizer
