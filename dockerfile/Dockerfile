@@ -172,7 +172,7 @@ RUN T=$(python -c "import torch; print(torch.__version__)") && \
     TV=$(python -c "import torchvision; print(torchvision.__version__)") && \
     TA=$(python -c "import torchaudio; print(torchaudio.__version__)") && \
     printf 'torch==%s\ntorchvision==%s\ntorchaudio==%s\n' "$T" "$TV" "$TA" > /tmp/torch-pin.txt && \
-    python -m pip install -c /tmp/torch-pin.txt "vllm[audio]==0.25.1" && rm -f /tmp/torch-pin.txt
+    python -m pip install -c /tmp/torch-pin.txt "vllm[audio]==0.26.0" && rm -f /tmp/torch-pin.txt
 
 # --- VLM modeling-code runtime deps + molt requirements + fla -----------
 # requirements.txt minus what's already pinned/built above (torch trio, TE, flash-attn,
