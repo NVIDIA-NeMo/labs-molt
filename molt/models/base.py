@@ -617,6 +617,24 @@ class BaseModel(nn.Module):
             )
             forward_attention_mask = None
         else:
+            # Every CP layout shards a full [B, S] row, so S must divide by cp_size (the
+            # round-robin sharder pads internally, GLM's THD verb asserts instead). Pad here,
+            # before anything derives from the batch — labels, VLM token-type ids, positions
+            # and the R3 ids all have to describe the same rows — and the restore trims the
+            # tail back off. The pad id is the one the sharder masks by: a THD backend turns
+            # it into the padding_mask that decides what the MoE dispatch skips.
+            if self.cp_size > 1 and attention_mask is not None:
+                pad = -seqlen % self.cp_size
+                if pad:
+                    pad_id = getattr(getattr(self.model, "config", None), "pad_token_id", None) or 0
+                    sequences = F.pad(sequences, (0, pad), value=pad_id)
+                    attention_mask = F.pad(attention_mask, (0, pad))
+                    if position_ids is not None:  # None for VLMs: the CP hook builds mRoPE
+                        position_ids = F.pad(position_ids, (0, pad))
+                    if routed_experts is not None:
+                        # -1 = "no captured routing", so RouterReplay keeps the live choice
+                        routed_experts = F.pad(routed_experts, (0, pad), value=-1)
+
             # https://github.com/OpenRLHF/OpenRLHF/issues/217
             rolled_sequences = torch.roll(sequences, shifts=-1, dims=1)
             forward_attention_mask = attention_mask
@@ -683,26 +701,6 @@ class BaseModel(nn.Module):
                                 "(attach images marker-independently) or use the step runner (geo3k.py)."
                             )
 
-                # The sharder pads and masks by this id (a THD backend derives its
-                # padding_mask from it, which decides what the MoE dispatch skips), and
-                # molt's own pad below must agree with it.
-                cp_pad_id = getattr(getattr(self.model, "config", None), "pad_token_id", None) or 0
-
-                # Every CP layout shards a full [B,S] row, so S must divide by cp_size.
-                # round_robin pads internally, GLM's THD verb asserts instead — pad once
-                # here for both; the restore trims the tail back off.
-                pad = -seqlen % self.cp_size
-                if pad:
-                    sequences = F.pad(sequences, (0, pad), value=cp_pad_id)
-                    rolled_sequences = F.pad(rolled_sequences, (0, pad))
-                    attention_mask = F.pad(attention_mask, (0, pad))
-                    if position_ids is not None:  # None for VLMs: the CP hook builds mRoPE
-                        position_ids = F.pad(position_ids, (0, pad))
-                    if routed_experts is not None:
-                        # R3 ids are sharded with this batch, so they pad with it. -1 means
-                        # "no captured routing", which keeps RouterReplay on the live choice.
-                        routed_experts = F.pad(routed_experts, (0, pad), value=-1)
-
                 # Padded [B,S] batch to the sharder — one layout for all CP models.
                 # round_robin (omni3/qwen3.6): sharder shards the aux streams, pads to
                 # 2*cp, injects position_ids; the model embeds/scatters/shards the primary.
@@ -735,7 +733,11 @@ class BaseModel(nn.Module):
             from nemo_automodel.components.utils.model_utils import filter_forward_kwargs
 
             self._cp_sharder = ContextParallelSharder(
-                self.model, self.device_mesh, cp_batch, invoke_pre_embed=True, padding_token_id=cp_pad_id
+                self.model,
+                self.device_mesh,
+                cp_batch,
+                invoke_pre_embed=True,
+                padding_token_id=getattr(getattr(self.model, "config", None), "pad_token_id", None) or 0,
             )
             cp_ctx_factory, cp_batch = self._cp_sharder.shard(cp_batch)
             position_ids = cp_batch.pop("position_ids", None)
