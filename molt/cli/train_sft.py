@@ -268,11 +268,6 @@ if __name__ == "__main__":
             "use --fsdp.cp_size with AutoModel TE native CP for long VLM sequences instead."
         )
 
-    if args.fsdp.cp_size > 1 and args.fsdp.packing_samples:
-        raise ValueError(
-            "--fsdp.cp_size > 1 is incompatible with --fsdp.packing_samples; disable packing for CP runs."
-        )
-
     if args.fsdp.packing_samples and args.fsdp.attn_implementation not in {"te", "flash_attention_2", "tilelang"}:
         raise ValueError(
             "--fsdp.packing_samples requires --fsdp.attn_implementation te, flash_attention_2, or tilelang."

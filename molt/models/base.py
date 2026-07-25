@@ -139,7 +139,10 @@ def _class_source_supports_thd_packing(model_cls) -> bool:
         source = Path(source_path).read_text(errors="ignore")
     except OSError:
         return False
-    return "qkv_format" in source and "cu_seqlens" in source
+    # THD packing is signalled by qkv_format='thd'; the per-sequence metadata is
+    # either cu_seqlens (TE / GLM DSA) or seq_lens (DeepSeek-V4 model-owned CP,
+    # which builds cu_seqlens from seq_lens inside its sharder).
+    return "qkv_format" in source and ("cu_seqlens" in source or "seq_lens" in source)
 
 
 def _automodel_arch_supports_thd_packing(pretrain_or_model) -> bool:
@@ -527,19 +530,19 @@ class BaseModel(nn.Module):
     def _restore_full_sequence(self, t, *, cp_forward, batch, seqlen, indices):
         """Map a per-token tensor back onto the full ``[B, seqlen]`` axis.
 
-        Undoes the two seq-axis transforms the forward applies before the model
-        call: CP sharding (gather the CP shards, then trim the CP pad tail back
-        to ``seqlen``) and sample packing (scatter the packed THD rows back to
-        padded ``[B, seqlen]``). No-op when neither CP nor packing is active.
+        Inverts whichever seq-axis transform the forward applied (they are mutually
+        exclusive): CP sharding under cp>1, or real-token packing under cp1. No-op
+        when neither is active.
         """
         if cp_forward:
-            # Differentiable all-gather of this rank's CP shard, reordered to global
-            # sequence order and trimmed back to the caller's original length. Same
-            # head-tail load-balance layout molt used to invert by hand, now owned by
-            # the AutoModel sharder (grads route back to each owning shard).
-            t = self._cp_sharder.gather_token_tensor(t, seq_dim=1, trim=True)
+            # Differentiable all-gather of this rank's CP shard back to the caller's
+            # [B, seqlen] coordinates via the sharder layout (narrow for round_robin,
+            # reshape for THD input_row_shape, position-map for DSv4). `fill` is
+            # required by DSv4's repad layout; unused by the others.
+            return self._cp_sharder.gather_token_tensor(t, seq_dim=1, trim=True, fill=0.0)
         if self.packing_samples:
-            t = unpack_to_padded(t, indices, batch, seqlen)
+            # cp1 packing: scatter the packed [1, total] rows back to padded [B, seqlen].
+            return unpack_to_padded(t, indices, batch, seqlen)
         return t
 
     def _build_routing_targets(self, routed_experts, indices, cp_forward):
@@ -600,8 +603,12 @@ class BaseModel(nn.Module):
         indices = None
         cp_forward = False
         cp_ctx_factory = nullcontext
+        cp_batch = None  # built in the packed or padded branch below; None => no CP sharding
         self._cp_sharder = None  # set below under CP; read by _restore_full_sequence / _build_routing_targets
-        if self.packing_samples:
+        if self.packing_samples and self.cp_size == 1:
+            # cp1 real-token packing. CP is incompatible with packed sequences: cp>1
+            # falls through to the padded branch, where the model-owned sharder
+            # flattens the padded [B,S] batch to THD itself (from seq_lens).
             sequences, position_ids, rolled_sequences, indices, attn_kwargs = pack_padded_batch(
                 sequences, attention_mask, style=self._packing_style
             )
@@ -647,9 +654,6 @@ class BaseModel(nn.Module):
                     position_ids.masked_fill_(attention_mask == 0, 1)
 
             if self.cp_size > 1 and attention_mask is not None:
-                from nemo_automodel.components.distributed.context_parallel import ContextParallelSharder
-                from nemo_automodel.components.utils.model_utils import filter_forward_kwargs
-
                 # VLM + CP is model-owned: the model's `prepare_model_inputs_for_cp` hook
                 # embeds + scatters vision and round-robin-shards the primary inside its own
                 # forward; the sharder shards only the aux streams (labels/position_ids).
@@ -676,37 +680,56 @@ class BaseModel(nn.Module):
                                 "(attach images marker-independently) or use the step runner (geo3k.py)."
                             )
 
-                # Hand the full-length batch to the sharder: the model embeds/scatters/shards
-                # the primary in forward (aux-only models) or the sharder shards input_ids too
-                # (generic text models); `labels` carries the shifted next-token targets on the
-                # same round-robin shard as the logits. No manual pre-embed / pad — the sharder
-                # pads to 2*cp and injects position_ids (mRoPE for qwen3.6, 1-D for omni3).
-                cp_batch = {
-                    "input_ids": sequences,
-                    "attention_mask": attention_mask,
-                    "labels": rolled_sequences,
-                    **mm_inputs,
-                }
-                self._cp_sharder = ContextParallelSharder(
-                    self.model, self.device_mesh, cp_batch, invoke_pre_embed=True
-                )
-                cp_ctx_factory, cp_batch = self._cp_sharder.shard(cp_batch)
-                position_ids = cp_batch.pop("position_ids", None)
-                # The sharder pads `labels` with -100 (CE ignore_index), but molt reuses
-                # rolled_sequences as gather targets for log_probs_from_logits — a -100 index
-                # trips the CUDA gather bounds-check. Clamp the pad to a valid id (trimmed
-                # after the CP gather, so its value is immaterial). Must be IN-PLACE: the CP
-                # context shards this labels tensor in-place at context entry, so an
-                # out-of-place clamp copy would stay full-length while the logits are local,
-                # and log_probs_from_logits silently misaligns (it has no length check).
-                rolled_sequences = cp_batch.pop("labels").clamp_min_(0)
-                forward_attention_mask = cp_batch.pop("attention_mask", None)
-                sequences = cp_batch.pop("input_ids")
-                # Residual = media the hook left/promoted; keep only real forward kwargs
-                # (the hook may add metadata like a nulled mm_token_type_ids), matching
-                # AutoModel's own recipe (filter_forward_kwargs before model(**batch)).
-                mm_inputs = filter_forward_kwargs(self.model, cp_batch)
-                cp_forward = True
+                # Padded [B,S] batch to the sharder — one layout for all CP models.
+                # round_robin (omni3/qwen3.6): sharder shards the aux streams, pads to
+                # 2*cp, injects position_ids; the model embeds/scatters/shards the primary.
+                # THD DSA (GLM/DSv4, packing_samples): sharder flattens [B,S] to [B*S] and
+                # contiguous-shards from seq_lens (per-row real length) — the recipe's
+                # fixed-length+padding CP (packed sequences aren't CP-compatible). GLM needs
+                # B*S % cp_size == 0 (ensured by the cp-multiple seq length); DSv4 self-pads.
+                if self.packing_samples:
+                    seq_lens = attention_mask.sum(-1, keepdim=True).to(torch.int32)
+                    cp_batch = {
+                        "input_ids": sequences,
+                        "labels": rolled_sequences,
+                        "position_ids": position_ids,
+                        "seq_lens": seq_lens,
+                        "seq_lens_padded": seq_lens.new_full(seq_lens.shape, seqlen),
+                        "qkv_format": "thd",
+                    }
+                else:
+                    cp_batch = {
+                        "input_ids": sequences,
+                        "attention_mask": attention_mask,
+                        "labels": rolled_sequences,
+                        **mm_inputs,
+                    }
+
+        # One model-owned sharder for every CP model: the padded [B,S] cp_batch built
+        # above (round_robin attention_mask, or THD DSA seq_lens) is sharded here; the
+        # gather in `_restore_full_sequence` inverts the layout back to [B,S].
+        if cp_batch is not None:
+            from nemo_automodel.components.distributed.context_parallel import ContextParallelSharder
+            from nemo_automodel.components.utils.model_utils import filter_forward_kwargs
+
+            self._cp_sharder = ContextParallelSharder(self.model, self.device_mesh, cp_batch, invoke_pre_embed=True)
+            cp_ctx_factory, cp_batch = self._cp_sharder.shard(cp_batch)
+            position_ids = cp_batch.pop("position_ids", None)
+            # The sharder pads `labels` with -100 (CE ignore_index), but molt reuses
+            # rolled_sequences as gather targets for log_probs_from_logits — a -100 index
+            # trips the CUDA gather bounds-check. Clamp the pad to a valid id (trimmed
+            # after the CP gather, so its value is immaterial). Must be IN-PLACE: the CP
+            # context shards this labels tensor in-place at context entry, so an
+            # out-of-place clamp copy would stay full-length while the logits are local,
+            # and log_probs_from_logits silently misaligns (it has no length check).
+            rolled_sequences = cp_batch.pop("labels").clamp_min_(0)
+            forward_attention_mask = cp_batch.pop("attention_mask", None)
+            sequences = cp_batch.pop("input_ids")
+            # Residual = THD/media kwargs the sharder/hook produced (cu_seqlens, qkv_format,
+            # _glm_dsa_cp_group, a nulled mm_token_type_ids, ...); keep only real forward
+            # kwargs, matching AutoModel's recipe (filter_forward_kwargs before model(**batch)).
+            mm_inputs = filter_forward_kwargs(self.model, cp_batch)
+            cp_forward = True
 
         # No forward-level torch.autocast: FSDP2's MixedPrecisionPolicy already
         # casts managed params to bf16 for the forward, and an extra autocast would
