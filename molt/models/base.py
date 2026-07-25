@@ -617,11 +617,12 @@ class BaseModel(nn.Module):
             )
             forward_attention_mask = None
         else:
-            # CP shards a full [B, S] row, so S must divide by cp_size. Pad before anything
-            # derives from the batch — labels, VLM token-type ids, positions and the R3 ids
-            # must describe the same rows — with the pad id the sharder masks by; the restore
-            # trims the tail back off.
-            if self.cp_size > 1 and attention_mask is not None:
+            # THD CP flattens the batch to one token stream and asserts it divides by
+            # cp_size, so pad before anything derives from it — labels, VLM token-type ids,
+            # positions and the R3 ids must describe the same rows — with the pad id the
+            # sharder masks by; the restore trims the tail back off. round_robin needs none
+            # of this: its sharder pads the stream itself.
+            if self.packing_samples and self.cp_size > 1 and attention_mask is not None:
                 pad = -seqlen % self.cp_size
                 if pad:
                     pad_id = getattr(getattr(self.model, "config", None), "pad_token_id", None) or 0
