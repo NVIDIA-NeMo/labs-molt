@@ -25,6 +25,7 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 from molt.trainer.fsdp.packing import (
     is_automodel_custom_model,
@@ -538,8 +539,9 @@ class BaseModel(nn.Module):
             # Differentiable all-gather of this rank's CP shard back to the caller's
             # [B, seqlen] coordinates via the sharder layout (narrow for round_robin,
             # reshape for THD input_row_shape, position-map for DSv4). `fill` is
-            # required by DSv4's repad layout; unused by the others.
-            return self._cp_sharder.gather_token_tensor(t, seq_dim=1, trim=True, fill=0.0)
+            # required by DSv4's repad layout; unused by the others. The trailing slice
+            # drops the cp-multiple pad the forward added.
+            return self._cp_sharder.gather_token_tensor(t, seq_dim=1, trim=True, fill=0.0)[:, :seqlen]
         if self.packing_samples:
             # cp1 packing: scatter the packed [1, total] rows back to padded [B, seqlen].
             return unpack_to_padded(t, indices, batch, seqlen)
@@ -680,13 +682,22 @@ class BaseModel(nn.Module):
                                 "(attach images marker-independently) or use the step runner (geo3k.py)."
                             )
 
+                # Every CP layout shards a full [B,S] row, so S must divide by cp_size.
+                # round_robin and DSv4 pad internally, GLM's THD verb asserts instead —
+                # pad once here for all of them; the restore trims the tail back off.
+                pad = -seqlen % self.cp_size
+                if pad:
+                    sequences = F.pad(sequences, (0, pad))
+                    rolled_sequences = F.pad(rolled_sequences, (0, pad))
+                    attention_mask = F.pad(attention_mask, (0, pad))
+                    position_ids = F.pad(position_ids, (0, pad))
+
                 # Padded [B,S] batch to the sharder — one layout for all CP models.
                 # round_robin (omni3/qwen3.6): sharder shards the aux streams, pads to
                 # 2*cp, injects position_ids; the model embeds/scatters/shards the primary.
                 # THD DSA (GLM/DSv4, packing_samples): sharder flattens [B,S] to [B*S] and
                 # contiguous-shards from seq_lens (per-row real length) — the recipe's
-                # fixed-length+padding CP (packed sequences aren't CP-compatible). GLM needs
-                # B*S % cp_size == 0 (ensured by the cp-multiple seq length); DSv4 self-pads.
+                # fixed-length+padding CP (packed sequences aren't CP-compatible).
                 if self.packing_samples:
                     seq_lens = attention_mask.sum(-1, keepdim=True).to(torch.int32)
                     cp_batch = {
@@ -694,7 +705,7 @@ class BaseModel(nn.Module):
                         "labels": rolled_sequences,
                         "position_ids": position_ids,
                         "seq_lens": seq_lens,
-                        "seq_lens_padded": seq_lens.new_full(seq_lens.shape, seqlen),
+                        "seq_lens_padded": seq_lens.new_full(seq_lens.shape, sequences.size(1)),
                         "qkv_format": "thd",
                     }
                 else:

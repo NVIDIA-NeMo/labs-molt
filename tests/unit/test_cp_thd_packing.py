@@ -37,10 +37,10 @@ import torch
 from molt.models.base import BaseModel
 
 
-def test_restore_cp_gathers_to_bs_no_unpack():
+def test_restore_cp_gathers_to_bs_and_drops_cp_pad():
     # Under cp>1 (padded [B,S] CP, for both round_robin and THD DSA) _restore just
-    # gathers back to [B,S] with fill=0.0 and never unpacks — regardless of packing_samples.
-    restored = torch.arange(6).view(2, 3).float()
+    # gathers and slices off the cp-multiple pad the forward added — never unpacks.
+    restored = torch.arange(8).view(2, 4).float()  # gathered with one pad column
     calls = {}
 
     def _gather(t, seq_dim=1, trim=False, fill=None):
@@ -54,7 +54,7 @@ def test_restore_cp_gathers_to_bs_no_unpack():
             stub, torch.zeros(2, 3), cp_forward=True, batch=2, seqlen=3, indices=None
         )
         assert calls == {"seq_dim": 1, "trim": True, "fill": 0.0}
-        assert out is restored  # gather returned [B,S]; no unpack under cp>1
+        assert torch.equal(out, restored[:, :3])  # [B,S] without the pad; no unpack under cp>1
 
 
 def test_restore_packing_cp1_scatters_to_bs():
