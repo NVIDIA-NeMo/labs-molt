@@ -691,7 +691,12 @@ class BaseModel(nn.Module):
                     sequences = F.pad(sequences, (0, pad))
                     rolled_sequences = F.pad(rolled_sequences, (0, pad))
                     attention_mask = F.pad(attention_mask, (0, pad))
-                    position_ids = F.pad(position_ids, (0, pad))
+                    if position_ids is not None:  # None for VLMs: the CP hook builds mRoPE
+                        position_ids = F.pad(position_ids, (0, pad))
+                    if routed_experts is not None:
+                        # R3 ids are sharded with this batch, so they pad with it. -1 means
+                        # "no captured routing", which keeps RouterReplay on the live choice.
+                        routed_experts = F.pad(routed_experts, (0, pad), value=-1)
 
                 # Padded [B,S] batch to the sharder — one layout for all CP models.
                 # round_robin (omni3/qwen3.6): sharder shards the aux streams, pads to
