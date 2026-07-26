@@ -46,7 +46,7 @@ def blending_datasets(
         assert len(probabilities) == len(datasets)
 
     data_list = []
-    for i, dataset in enumerate(datasets):
+    for dataset in datasets:
         dataset = dataset.strip()
         strategy.print(f"dataset: {dataset}")
 

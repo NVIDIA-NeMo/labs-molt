@@ -105,16 +105,16 @@ def train(args):
     num_update_steps_per_epoch = len(train_dataset) // args.train.batch_size
     max_steps = math.ceil(args.train.max_epochs * num_update_steps_per_epoch)
 
-    cfg = dict(
-        optim=args.optim,
-        muon=vars(args.muon),
-        adam=vars(args.adam),
-        lr_scheduler=args.lr_scheduler,
-        lr_warmup_ratio=args.lr_warmup_ratio,
-        min_lr_ratio=args.min_lr_ratio,
-        max_norm=args.max_norm,
-        scheduler_steps=max_steps,
-    )
+    cfg = {
+        "optim": args.optim,
+        "muon": vars(args.muon),
+        "adam": vars(args.adam),
+        "lr_scheduler": args.lr_scheduler,
+        "lr_warmup_ratio": args.lr_warmup_ratio,
+        "min_lr_ratio": args.min_lr_ratio,
+        "max_norm": args.max_norm,
+        "scheduler_steps": max_steps,
+    }
     model, optim, scheduler = strategy.prepare((model, cfg))
 
     consumed_samples = 0

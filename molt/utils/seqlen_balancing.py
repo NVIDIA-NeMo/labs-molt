@@ -117,7 +117,7 @@ def karmarkar_karp(seqlen_list: List[int], k_partitions: int, equal_size: bool):
     final_state = states_pq[0]
     partitions = final_state.get_partitions()
     if equal_size:
-        for i, partition in enumerate(partitions):
+        for partition in partitions:
             assert len(partition) * k_partitions == len(seqlen_list), (
                 f"{len(partition)} * {k_partitions} != {len(seqlen_list)}"
             )

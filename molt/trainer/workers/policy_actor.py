@@ -791,16 +791,16 @@ class PolicyModelActor(BaseModelActor):
             pretrain, actor.model, "left", use_fast=not strategy.args.data.disable_fast_tokenizer
         )
 
-        actor_cfg = dict(
-            optim=args.actor.optim,
-            muon=vars(args.actor.muon),
-            adam=vars(args.actor.adam),
-            lr_scheduler=args.actor.lr_scheduler,
-            lr_warmup_ratio=args.actor.lr_warmup_ratio,
-            min_lr_ratio=args.actor.min_lr_ratio,
-            max_norm=args.actor.max_norm,
-            scheduler_steps=max_steps,
-        )
+        actor_cfg = {
+            "optim": args.actor.optim,
+            "muon": vars(args.actor.muon),
+            "adam": vars(args.actor.adam),
+            "lr_scheduler": args.actor.lr_scheduler,
+            "lr_warmup_ratio": args.actor.lr_warmup_ratio,
+            "min_lr_ratio": args.actor.min_lr_ratio,
+            "max_norm": args.actor.max_norm,
+            "scheduler_steps": max_steps,
+        }
         self.actor, self.actor_optim, self.actor_scheduler = strategy.prepare((actor, actor_cfg))
 
         # load checkpoint

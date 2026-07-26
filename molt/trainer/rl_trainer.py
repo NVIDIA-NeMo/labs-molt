@@ -138,7 +138,7 @@ def compute_eval_metrics(eval_dataloader, samples_list, n_samples_per_prompt):
         return {}
 
     prompt_to_datasource = {}
-    for datasources, prompts, labels, _images, _tools in eval_dataloader:
+    for datasources, prompts, _labels, _images, _tools in eval_dataloader:
         for prompt, datasource in zip(prompts, datasources):
             if isinstance(prompt, list):
                 # Chat rows pass through as messages; key on the last user turn's text —
@@ -302,10 +302,7 @@ class BaseRLTrainer:
         # blob from shared memory and read sequences out — leaving heavy_ref set so the sample still
         # ships cheaply to its rank below; otherwise read the local tensor directly.
         first = experiences[0]
-        if first.heavy_ref is not None:
-            first_seq = ray.get(first.heavy_ref)["sequences"]
-        else:
-            first_seq = first.sequences
+        first_seq = ray.get(first.heavy_ref)["sequences"] if first.heavy_ref is not None else first.sequences
         sample0 = [
             self.tokenizer.decode(first_seq[0], skip_special_tokens=True),
             experiences[0].info["reward"][0].item(),

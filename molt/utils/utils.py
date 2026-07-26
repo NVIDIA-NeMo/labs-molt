@@ -102,5 +102,4 @@ def zero_pad_sequences(
         padded_sequences.append(F.pad(seq, padding, value=value))
     if stack:
         return torch.stack(padded_sequences, dim=0)
-    else:
-        return torch.cat(padded_sequences, dim=0)
+    return torch.cat(padded_sequences, dim=0)

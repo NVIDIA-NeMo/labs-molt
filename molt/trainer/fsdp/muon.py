@@ -122,12 +122,12 @@ def build_automodel_muon_optimizer(
     experts_to_muon = os.environ.get("MUON_EXPERTS_ADAMW", "") not in ("1", "true", "True")
     matrix, vector, embed, lm_head = _classify_params(model, experts_to_muon)
 
-    scalar_kwargs = dict(beta1=betas[0], beta2=betas[1], epsilon=eps)
+    scalar_kwargs = {"beta1": betas[0], "beta2": betas[1], "epsilon": eps}
     # Group 0 (matrix) has no explicit lr/wd/algorithm; it inherits lr=muon_lr,
     # weight_decay=muon_weight_decay, mu and algorithm="muon" from the Muon
     # constructor defaults.
     param_groups = [
-        dict(params=matrix),
+        {"params": matrix},
         dict(params=vector, algorithm="adamw", lr=adam_lr, weight_decay=adam_weight_decay, **scalar_kwargs),
         dict(params=embed, algorithm="adamw", lr=adam_lr, weight_decay=0.0, **scalar_kwargs),
     ]
@@ -138,14 +138,14 @@ def build_automodel_muon_optimizer(
         param_groups.append(dict(params=lm_head, algorithm="adamw", lr=lm_head_lr, weight_decay=0.0, **scalar_kwargs))
     param_groups = [g for g in param_groups if g["params"]]
 
-    kwargs = dict(
-        lr=muon_lr,
-        mu=muon_cfg["momentum"],
-        betas=betas,
-        weight_decay=muon_weight_decay,
-        epsilon=eps,
-        nesterov=muon_cfg["nesterov"],
-    )
+    kwargs = {
+        "lr": muon_lr,
+        "mu": muon_cfg["momentum"],
+        "betas": betas,
+        "weight_decay": muon_weight_decay,
+        "epsilon": eps,
+        "nesterov": muon_cfg["nesterov"],
+    }
     valid = inspect.signature(target).parameters
     if "distributed_mesh" in valid:
         # AutoModel knows how to pull the 1D dp_shard_cp submesh out of the full

@@ -94,11 +94,10 @@ def log_probs_from_logits(logits: torch.Tensor, labels: torch.Tensor, temperatur
     flat_logits = logits.reshape(-1, last_dim)
     flat_labels = labels.reshape(-1)
 
-    # Both paths divide by temperature at fp32 and never on a bf16 input: rounding the quotient back
-    # to bf16 costs ~1 ULP per logit on top of the logits' own quantization, and it made the result
-    # depend on whether the caller happened to hand us already-upcast logits (the entropy path does).
-    # Non-inplace: callers keep the tensor in `output["logits"]` for that path.
-
+    # Both paths below scale at fp32, never on a bf16 input: rounding the quotient back to bf16
+    # costs ~1 ULP per logit on top of the logits' own quantization. Non-inplace — callers keep
+    # the tensor in `output["logits"]` for the entropy path.
+    #
     # Fast path: fused triton CE kernel only supports fp32/fp64.
     # https://github.com/OpenRLHF/OpenRLHF/pull/718#issuecomment-2641081881
     if logits.dtype in [torch.float32, torch.float64]:
@@ -141,8 +140,7 @@ def masked_mean(tensor: torch.Tensor, mask: Optional[torch.Tensor], dim: int = N
 @torch.compile
 def compute_entropy(logits: torch.Tensor):
     pd = torch.nn.functional.softmax(logits, dim=-1)
-    entropy = torch.logsumexp(logits, dim=-1) - torch.sum(pd * logits, dim=-1)
-    return entropy
+    return torch.logsumexp(logits, dim=-1) - torch.sum(pd * logits, dim=-1)
 
 
 def split_moe_aux_loss(output, enabled: bool):
@@ -233,6 +231,6 @@ def attach_nemo_moe_aux_loss(output, model: nn.Module):
         output["aux_loss"] = aux_loss
         output["_molt_aux_loss_in_backward"] = True
     else:
-        setattr(output, "aux_loss", aux_loss)
-        setattr(output, "_molt_aux_loss_in_backward", True)
+        output.aux_loss = aux_loss
+        output._molt_aux_loss_in_backward = True
     return output

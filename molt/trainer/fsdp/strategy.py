@@ -396,9 +396,8 @@ class FsdpStrategy:
         **kwargs,
     ) -> None:
         unwrapped = self._unwrap_model(model)
-        if accumulate and self.accumulated_gradient > 1:
-            if kwargs.get("scale_loss_by_accumulation", True):
-                loss = loss / self.accumulated_gradient
+        if accumulate and self.accumulated_gradient > 1 and kwargs.get("scale_loss_by_accumulation", True):
+            loss = loss / self.accumulated_gradient
         # Context-parallel gradient: molt gathers per-token logprobs with the AutoModel
         # sharder's gather_token_tensor, whose differentiable all-gather SUMS the gradient
         # across CP (local grad = cp_size× the single replicated-loss grad — see AutoModel's

@@ -77,21 +77,18 @@ class NaiveReplayBuffer:
     def __len__(self) -> int:
         if self.dynamic_batch:
             return len(self.dynamic_indices)
-        else:
-            return len(self.items)
+        return len(self.items)
 
     def __getitem__(self, idx: int) -> Experience:
         if self.dynamic_batch:
             indices = self.dynamic_indices[idx]
             return [self.items[i] for i in indices]
-        else:
-            return self.items[idx]
+        return self.items[idx]
 
     def collate_fn(self, batch) -> Experience:
         if self.dynamic_batch:
             batch = batch[0]
-        experience = make_experience_batch(batch)
-        return experience
+        return make_experience_batch(batch)
 
     def setup_dynamic_batch(self, strategy):
         args = strategy.args

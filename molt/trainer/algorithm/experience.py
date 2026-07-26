@@ -249,7 +249,7 @@ def make_experience_batch(items: List[Experience]) -> Experience:
                 raise ValueError(f"Unsupported tensor field batching rule for {f.name}")
         elif isinstance(first, dict):
             kwargs[f.name] = {}
-            for key in first.keys():
+            for key in first:
                 vals = [getattr(item, f.name)[key] for item in items]
                 if not vals:
                     continue

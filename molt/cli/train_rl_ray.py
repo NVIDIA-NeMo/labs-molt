@@ -120,13 +120,13 @@ def train(args):
     from molt.trainer.rl_trainer import RLTrainer
 
     # Rollout sampling kwargs shared by the eval-only and training controllers.
-    gen_kwargs = dict(
-        do_sample=True,
-        max_len=max_len,
-        max_new_tokens=args.rollout.max_new_tokens,
-        temperature=args.rollout.temperature,
-        top_p=args.rollout.top_p,
-    )
+    gen_kwargs = {
+        "do_sample": True,
+        "max_len": max_len,
+        "max_new_tokens": args.rollout.max_new_tokens,
+        "temperature": args.rollout.temperature,
+        "top_p": args.rollout.top_p,
+    }
 
     # Eval-only: score --eval.dataset once and exit, with NO training. vLLM already holds the HF
     # weights, so passing None actors keeps the whole training side unbuilt inside RLTrainer — the

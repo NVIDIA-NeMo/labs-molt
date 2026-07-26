@@ -42,10 +42,7 @@ def gather_full_param(param: torch.Tensor, dtype: Optional[torch.dtype] = None) 
     weight refit (one-shot per training step). For very large models the async RL
     path uses per-tensor streaming with a ping-pong buffer to bound peak memory.
     """
-    if isinstance(param, DTensor):
-        full = param.full_tensor()
-    else:
-        full = param.data
+    full = param.full_tensor() if isinstance(param, DTensor) else param.data
     if dtype is not None and full.is_floating_point():
         full = full.to(dtype=dtype)
     return full, full.shape

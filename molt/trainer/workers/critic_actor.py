@@ -286,16 +286,16 @@ class CriticModelActor(BaseModelActor):
         # Independent critic optimizer / scheduler / grad-clip — the full --critic.*
         # group (add_optimizer_args(prefix="critic.")), so the value model can use its
         # own optimizer kind and LR (PPO critics often want a higher LR than the policy).
-        critic_cfg = dict(
-            optim=args.critic.optim,
-            muon=vars(args.critic.muon),
-            adam=vars(args.critic.adam),
-            lr_scheduler=args.critic.lr_scheduler,
-            lr_warmup_ratio=args.critic.lr_warmup_ratio,
-            min_lr_ratio=args.critic.min_lr_ratio,
-            max_norm=args.critic.max_norm,
-            scheduler_steps=max_steps,
-        )
+        critic_cfg = {
+            "optim": args.critic.optim,
+            "muon": vars(args.critic.muon),
+            "adam": vars(args.critic.adam),
+            "lr_scheduler": args.critic.lr_scheduler,
+            "lr_warmup_ratio": args.critic.lr_warmup_ratio,
+            "min_lr_ratio": args.critic.min_lr_ratio,
+            "max_norm": args.critic.max_norm,
+            "scheduler_steps": max_steps,
+        }
         self.critic, self.critic_optim, self.critic_scheduler = strategy.prepare((critic, critic_cfg))
 
         self.checkpoint_states = {}

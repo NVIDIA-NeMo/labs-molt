@@ -217,11 +217,10 @@ class RolloutRayActor:
         ``metas`` is a list of ``(name, dtype, shape)``. Producer (rank 0 in the
         trainer) cats matching tensors into one buffer in the same order.
         """
-        result = await self.llm.collective_rpc(
+        return await self.llm.collective_rpc(
             "update_weights_packed",
             args=(metas,),
         )
-        return result
 
     async def reset_weight_update_check(self):
         await self.llm.collective_rpc("reset_weight_update_check")

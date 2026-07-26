@@ -316,11 +316,9 @@ class SFTTrainer:
                 for k, v in logs_dict.items():
                     self._tensorboard.add_scalar(f"train/{k}", v, global_step)
 
-        # eval
-        if global_step % args.eval.steps == 0:
-            # do eval when eval_dataloader is not None and len(dataloader) > 0, avoid zero division in eval.
-            if self.eval_dataloader is not None and len(self.eval_dataloader) > 0:
-                self.evaluate(self.eval_dataloader, global_step)
+        # eval — an empty eval_dataloader would zero-divide inside evaluate()
+        if global_step % args.eval.steps == 0 and self.eval_dataloader is not None and len(self.eval_dataloader) > 0:
+            self.evaluate(self.eval_dataloader, global_step)
 
         # save ckpt
         # TODO: save best model on dev, use loss/perplexity on whole dev dataset as metric
