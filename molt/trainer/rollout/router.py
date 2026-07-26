@@ -234,8 +234,8 @@ class RouterGenerateClient:
         Retries transient failures with linear backoff — a 5xx or a refused/dropped connection while
         the router or an engine is still warming up (its port binds before its workers pass health
         checks) or is briefly overloaded — so a hiccup costs a retry, not a dropped rollout (vime/slime
-        retry the same way). A 4xx is a real client bug and a read timeout is a wedged engine (caught by
-        the session's ``sock_read``): both fail fast rather than burn the retry budget."""
+        retry the same way). A 4xx is a real client bug, so it fails fast rather than burn the retry
+        budget. The session sets no read timeout, so a slow generation never lands here at all."""
         headers = {"x-session-id": session_id} if session_id else None
         body = {"model": self.model_name, **payload}
         for attempt in range(retries):
@@ -322,14 +322,16 @@ class AgentRunnerActor:
         # VLM image placeholder id (from the HF processor) — the transport uses it to align render's
         # mm features onto our canonical prompt's image-token run (see _align_features_to_canonical).
         image_token_id = getattr(self._tokenizer, "image_token_id", None)
-        # total=None: a single long-context / multi-turn generation can run many minutes (aiohttp's
-        # 300s default would silently drop 32K rollouts). sock_read=900 still catches a HUNG engine
-        # (stream stalls, no bytes for 15 min) so one wedged request can't hang the whole step; a
-        # crashed engine fails fast via a connection error. limit=0: don't cap concurrency to the
-        # engine fleet at aiohttp's default of 100 connections.
+        # No timeout at all. /inference/v1/generate is non-streaming, so the engine sends nothing
+        # until the turn is fully generated: to the client "still generating" and "wedged" are the
+        # same silence, and any finite read timeout eventually kills the former. A slow turn then
+        # gets resent and re-runs from token 0, hitting the same wall — the retry can never
+        # succeed. slime takes the same position (httpx.Timeout(None) on its rollout client).
+        # A crashed engine still surfaces immediately as a connection error, which _post retries.
+        # limit=0: don't cap concurrency to the engine fleet at aiohttp's default of 100.
         self._http = aiohttp.ClientSession(
             base_url=router_url,
-            timeout=aiohttp.ClientTimeout(total=None, sock_read=900),
+            timeout=aiohttp.ClientTimeout(total=None),
             connector=aiohttp.TCPConnector(limit=0),
         )
         self._client = RouterGenerateClient(self._http, model_name=model_name, image_token_id=image_token_id)
