@@ -71,6 +71,21 @@ def should_expand_image_placeholder(tokenizer) -> bool:
     return getattr(tokenizer, "image_token", "<image>") != "<image>"
 
 
+def media_token_ids(processor) -> set:
+    """Image/video placeholder token ids, resolved in ONE place.
+
+    A family that has no such token still answers, resolving it to ``<unk>``/``<pad>``
+    rather than omitting it — an image-only checkpoint reports its video token as the unk
+    id. Keeping that would make the truncation guard read ordinary ``<unk>`` text in a cut
+    tail as a dropped image and throw the rollout away, so drop those.
+    """
+    objs = (processor, getattr(processor, "tokenizer", None))
+    attrs = ("image_token_id", "video_token_id", "img_context_token_id", "video_context_token_id")
+    ids = {getattr(obj, attr, None) for obj in objs for attr in attrs}
+    ids -= {getattr(obj, attr, None) for obj in objs for attr in ("unk_token_id", "pad_token_id")}
+    return {tid for tid in ids if isinstance(tid, int)}
+
+
 def _pad_to_common_hw(tensors: List[torch.Tensor]) -> List[torch.Tensor]:
     """Right/bottom-pad a list of tensors so they share a common (H, W).
 
@@ -191,14 +206,7 @@ def estimate_vllm_input_expansion_delta(
         # needing per-model tuning.
         return 1024 * len(pil_images)
 
-    media_ids = set()
-    for obj in (processor, getattr(processor, "tokenizer", None)):
-        if obj is None:
-            continue
-        for attr in ("image_token_id", "video_token_id", "img_context_token_id"):
-            tid = getattr(obj, attr, None)
-            if tid is not None:
-                media_ids.add(int(tid))
+    media_ids = media_token_ids(processor)
     existing = sum(1 for tid in token_ids if int(tid) in media_ids) if media_ids else 0
     return max(0, grid_total - existing)
 

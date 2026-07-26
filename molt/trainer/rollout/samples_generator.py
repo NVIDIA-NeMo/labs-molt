@@ -454,19 +454,6 @@ class SamplesGenerator:
         return refs
 
     @staticmethod
-    def _media_token_ids(tokenizer) -> set:
-        """Image/video placeholder token ids from the tokenizer/processor."""
-        ids: set = set()
-        for obj in (tokenizer, getattr(tokenizer, "tokenizer", None)):
-            if obj is None:
-                continue
-            for attr in ("image_token_id", "video_token_id", "img_context_token_id", "video_context_token_id"):
-                tid = getattr(obj, attr, None)
-                if isinstance(tid, int):
-                    ids.add(tid)
-        return ids
-
-    @staticmethod
     def _process_response_into_experience(
         response, media_ids, truncate_length
     ) -> Tuple[Optional[Experience], Optional[str]]:

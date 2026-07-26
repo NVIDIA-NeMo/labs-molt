@@ -311,14 +311,14 @@ class AgentRunnerActor:
         import aiohttp
 
         from molt.agents.base import load_agent_runner  # lazy: router.py is imported by _chat_server
-        from molt.trainer.rollout.samples_generator import SamplesGenerator
         from molt.utils import get_tokenizer
+        from molt.utils.vlm_utils import media_token_ids
 
         self._runner = load_agent_runner(agent_path)
         self._tokenizer = get_tokenizer(model_path, None) if model_path else None
         # Image/video placeholder ids, cached once — _process_response_into_experience uses them to
         # detect an image dropped by max_len truncation (vit-embed misalignment) and count tokens.
-        self._media_ids = SamplesGenerator._media_token_ids(self._tokenizer) if self._tokenizer else set()
+        self._media_ids = media_token_ids(self._tokenizer) if self._tokenizer else set()
         # VLM image placeholder id (from the HF processor) — the transport uses it to align render's
         # mm features onto our canonical prompt's image-token run (see _align_features_to_canonical).
         image_token_id = getattr(self._tokenizer, "image_token_id", None)

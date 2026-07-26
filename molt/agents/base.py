@@ -430,6 +430,7 @@ def _tokenize_feedback(hf_tokenizer, feedback_text: str, new_images, trajectory:
         from molt.utils.vlm_utils import (
             accumulate_mm_inputs,
             estimate_vllm_input_expansion_delta,
+            media_token_ids,
             process_prompt_with_images,
         )
 
@@ -443,8 +444,9 @@ def _tokenize_feedback(hf_tokenizer, feedback_text: str, new_images, trajectory:
             trajectory.mm_train_inputs = accumulate_mm_inputs(trajectory.mm_train_inputs, new_mm)
             trajectory.image_budget += new_budget
             return tokens
-        # Overflow — drop images and strip their placeholder ids so vLLM
-        # does not try to expand them.
-        pad_ids = {getattr(hf_tokenizer, a, None) for a in ("image_token_id", "video_token_id")} - {None}
+        # Overflow — drop images and strip their placeholder ids so vLLM does not try to expand them.
+        # Same resolver the truncation guard uses: a placeholder this misses has no pixel_values
+        # under it and misaligns the actor's vit-embed scatter.
+        pad_ids = media_token_ids(hf_tokenizer)
         return [t for t in tokens if t not in pad_ids]
     return hf_tokenizer(text=feedback_text, add_special_tokens=False, return_tensors="pt")["input_ids"][0].tolist()
