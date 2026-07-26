@@ -13,15 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""`--train.check_weight_update_equal` verifies the refit by VALUE (vllm_worker_wrap).
+"""`--train.check_weight_update_equal` asks whether vLLM holds the trainer's weights.
 
-Name-based coverage cannot work across models: which names ``load_weights`` reports is
-model-specific, so a diff against them flags in-sync weights as stale. Diffing the params'
-values before and after the broadcast asks the only question that matters — did the engine
-actually receive the new weights.
+Names cannot be compared across the two sides — vLLM concatenates gate_proj|up_proj into
+w13_weight, fuses q|k|v, rewrites prefixes and shards params over its workers. None of that
+changes the multiset of values, so per-layer energy (sum of squares) is equal on both sides
+exactly when the engine holds what was sent, whatever the update's magnitude.
 """
 
-import re
 import types
 
 import torch
@@ -37,52 +36,41 @@ def _worker(params):
     return worker
 
 
-def test_reports_only_the_params_the_broadcast_did_not_move():
-    params = {"layers.0.w": torch.zeros(2), "layers.1.w": torch.zeros(2)}
-    worker = _worker(params)
-    worker.reset_weight_update_check()
-    params["layers.0.w"] = torch.ones(2)
-    assert worker.weight_update_missing() == (["layers.1.w"], 2)
+def test_energy_is_summed_per_decoder_layer():
+    worker = _worker(
+        {
+            "model.layers.0.self_attn.qkv_proj.weight": torch.tensor([3.0, 4.0]),  # 25
+            "model.layers.0.mlp.experts.w13_weight": torch.tensor([1.0]),  # 1
+            "model.layers.1.self_attn.qkv_proj.weight": torch.tensor([2.0]),  # 4
+        }
+    )
+    assert worker.weight_energy_by_layer() == {0: 26.0, 1: 4.0}
 
 
-def test_a_fully_dropped_broadcast_shows_every_param_unchanged():
-    worker = _worker({"layers.0.w": torch.zeros(2), "layers.1.w": torch.zeros(2)})
-    worker.reset_weight_update_check()
-    assert worker.weight_update_missing() == (["layers.0.w", "layers.1.w"], 2)
+def test_params_outside_the_decoder_stack_group_under_minus_one():
+    worker = _worker({"model.embed_tokens.weight": torch.tensor([2.0]), "model.layers.3.w": torch.tensor([1.0])})
+    assert worker.weight_energy_by_layer() == {-1: 4.0, 3: 1.0}
 
 
-def test_a_sign_flipping_update_is_not_missed():
-    """Sum would cancel here; sum of squares must not."""
-    params = {"layers.0.w": torch.tensor([1.0, -1.0])}
-    worker = _worker(params)
-    worker.reset_weight_update_check()
-    params["layers.0.w"] = torch.tensor([2.0, -2.0])
-    assert worker.weight_update_missing() == ([], 1)
+def test_fusing_two_weights_into_one_preserves_the_layer_energy():
+    """gate_proj|up_proj -> w13_weight is a concatenation, so the sender and the engine agree."""
+    sender = _worker(
+        {
+            "model.layers.0.mlp.gate_proj.weight": torch.tensor([3.0]),
+            "model.layers.0.mlp.up_proj.weight": torch.tensor([4.0]),
+        }
+    )
+    engine = _worker({"model.layers.0.mlp.w13_weight": torch.tensor([3.0, 4.0])})
+    assert sender.weight_energy_by_layer() == engine.weight_energy_by_layer()
 
 
-def _never_refreshed(unchanged_per_broadcast):
-    """The trainer's accumulation: kinds unchanged in EVERY broadcast so far."""
-    residue = None
-    for unchanged in unchanged_per_broadcast:
-        kinds = {re.sub(r"\.\d+\.", ".*.", name) for name in unchanged}
-        residue = kinds if residue is None else residue & kinds
-    return residue
+def test_a_layer_the_engine_never_received_shows_up_as_energy_drift():
+    """Even an update too small for the weight's dtype to move leaves the energies unequal."""
+    sent = _worker({"model.layers.0.w": torch.tensor([1.001, 2.0])}).weight_energy_by_layer()
+    held = _worker({"model.layers.0.w": torch.tensor([1.0, 2.0])}).weight_energy_by_layer()
+    assert abs(sent[0] - held[0]) / held[0] > 1e-4
 
 
-def test_a_weight_too_small_to_move_every_step_drops_out_of_the_residue():
-    """An RL step can round to the same bf16 value, so one broadcast proves nothing."""
-    attn = "model.layers.0.self_attn.qkv_proj.weight"
-    expert = "model.layers.0.mlp.experts.w13_weight"
-    # attn misses two broadcasts but moves on the third; the expert never moves.
-    residue = _never_refreshed([[attn, expert], [attn, expert], [expert]])
-    assert residue == {"model.layers.*.mlp.experts.w13_weight"}
-
-
-def test_one_kind_missed_across_every_layer_collapses_to_one_entry():
-    """The shape a name-format break makes: every layer's experts stale, the rest fine."""
-    unchanged = [f"model.layers.{i}.mlp.experts.w13_weight" for i in range(40)]
-    assert _never_refreshed([unchanged]) == {"model.layers.*.mlp.experts.w13_weight"}
-
-
-def test_check_off_reports_nothing():
-    assert _worker({"a": torch.zeros(2)}).weight_update_missing() is None
+def test_non_float_params_are_skipped():
+    worker = _worker({"model.layers.0.w": torch.tensor([2.0]), "model.layers.0.idx": torch.tensor([7])})
+    assert worker.weight_energy_by_layer() == {0: 4.0}

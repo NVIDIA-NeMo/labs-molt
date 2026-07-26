@@ -602,10 +602,10 @@ class PolicyTrainer:
         # still call `gather_full_param` (an FSDP collective) but drop the
         # gathered tensor immediately — no point staging the batch on every rank.
         is_rank0 = torch.distributed.get_rank() == 0
-        # --train.check_weight_update_equal: rank 0 arms the check, evaluated after the last flush.
+        # --train.check_weight_update_equal: rank 0 sums the energy of what it sends per layer,
+        # and compares it with the engine's after the last flush.
         check_weight_update = is_rank0 and getattr(self.strategy.args.train, "check_weight_update_equal", False)
-        if check_weight_update:
-            ray.get([engine.reset_weight_update_check.remote() for engine in self.vllm_engines])
+        sent_energy: dict[int, float] = {}
         # 512 MiB flushes, matching slime's `--update-weight-buffer-size` default
         # (512 * 1024**2). vLLM runs at high gpu_memory_utilization (~0.9-0.95) with
         # little free VRAM, and the receiver allocates a contiguous
@@ -710,29 +710,31 @@ class PolicyTrainer:
                 pending_metas.append((hf_name, hf_weight.dtype, tuple(hf_weight.shape)))
                 pending_tensors.append(hf_weight)
                 pending_bytes += nbytes
+                if check_weight_update:
+                    match = re.search(r"layers\.(\d+)", hf_name)
+                    layer = int(match.group(1)) if match else -1
+                    sent_energy[layer] = sent_energy.get(layer, 0.0) + float(hf_weight.float().square().sum())
             del weight
 
         if is_rank0:
             _flush()
 
         if check_weight_update:
-            reports = [r for r in ray.get([e.weight_update_missing.remote() for e in self.vllm_engines]) if r]
-            unchanged = sorted({name for names, _ in reports for name in names})
-            total = max((count for _, count in reports), default=0)
-            broadcasts = getattr(self, "_weight_update_broadcasts", 0) + 1
-            self._weight_update_broadcasts = broadcasts
-            # An RL step is small enough that a weight can arrive and still round to the same
-            # bf16 value, so a single broadcast cannot tell "not received" from "received but
-            # below the dtype's resolution". Accumulate instead: a weight that is really being
-            # refreshed moves in SOME broadcast, while one that never arrives is unchanged in
-            # every one. Indices are normalised out of the name so the residue names the shape
-            # of the miss — one kind of weight across every layer, or one whole layer.
-            kinds = {re.sub(r"\.\d+\.", ".*.", name) for name in unchanged}
-            self._never_refreshed = kinds if broadcasts == 1 else self._never_refreshed & kinds
-            logger.info(
-                f"[check_weight_update] {total - len(unchanged)}/{total} vLLM params changed value; "
-                f"{len(self._never_refreshed)} weight kinds unchanged in all {broadcasts} broadcasts: "
-                f"{sorted(self._never_refreshed)[:6]}"
+            # Does the engine hold the weights we just sent? Compare energy per layer: the
+            # engines are replicas, so one answers for all. This asks about equality, not
+            # about change — an update too small to move a bf16 weight cannot fool it, and a
+            # layer the engine never received drifts further from the trainer every step.
+            held = ray.get(self.vllm_engines[0].weight_energy_by_layer.remote())
+            drift = {
+                layer: abs(energy - held[layer]) / max(held[layer], 1e-9)
+                for layer, energy in sent_energy.items()
+                if layer in held
+            }
+            worst = max(drift.items(), key=lambda item: item[1], default=(None, 0.0))
+            log = logger.warning if worst[1] > 1e-4 else logger.info
+            log(
+                f"[check_weight_update] trainer vs vLLM weight energy over {len(drift)} layers: "
+                f"max relative difference {worst[1]:.2e} at layer {worst[0]}"
             )
 
         torch.cuda.empty_cache()

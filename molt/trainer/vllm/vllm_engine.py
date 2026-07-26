@@ -223,17 +223,14 @@ class RolloutRayActor:
         )
         return result
 
-    async def reset_weight_update_check(self):
-        await self.llm.collective_rpc("reset_weight_update_check")
-
-    async def weight_update_missing(self):
-        # Weights are TP/EP-sharded, so a param counts as refreshed once ANY worker holding
-        # a shard of it moved — intersect the per-worker unchanged sets. None = not armed.
-        results = [r for r in await self.llm.collective_rpc("weight_update_missing") if r is not None]
-        if not results:
-            return None
-        unchanged = set.intersection(*(set(names) for names, _ in results))
-        return sorted(unchanged), max(total for _, total in results)
+    async def weight_energy_by_layer(self):
+        # Sum the workers' per-layer energy: TP and EP give each worker a disjoint slice of
+        # this engine's weights, so the total over the engine is the whole model.
+        merged: dict[int, float] = {}
+        for energy in await self.llm.collective_rpc("weight_energy_by_layer"):
+            for layer, value in energy.items():
+                merged[layer] = merged.get(layer, 0.0) + value
+        return merged
 
     async def pause_generation(self):
         await self.llm.pause_generation(mode="keep")

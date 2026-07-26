@@ -91,40 +91,26 @@ class WorkerWrap:
             )
         del buf
 
-    def _float_param_values(self):
-        """One cheap value fingerprint per float param, keyed by vLLM-internal name.
+    def weight_energy_by_layer(self):
+        """This worker's float-param energy (sum of squares) per decoder layer.
 
-        The refit is verified by VALUE, not by name: which names ``load_weights`` claims is
-        model-specific (some report none, some report the fused param rather than the key we
-        sent), and diffing those names produced false "stale weight" alarms on models whose
-        rollout was provably in sync.
-
-        Sum of SQUARES, not sum: a plain sum hides an update whose positive and negative
-        deltas cancel, which is exactly what a small optimizer step on a large embedding
-        looks like.
+        Energy is what makes the trainer's weights and the engine's comparable at all: vLLM
+        concatenates (gate_proj|up_proj -> w13_weight, q|k|v -> qkv_proj) and shards params
+        across TP/EP workers, and neither transform changes the multiset of values — so the
+        per-layer total is identical on both sides iff the engine holds the weights that were
+        sent. Names cannot be compared; these numbers can. Layer -1 holds everything outside
+        the decoder stack.
         """
+        import re
+
         import torch
 
+        energy: dict[int, float] = {}
         with torch.no_grad():
-            return {
-                name: float(param.detach().float().square().sum())
-                for name, param in self.model_runner.model.named_parameters()
-                if param.is_floating_point()
-            }
-
-    def reset_weight_update_check(self):
-        """Record this worker's weights so the next broadcast can be diffed against them."""
-        self._weight_update_before = self._float_param_values()
-
-    def weight_update_missing(self):
-        """Names of the float params the last broadcast left untouched, and how many exist.
-
-        ``None`` when the check was never armed. The names are this worker's own (vLLM-internal)
-        — they are never diffed against the names we sent, only grouped, so vLLM's fusing and
-        prefix rewriting does not matter.
-        """
-        before, self._weight_update_before = getattr(self, "_weight_update_before", None), None
-        if before is None:
-            return None
-        after = self._float_param_values()
-        return sorted(name for name, value in after.items() if before.get(name) == value), len(after)
+            for name, param in self.model_runner.model.named_parameters():
+                if not param.is_floating_point():
+                    continue
+                match = re.search(r"layers\.(\d+)", name)
+                layer = int(match.group(1)) if match else -1
+                energy[layer] = energy.get(layer, 0.0) + float(param.detach().float().square().sum())
+        return energy
