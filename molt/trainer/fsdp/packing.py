@@ -229,7 +229,10 @@ def log_probs_from_vocab_parallel_logits(
         vocab_end = vocab_start + int(shard_sizes[tp_rank].item())
 
     if temperature != 1.0:
-        local_logits = local_logits / temperature
+        # fp32 before the divide, same contract as log_probs_from_logits: rounding the quotient back
+        # to bf16 costs ~1 ULP per logit on top of the logits' own quantization. The log-softmax
+        # below upcasts anyway, so this only moves the cast earlier; autograd casts the grad back.
+        local_logits = local_logits.float() / temperature
     if inference_only is None:
         inference_only = not torch.is_grad_enabled()
     return _DistributedLogProb.apply(local_logits, target, vocab_start, vocab_end, tp_group, inference_only)
