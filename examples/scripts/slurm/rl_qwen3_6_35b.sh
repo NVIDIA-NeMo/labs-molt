@@ -84,6 +84,10 @@ export EVAL_N_SAMPLES_PER_PROMPT="${EVAL_N_SAMPLES_PER_PROMPT:-1}"
 # Per-turn generation cap. With multi-turn rollouts (max_turns × max_new_tokens
 # accumulates across turns within MAX_LENGTH), keep this large enough that turn-1
 # rarely truncates — observed truncated_rate ≈ 60% with 2048, ≈ 20% with 4096.
+# Unset by default (a turn is then bounded only by the REMAINING context, so it can ask for
+# ~MAX_LENGTH tokens); set it when a straggler decoding alone in the rollout tail generates
+# long enough to outlive the transport's read timeout.
+export MAX_NEW_TOKENS="${MAX_NEW_TOKENS-}"
 
 # Stable SAVE_ROOT (no $SLURM_JOB_ID) so resubmits can resume via LOAD_ENABLE=1.
 export SAVE_ROOT="${SAVE_ROOT:-$REPO_ROOT/outputs/async-visual-rl-qwen3-6/run}"
@@ -374,6 +378,7 @@ RL_ARGS=(
   --rollout.vllm_generate_batch_size "$ROLLOUT_GENERATE_BATCH_SIZE"
   --rollout.micro_batch_size 1
   --rollout.n_samples_per_prompt "$N_SAMPLES_PER_PROMPT"
+  ${MAX_NEW_TOKENS:+--rollout.max_new_tokens=$MAX_NEW_TOKENS}
   --rollout.temperature "$TEMPERATURE"
   --rollout.top_p "${TOP_P:-1.0}"
   --train.batch_size "$TRAIN_BATCH_SIZE"
