@@ -34,22 +34,20 @@ export MOLT_PATH="$REPO_ROOT"
 # GLM-5.2 (model_type=glm_moe_dsa, GlmMoeDsaForCausalLM): ~750B MLA+DSA MoE
 # (DeepSeek-V3.2-style sparse attention). 78 layers, 256 routed experts, MTP 1.
 # AutoModel custom MoE asserts TP=1. 36-node split: 32 actor/ref nodes (256 GPUs,
-# EP256) + 4 vLLM rollout nodes (32 GPUs). GLM-5.2 does not support context
-# parallelism here, so CP=1 (no tilelang-CP activation sharding).
+# EP256) + 4 vLLM rollout nodes (32 GPUs).
 export MODEL_PATH="${MODEL_PATH:-/path/to/models/GLM-5.2}"
-# TP MUST be 1 (custom MoE parallelizer). EP=256 = full non-PP world (dp256*cp1*tp1=256);
+# TP MUST be 1 (custom MoE parallelizer). EP=256 = full non-PP world (dp16*cp16*tp1=256);
 # 256 experts / 256 = 1 expert/rank.
 export TP_SIZE="${TP_SIZE:-1}"
 export EP_SIZE="${EP_SIZE:-256}"
 # Activation checkpointing ON (safe under the hybridep MoE dispatcher; deterministic
 # recompute).
 export GRAD_CHECKPOINT="${GRAD_CHECKPOINT-full}"
-# CP=1: GLM-5.2 does not support context parallelism here (no tilelang-CP path).
-#  * dp = world 256 / cp1 = 256, so train.batch_size must be >= dp=256 (see below).
-#  * Without CP the 16K activations are NOT sharded per rank; memory relies on
-#    activation checkpointing + adam offload and is UNTESTED at this scale —
-#    lower MAX_LENGTH if it OOMs.
-export CP_SIZE="${CP_SIZE:-1}"
+# CP=16 (DSA is THD-native: the model-owned sharder flattens [B,S] and contiguous-shards
+# from seq_lens). It also sets the DP width: dp = world 256 / cp16 = 16, and a rollout
+# batch must supply at least one sample per DP group. At cp1 dp would be 256 while
+# ROLLOUT_BATCH_SIZE * N_SAMPLES is 64, which balance_experiences rejects outright.
+export CP_SIZE="${CP_SIZE:-16}"
 export MAX_LENGTH="${MAX_LENGTH:-16384}"
 # Adam optimizer offload (fp32 master + Adam moments on CPU during the step).
 # Essential to fit the ~750B optimizer state off-GPU without PP.
@@ -74,7 +72,7 @@ export MOLT_MOE_DISPATCHER="${MOLT_MOE_DISPATCHER:-torch}"
 # 50-step stability/correctness smoke. max_steps =
 # len(dataset)//rollout_batch * num_episodes = 50//1 * 1 = 50.
 export LR="${LR:-2e-6}"
-# dp=256 (cp1), so train.batch_size must be >= 256 = rollout_batch 32 x n_samples 8.
+# dp = 256/cp16 = 16, so both train.batch_size and rollout_batch x n_samples must be >= 16.
 export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-64}"
 export ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-8}"
 export N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-8}"
@@ -228,9 +226,9 @@ VLLM_ENABLE_EXPERT_PARALLEL="${VLLM_ENABLE_EXPERT_PARALLEL:-1}"
 ACTOR_GPUS_PER_NODE="${ACTOR_GPUS_PER_NODE:-8}"
 # TP_SIZE / EP_SIZE / CP_SIZE / FSDP_ATTN_IMPLEMENTATION / ACTOR_NODES /
 # FREEZE_VISUAL_ENCODER are the model-specific values set at the top of this file
-# (TP=1, EP=64, CP=16, attn=te, 8 actor nodes). TP=1 is mandatory (the custom MoE
-# parallelizer asserts it); CP=16 uses the te-native CP path — cp is the innermost
-# mesh axis, so the CP group spans two adjacent nodes.
+# (TP=1, EP=256, CP=16, attn=tilelang, 32 actor nodes). TP=1 is mandatory (the custom
+# MoE parallelizer asserts it); cp is the innermost mesh axis, so the CP group spans
+# two adjacent nodes.
 # Router NOT frozen: R3 (routing_replay) already keeps rollout/train routing
 # consistent by replaying the top-k SELECTION, while the router logits stay live
 # so the gradient keeps flowing (the router keeps learning). Freezing is the
