@@ -57,9 +57,9 @@ export FSDP_ATTN_IMPLEMENTATION="${FSDP_ATTN_IMPLEMENTATION:-te}"
 # on one 8-GPU actor node: CP=1 fits ~16K, 32K needs CP8.
 export MAX_LENGTH="${MAX_LENGTH:-32000}"
 export MAX_NEW_TOKENS="${MAX_NEW_TOKENS-}"
-export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-512}"
-export ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-64}"
-export ROLLOUT_GENERATE_BATCH_SIZE="${ROLLOUT_GENERATE_BATCH_SIZE:-64}"  # = ROLLOUT_BATCH_SIZE: dispatch all prompts in one vLLM batch
+export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-64}"
+export ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-8}"
+export ROLLOUT_GENERATE_BATCH_SIZE="${ROLLOUT_GENERATE_BATCH_SIZE:-8}"  # = ROLLOUT_BATCH_SIZE: dispatch all prompts in one vLLM batch
 export N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-8}"
 export NUM_EPISODES="${NUM_EPISODES:-5}"   # >=5 so RL doesn't cap at ~33 steps
 export ASYNC_QUEUE_SIZE="${ASYNC_QUEUE_SIZE:-1}"
@@ -75,9 +75,10 @@ export LR="${LR:-1e-5}"
 export SAVE_STEPS="${SAVE_STEPS:-2}"
 export EVAL_STEPS="${EVAL_STEPS:-10}"
 export EVAL_N_SAMPLES_PER_PROMPT="${EVAL_N_SAMPLES_PER_PROMPT:-1}"
-# Baseline eval at step 0 (pre-RL model) on fresh runs, so pass1 gains are
-# attributable. No-op on resume (global_step starts > 0). Set EVAL_AT_START=0 to skip.
-export EVAL_AT_START="${EVAL_AT_START:-1}"
+# Off by default: a step-0 baseline eval holds the rollout engines for the whole
+# eval set before the first training step, which reads as a stalled run. Set
+# EVAL_AT_START=1 when the pre-RL pass1 number is worth that wait.
+export EVAL_AT_START="${EVAL_AT_START:-0}"
 export ENABLE_DYNAMIC_FILTERING="${ENABLE_DYNAMIC_FILTERING:-0}"
 
 # --- Dataset: geo3k in <answer>...</answer> format --------------------------

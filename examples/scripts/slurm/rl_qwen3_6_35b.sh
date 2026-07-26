@@ -57,8 +57,8 @@ export MAX_LENGTH="${MAX_LENGTH:-32768}"
 # offload (FSDP_CPU_OFFLOAD) hits Qwen3.5-MoE upstream device-mismatch bugs.
 export OFFLOAD_OPTIMIZER="${OFFLOAD_OPTIMIZER:-0}"
 export FSDP_CPU_OFFLOAD="${FSDP_CPU_OFFLOAD:-0}"
-export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-512}"
-export ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-64}"
+export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-64}"
+export ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-8}"
 export N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-8}"
 export ASYNC_QUEUE_SIZE="${ASYNC_QUEUE_SIZE:-1}"
 # 0.85, not vLLM's 0.95 default: with the unlimited per-turn token budget this
@@ -192,9 +192,10 @@ MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-1}"
 # Pure async + partial rollout: queue depth >= 2 so train overlaps next rollout.
 ASYNC_QUEUE_SIZE="${ASYNC_QUEUE_SIZE:-1}"
 MAX_IMAGES_PER_PROMPT="${MAX_IMAGES_PER_PROMPT:-1}"
-# vLLM rollout side: dedicated full node, TP+EP hybrid for MoE.
-VLLM_NUM_ENGINES="${VLLM_NUM_ENGINES:-1}"
-VLLM_TP_SIZE="${VLLM_TP_SIZE:-8}"
+# vLLM rollout side: dedicated full node, TP+EP hybrid for MoE. TP2 x 4 engines
+# beats TP8 x 1 here — more concurrent sequences, and a 35B MoE fits at TP2.
+VLLM_NUM_ENGINES="${VLLM_NUM_ENGINES:-4}"
+VLLM_TP_SIZE="${VLLM_TP_SIZE:-2}"
 # Rollout data parallelism. vLLM has no standalone EP size (EP = TP * DP), so set
 # DP>1 to decouple EP from TP (e.g. TP4 + DP2 -> EP8 on one 8-GPU node). DP>1
 # requires the ray executor. Default 1 = unchanged.

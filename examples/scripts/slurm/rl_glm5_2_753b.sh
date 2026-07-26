@@ -75,8 +75,8 @@ export MOLT_MOE_DISPATCHER="${MOLT_MOE_DISPATCHER:-torch}"
 # len(dataset)//rollout_batch * num_episodes = 50//1 * 1 = 50.
 export LR="${LR:-2e-6}"
 # dp=256 (cp1), so train.batch_size must be >= 256 = rollout_batch 32 x n_samples 8.
-export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-256}"
-export ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-32}"
+export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-64}"
+export ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-8}"
 export N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-8}"
 export MAX_SAMPLES="${MAX_SAMPLES:-1600}"
 export NUM_EPISODES="${NUM_EPISODES:-1}"
