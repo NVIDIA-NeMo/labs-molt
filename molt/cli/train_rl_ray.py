@@ -967,6 +967,15 @@ if __name__ == "__main__":
             "mid-request weight swap. Per-token IS is correcting those tokens instead."
         )
 
+    if args.algo.advantage.is_correction_level != "off" and args.rollout.top_p < 1.0:
+        # vLLM computes `processed_logprobs` AFTER the top-p mask, so they are renormalized over the
+        # kept nucleus while training recomputes over the full vocabulary. Every rollout log-prob is
+        # then offset by -log(kept mass), biasing vllm_kl and the IS ratio on every token.
+        raise ValueError(
+            f"--rollout.top_p {args.rollout.top_p} biases the rollout log-probs the IS correction "
+            "consumes; use --rollout.top_p 1.0, or --algo.advantage.is_correction_level off."
+        )
+
     # --- Data ---
     if args.data.max_images_per_prompt > 0 and args.fsdp.packing_samples:
         print("[Warning] VLM training does not support --fsdp.packing_samples; disabling packing for this run.")
