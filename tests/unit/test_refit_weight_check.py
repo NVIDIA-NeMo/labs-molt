@@ -34,30 +34,30 @@ def _worker(params, loaded):
     worker = WorkerWrap.__new__(WorkerWrap)
     model = types.SimpleNamespace(named_parameters=lambda: iter(list(params.items())))
     worker.model_runner = types.SimpleNamespace(model=model)
-    worker._refit_loaded = set(loaded)
+    worker._weight_update_loaded = set(loaded)
     return worker
 
 
 def test_lists_the_weights_the_broadcast_never_landed_on():
     params = {"model.layers.0.w": torch.zeros(2), "model.layers.0.experts": torch.zeros(2)}
-    assert _worker(params, ["model.layers.0.w"]).refit_unaddressed_params() == ["model.layers.0.experts"]
+    assert _worker(params, ["model.layers.0.w"]).weight_update_missing() == ["model.layers.0.experts"]
 
 
 def test_reports_nothing_when_every_weight_was_assigned():
     params = {"model.layers.0.w": torch.zeros(2)}
-    assert _worker(params, ["model.layers.0.w"]).refit_unaddressed_params() == []
+    assert _worker(params, ["model.layers.0.w"]).weight_update_missing() == []
 
 
 def test_cannot_verify_when_the_reported_names_are_from_another_namespace():
     """vLLM may report the pre-mapping or fused name; a diff would then accuse everything."""
     params = {"model.layers.0.w": torch.zeros(2)}
-    assert _worker(params, ["layers.0.w"]).refit_unaddressed_params() is None
+    assert _worker(params, ["layers.0.w"]).weight_update_missing() is None
 
 
 def test_cannot_verify_when_the_model_reports_nothing():
-    assert _worker({"model.layers.0.w": torch.zeros(2)}, []).refit_unaddressed_params() is None
+    assert _worker({"model.layers.0.w": torch.zeros(2)}, []).weight_update_missing() is None
 
 
 def test_non_float_params_are_not_expected_to_be_assigned():
     params = {"model.layers.0.w": torch.zeros(2), "model.layers.0.idx": torch.tensor([7])}
-    assert _worker(params, ["model.layers.0.w"]).refit_unaddressed_params() == []
+    assert _worker(params, ["model.layers.0.w"]).weight_update_missing() == []

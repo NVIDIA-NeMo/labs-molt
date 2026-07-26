@@ -76,8 +76,8 @@ class WorkerWrap:
         loaded = self.model_runner.model.load_weights(weights=weights)
         # Collect the names vLLM says it assigned, for the exact by-name coverage check
         # (--train.check_weight_update_equal). Only armed between reset/report calls.
-        if getattr(self, "_refit_loaded", None) is not None and loaded:
-            self._refit_loaded.update(loaded)
+        if getattr(self, "_weight_update_loaded", None) is not None and loaded:
+            self._weight_update_loaded.update(loaded)
         # Warn on EVERY refit flush that vLLM ignored entirely (loaded nothing) -- a real
         # name-format break silently drops those updates -> stale rollout weights.
         # `load_weights` returns the set of *vLLM-internal* param names it assigned, which
@@ -95,11 +95,11 @@ class WorkerWrap:
             )
         del buf
 
-    def arm_refit_name_check(self):
+    def reset_weight_update_check(self):
         """Start collecting the param names ``load_weights`` assigns in the coming broadcast."""
-        self._refit_loaded = set()
+        self._weight_update_loaded = set()
 
-    def refit_unaddressed_params(self):
+    def weight_update_missing(self):
         """This worker's float params that the broadcast never assigned, by exact name.
 
         ``None`` when the names are not comparable — either the model reports nothing, or it
@@ -111,7 +111,7 @@ class WorkerWrap:
         A weight the refit skips on purpose is listed too — a tied ``lm_head`` is never sent
         because it reaches vLLM through ``embed_tokens`` — so read the names, not the count.
         """
-        loaded, self._refit_loaded = getattr(self, "_refit_loaded", None), None
+        loaded, self._weight_update_loaded = getattr(self, "_weight_update_loaded", None), None
         if not loaded:
             return None
         held = {name for name, param in self.model_runner.model.named_parameters() if param.is_floating_point()}

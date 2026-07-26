@@ -601,11 +601,10 @@ class PolicyTrainer:
         # still call `gather_full_param` (an FSDP collective) but drop the
         # gathered tensor immediately — no point staging the batch on every rank.
         is_rank0 = torch.distributed.get_rank() == 0
-        # --train.check_weight_update_equal: rank 0 arms the engines, and after the last flush
-        # asks which of their weights the broadcast never landed on.
+        # --train.check_weight_update_equal: rank 0 arms the check, evaluated after the last flush.
         check_weight_update = is_rank0 and getattr(self.strategy.args.train, "check_weight_update_equal", False)
         if check_weight_update:
-            ray.get([engine.arm_refit_name_check.remote() for engine in self.vllm_engines])
+            ray.get([engine.reset_weight_update_check.remote() for engine in self.vllm_engines])
         # 512 MiB flushes, matching slime's `--update-weight-buffer-size` default
         # (512 * 1024**2). vLLM runs at high gpu_memory_utilization (~0.9-0.95) with
         # little free VRAM, and the receiver allocates a contiguous
@@ -718,7 +717,7 @@ class PolicyTrainer:
         if check_weight_update:
             # Which of the engine's weights did this broadcast never land on? The engines are
             # replicas, so one answers for all.
-            unaddressed = ray.get(self.vllm_engines[0].refit_unaddressed_params.remote())
+            unaddressed = ray.get(self.vllm_engines[0].weight_update_missing.remote())
             if unaddressed is None:
                 logger.warning(
                     "[check_weight_update] cannot verify: vLLM reports assigned weights under names "

@@ -223,13 +223,13 @@ class RolloutRayActor:
         )
         return result
 
-    async def arm_refit_name_check(self):
-        await self.llm.collective_rpc("arm_refit_name_check")
+    async def reset_weight_update_check(self):
+        await self.llm.collective_rpc("reset_weight_update_check")
 
-    async def refit_unaddressed_params(self):
+    async def weight_update_missing(self):
         # A param only has to be assigned on the worker that holds its shard, so intersect.
         # None from any worker means the names are not comparable there — say so for all.
-        results = await self.llm.collective_rpc("refit_unaddressed_params")
+        results = await self.llm.collective_rpc("weight_update_missing")
         if any(names is None for names in results):
             return None
         return sorted(set.intersection(*(set(names) for names in results)))
