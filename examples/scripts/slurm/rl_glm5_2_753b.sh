@@ -97,7 +97,6 @@ export ENABLE_DYNAMIC_FILTERING="${ENABLE_DYNAMIC_FILTERING:-0}"
 # Per-turn generation cap. Unset = unlimited: each turn may use whatever context is
 # left, which is what the recipe is validated at (the multi-turn chat agent still
 # accumulates within MAX_LENGTH).
-export MAX_NEW_TOKENS="${MAX_NEW_TOKENS-}"
 # Actor/ref: 32 dedicated training nodes (256 GPUs, EP256) for the ~750B model
 # (the fp32-faithful refit gather has a packed-expert full_tensor spike).
 export ACTOR_NODES="${ACTOR_NODES:-32}"
@@ -184,15 +183,10 @@ fi
 GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
 RAY_PORT="${RAY_PORT:-6379}"
 DASHBOARD_PORT="${DASHBOARD_PORT:-8265}"
-# MAX_LENGTH is the shared total-context budget (prompt + generation), used as
-# both data.max_len and vLLM max_model_len; the 64k default gives headroom for
-# vision tokens + multi-turn history. Longest prompt must satisfy
-# prompt_len + MAX_NEW_TOKENS <= MAX_LENGTH.
+# MAX_LENGTH is the shared total-context budget (prompt + generation), used as both
+# data.max_len and vLLM max_model_len. It is the only generation bound: a turn may
+# use whatever context is left, and multi-turn agents accumulate history within it.
 MAX_LENGTH="${MAX_LENGTH:-65536}"
-# MAX_NEW_TOKENS: per-turn generation cap. Unset = unlimited (bounded by
-# MAX_LENGTH); multi-turn agents issue many turns, so this is a per-call max,
-# not a context budget.
-MAX_NEW_TOKENS="${MAX_NEW_TOKENS-}"
 MAX_SAMPLES="${MAX_SAMPLES:-8192}"
 # rollout_batch_size = unique prompts dispatched per make_experience call.
 # Keep rollout_batch_size * n_samples >= train_batch_size or the policy_train
@@ -377,7 +371,6 @@ RL_ARGS=(
   --data.max_images_per_prompt "$MAX_IMAGES_PER_PROMPT"
   --data.max_samples "$MAX_SAMPLES"
   --data.max_len "$MAX_LENGTH"
-  ${MAX_NEW_TOKENS:+--rollout.max_new_tokens=$MAX_NEW_TOKENS}
   --rollout.batch_size "$ROLLOUT_BATCH_SIZE"
   --rollout.vllm_generate_batch_size "$ROLLOUT_GENERATE_BATCH_SIZE"
   --rollout.micro_batch_size 1

@@ -56,7 +56,6 @@ export FSDP_ATTN_IMPLEMENTATION="${FSDP_ATTN_IMPLEMENTATION:-te}"
 # torch dispatcher drifts the recompute and raises CheckpointError. Memory tiers
 # on one 8-GPU actor node: CP=1 fits ~16K, 32K needs CP8.
 export MAX_LENGTH="${MAX_LENGTH:-32000}"
-export MAX_NEW_TOKENS="${MAX_NEW_TOKENS-}"
 export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-64}"
 export ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-8}"
 export ROLLOUT_GENERATE_BATCH_SIZE="${ROLLOUT_GENERATE_BATCH_SIZE:-8}"  # = ROLLOUT_BATCH_SIZE: dispatch all prompts in one vLLM batch
@@ -164,15 +163,10 @@ fi
 GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
 RAY_PORT="${RAY_PORT:-6379}"
 DASHBOARD_PORT="${DASHBOARD_PORT:-8265}"
-# MAX_LENGTH is the shared total-context budget (prompt + generation), used as
-# both data.max_len and vLLM max_model_len; the 64k default gives headroom for
-# vision tokens + multi-turn history. Longest prompt must satisfy
-# prompt_len + MAX_NEW_TOKENS <= MAX_LENGTH.
+# MAX_LENGTH is the shared total-context budget (prompt + generation), used as both
+# data.max_len and vLLM max_model_len. It is the only generation bound: a turn may
+# use whatever context is left, and multi-turn agents accumulate history within it.
 MAX_LENGTH="${MAX_LENGTH:-65536}"
-# MAX_NEW_TOKENS: per-turn generation cap. Unset = unlimited (bounded by
-# MAX_LENGTH); multi-turn agents issue many turns, so this is a per-call max,
-# not a context budget.
-MAX_NEW_TOKENS="${MAX_NEW_TOKENS-}"
 MAX_SAMPLES="${MAX_SAMPLES:-8192}"
 # rollout_batch_size = unique prompts dispatched per make_experience call.
 # Keep rollout_batch_size * n_samples >= train_batch_size or the policy_train
@@ -382,7 +376,6 @@ RL_ARGS=(
   --data.max_images_per_prompt "$MAX_IMAGES_PER_PROMPT"
   --data.max_samples "$MAX_SAMPLES"
   --data.max_len "$MAX_LENGTH"
-  ${MAX_NEW_TOKENS:+--rollout.max_new_tokens=$MAX_NEW_TOKENS}
   --rollout.batch_size "$ROLLOUT_BATCH_SIZE"
   --rollout.vllm_generate_batch_size "$ROLLOUT_GENERATE_BATCH_SIZE"
   --rollout.num_runners "${NUM_RUNNERS:-8}"

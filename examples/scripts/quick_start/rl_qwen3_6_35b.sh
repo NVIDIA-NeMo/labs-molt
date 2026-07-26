@@ -43,7 +43,6 @@ SAVE_ROOT="${SAVE_ROOT:-$REPO_ROOT/outputs/quick_start-qwen3-6/run}"
 GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
 ACTOR_GPUS="${ACTOR_GPUS:-4}"
 VLLM_TP="${VLLM_TP:-4}"
-MAX_NEW_TOKENS="${MAX_NEW_TOKENS-}"  # unset = per-turn unlimited (bounded by max_len); set N to cap
 
 export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
 export TOKENIZERS_PARALLELISM=true
@@ -75,7 +74,6 @@ python3 -u -m molt.cli.train_rl_ray \
   --data.max_images_per_prompt 1 \
   --data.max_samples 4096 \
   --data.max_len 16384 \
-  ${MAX_NEW_TOKENS:+--rollout.max_new_tokens=$MAX_NEW_TOKENS} \
   --rollout.batch_size 8 \
   --rollout.vllm_generate_batch_size 8 \
   --rollout.micro_batch_size 1 \

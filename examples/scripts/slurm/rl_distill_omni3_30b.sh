@@ -63,7 +63,6 @@ export FSDP_ATTN_IMPLEMENTATION="${FSDP_ATTN_IMPLEMENTATION:-te}"
 # 16K by default (vs 32K for plain RL): the colocated teacher adds a full model's params to
 # the actor GPUs. Raise to 32000 with FSDP_CPU_OFFLOAD=1 or a separate teacher node if needed.
 export MAX_LENGTH="${MAX_LENGTH:-16384}"
-export MAX_NEW_TOKENS="${MAX_NEW_TOKENS-}"
 export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-64}"
 export ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-8}"
 export ROLLOUT_GENERATE_BATCH_SIZE="${ROLLOUT_GENERATE_BATCH_SIZE:-8}"
@@ -157,7 +156,6 @@ GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
 RAY_PORT="${RAY_PORT:-6379}"
 DASHBOARD_PORT="${DASHBOARD_PORT:-8265}"
 MAX_LENGTH="${MAX_LENGTH:-16384}"
-MAX_NEW_TOKENS="${MAX_NEW_TOKENS-}"
 MAX_SAMPLES="${MAX_SAMPLES:-8192}"
 ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-16}"
 ROLLOUT_GENERATE_BATCH_SIZE="${ROLLOUT_GENERATE_BATCH_SIZE:-8}"
@@ -313,7 +311,6 @@ RL_ARGS=(
   --data.max_images_per_prompt "$MAX_IMAGES_PER_PROMPT"
   --data.max_samples "$MAX_SAMPLES"
   --data.max_len "$MAX_LENGTH"
-  ${MAX_NEW_TOKENS:+--rollout.max_new_tokens=$MAX_NEW_TOKENS}
   --rollout.batch_size "$ROLLOUT_BATCH_SIZE"
   --rollout.vllm_generate_batch_size "$ROLLOUT_GENERATE_BATCH_SIZE"
   --rollout.micro_batch_size 1
