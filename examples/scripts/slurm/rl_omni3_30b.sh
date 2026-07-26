@@ -69,7 +69,7 @@ export VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.95}"
 
 # --- Optimizer / algo (Adam; aligned with the qwen3.6 recipe) ---------------
 export OPTIM="${OPTIM:-adam}"
-export LR="${LR:-1e-5}"
+export LR="${LR:-2e-6}"
 
 # --- Eval / checkpoint ------------------------------------------------------
 export SAVE_STEPS="${SAVE_STEPS:-2}"
@@ -226,7 +226,7 @@ FREEZE_MOE_ROUTER="${FREEZE_MOE_ROUTER:-1}"
 # Algo — defaults tuned for geo3k VLM math multi-turn.
 KL_COEF="${KL_COEF:-0.0}"
 MOE_AUX_LOSS_COEF="${MOE_AUX_LOSS_COEF:-0}"   # RL: no load-balancing aux (don't perturb the policy grad)
-LR="${LR:-1e-5}"
+LR="${LR:-2e-6}"
 DUAL_CLIP="${DUAL_CLIP:-10.0}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-0.0}"
 ADAM_BETA1="${ADAM_BETA1:-0.9}"

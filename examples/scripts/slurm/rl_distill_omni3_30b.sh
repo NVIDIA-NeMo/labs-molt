@@ -75,7 +75,7 @@ export MAX_SAMPLES="${MAX_SAMPLES:-65536}"
 export VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.95}"
 
 export OPTIM="${OPTIM:-adam}"
-export LR="${LR:-1e-5}"
+export LR="${LR:-2e-6}"
 
 # Distillation is monitored by kl/logprobs_diff, not task accuracy — eval off.
 export SAVE_STEPS="${SAVE_STEPS:-2}"
@@ -194,7 +194,7 @@ FREEZE_VISUAL_ENCODER="${FREEZE_VISUAL_ENCODER:-1}"
 FREEZE_MOE_ROUTER="${FREEZE_MOE_ROUTER:-1}"
 # Algo — distillation strength (reverse-KL reward coefficient) defaults to 1.0; tune via LR.
 MOE_AUX_LOSS_COEF="${MOE_AUX_LOSS_COEF:-0}"
-LR="${LR:-1e-5}"
+LR="${LR:-2e-6}"
 DUAL_CLIP="${DUAL_CLIP:-10.0}"
 WEIGHT_DECAY="${WEIGHT_DECAY:-0.0}"
 ADAM_BETA1="${ADAM_BETA1:-0.9}"
