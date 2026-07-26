@@ -94,8 +94,10 @@ export EVAL_STEPS="${EVAL_STEPS:-25}"
 export EVAL_N_SAMPLES_PER_PROMPT="${EVAL_N_SAMPLES_PER_PROMPT:-1}"
 # Dynamic filtering OFF (zero-advantage groups pass through; stable throughput).
 export ENABLE_DYNAMIC_FILTERING="${ENABLE_DYNAMIC_FILTERING:-0}"
-# Per-turn generation cap (the multi-turn chat agent accumulates within MAX_LENGTH).
-export MAX_NEW_TOKENS="${MAX_NEW_TOKENS:-4096}"
+# Per-turn generation cap. Unset = unlimited: each turn may use whatever context is
+# left, which is what the recipe is validated at (the multi-turn chat agent still
+# accumulates within MAX_LENGTH).
+export MAX_NEW_TOKENS="${MAX_NEW_TOKENS-}"
 # Actor/ref: 32 dedicated training nodes (256 GPUs, EP256) for the ~750B model
 # (the fp32-faithful refit gather has a packed-expert full_tensor spike).
 export ACTOR_NODES="${ACTOR_NODES:-32}"

@@ -110,12 +110,9 @@ DASHBOARD_PORT="${DASHBOARD_PORT:-8265}"
 # headroom. MAX_NEW_TOKENS is the per-request generation cap within that
 # budget; longest prompt must satisfy `prompt_len + MAX_NEW_TOKENS <= MAX_LENGTH`.
 MAX_LENGTH="${MAX_LENGTH:-65536}"
-# MAX_NEW_TOKENS is the per-turn generation cap. Defaults to 8192 — enough for
-# CoT + answer on math reasoning tasks while keeping rollout
-# wall-time and activation memory bounded. Multiturn agents can issue many
-# turns within MAX_LENGTH, so this isn't a context budget — it's a per-call
-# max. Set to MAX_LENGTH explicitly if you really want each turn to consume
-# the full remaining context.
+# MAX_NEW_TOKENS is the per-turn generation cap. Unset = unlimited, so a turn may use
+# whatever context is left; set it only to bound rollout wall-time. Multi-turn agents
+# can issue many turns within MAX_LENGTH, so this isn't a context budget.
 MAX_NEW_TOKENS="${MAX_NEW_TOKENS-}"
 MAX_SAMPLES="${MAX_SAMPLES:-8192}"
 # rollout_batch_size = unique prompts the trainer dispatches per
