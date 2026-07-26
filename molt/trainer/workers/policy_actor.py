@@ -17,7 +17,6 @@
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
 import os
-import re
 import socket
 import time
 from contextlib import ExitStack
@@ -602,12 +601,8 @@ class PolicyTrainer:
         # still call `gather_full_param` (an FSDP collective) but drop the
         # gathered tensor immediately — no point staging the batch on every rank.
         is_rank0 = torch.distributed.get_rank() == 0
-        # --train.check_weight_update_equal: rank 0 arms the check, evaluated after the last
-        # flush. `sent_energy` is this broadcast's per-layer weight energy; comparing it with
-        # the previous broadcast tells which layers the trainer actually moved, which is the
-        # reference the engine-side diff needs to separate "stale" from "never updated".
+        # --train.check_weight_update_equal: rank 0 arms the check, evaluated after the last flush.
         check_weight_update = is_rank0 and getattr(self.strategy.args.train, "check_weight_update_equal", False)
-        sent_energy: dict[int, float] = {}
         if check_weight_update:
             ray.get([engine.reset_weight_update_check.remote() for engine in self.vllm_engines])
         # 512 MiB flushes, matching slime's `--update-weight-buffer-size` default
@@ -714,10 +709,6 @@ class PolicyTrainer:
                 pending_metas.append((hf_name, hf_weight.dtype, tuple(hf_weight.shape)))
                 pending_tensors.append(hf_weight)
                 pending_bytes += nbytes
-                if check_weight_update:
-                    match = re.search(r"layers\.(\d+)", hf_name)
-                    layer = int(match.group(1)) if match else -1
-                    sent_energy[layer] = sent_energy.get(layer, 0.0) + float(hf_weight.float().square().sum())
             del weight
 
         if is_rank0:
@@ -730,24 +721,18 @@ class PolicyTrainer:
                     entry = engine_counts.setdefault(layer, [0, 0])
                     entry[0] += unchanged
                     entry[1] += total
-            # Cross-check both sides per layer: a layer whose weights the trainer changed
-            # this step but whose engine params all kept their value is genuinely stale.
-            # Layers the trainer did not touch (frozen tower / router, or a step smaller
-            # than the param dtype resolves) drop out on their own — no false alarm.
-            previous, self._weight_update_sent = getattr(self, "_weight_update_sent", None), sent_energy
-            trainer_moved = {layer for layer, e in sent_energy.items() if previous and previous.get(layer) != e}
-            engine_moved = {layer for layer, (unchanged, total) in engine_counts.items() if unchanged < total}
-            stale = sorted(trainer_moved - engine_moved)
-            if stale:
-                logger.warning(
-                    f"[check_weight_update] {len(stale)} layer(s) the trainer updated did NOT change "
-                    f"in vLLM (stale rollout weights): {stale[:10]}"
-                )
-            else:
-                logger.info(
-                    f"[check_weight_update] every layer the trainer updated changed in vLLM "
-                    f"({len(trainer_moved)} of {len(engine_counts)})"
-                )
+            # Decoder layers all train, so they are each other's reference: a layer whose
+            # every param kept its value while its peers moved did not receive the update.
+            # A step with no gradient (uniform group reward) or weights below the param
+            # dtype's resolution move nothing anywhere, which reads as "0 of N" — not as a
+            # per-layer fault. Layer -1 holds the non-layer params (frozen tower, embeddings).
+            layers = {layer: counts for layer, counts in engine_counts.items() if layer >= 0}
+            stale = sorted(layer for layer, (unchanged, total) in layers.items() if unchanged == total)
+            log = logger.warning if stale and len(stale) < len(layers) else logger.info
+            log(
+                f"[check_weight_update] {len(layers) - len(stale)}/{len(layers)} decoder layers changed "
+                f"in vLLM; unchanged: {stale[:10]}"
+            )
 
         torch.cuda.empty_cache()
         torch_dist_barrier_and_cuda_sync()
