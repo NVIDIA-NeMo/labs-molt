@@ -199,8 +199,18 @@ RUN if [ "$INSTALL_TEST_DEPS" = "1" ]; then python -m pip install coverage pytes
 # real keys with the -1 sentinel, which causal top-k always produces.
 RUN python -m pip install --no-cache-dir "tilelang==0.1.11" "tile-kernels==1.0.0" "apache-tvm-ffi<=0.1.11"
 # Keep the kernel JIT cache under the bind-mounted /root/.cache; the default ~/.tilelang
-# is container-local, so every job would recompile the DSA kernels from scratch.
+# is container-local, so every job would recompile the DSA kernels from scratch. Create it
+# so an unmounted /root/.cache doesn't make tilelang's import-time makedirs fail.
 ENV TILELANG_CACHE_DIR=/root/.cache/tilelang
+RUN mkdir -p /root/.cache/tilelang
+
+# --- keep mamba_ssm importable next to vLLM's cutlass pin -----------------------
+# vLLM 0.26 requires nvidia-cutlass-dsl==4.6.0, which dropped `cutlass.cute.core.ThrMma`;
+# mamba_ssm 2.3.2.post1 (the newest release, source-built in step d) imports it, so with
+# 4.6.0 every Mamba/GDN model fails at import. Hold the last version that has it — vLLM's
+# own kernels are compiled, only its optional DSL path reads this wheel.
+RUN python -m pip install --no-cache-dir "nvidia-cutlass-dsl==4.5.2" && \
+    python -c "from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined; import vllm"
 
 # vLLM 0.26 hard-pins nvidia-cutlass-dsl==4.6.0, whose cutlass.cute DSL dropped `ThrMma`. The
 # quack-kernels that dion pulls can lag that API and then AttributeError at import, taking
