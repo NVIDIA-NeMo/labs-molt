@@ -74,17 +74,6 @@ class WorkerWrap:
             (name, part.view(dtype).view(*shape)) for (name, dtype, shape), part in zip(metas, buf.split(sizes))
         ]
         loaded = self.model_runner.model.load_weights(weights=weights)
-        # Accumulate refreshed param names for the optional whole-broadcast coverage
-        # check (--train.check_weight_update_equal); a no-op unless armed via
-        # reset_weight_update_check().
-        if getattr(self, "_weight_update_loaded", None) is not None:
-            if loaded is None:
-                # Not every vLLM model returns the names it assigned. Without them the
-                # coverage check has nothing to subtract and would report the whole model
-                # stale, so mark it unavailable instead of inventing a result.
-                self._weight_update_names_reported = False
-            else:
-                self._weight_update_loaded.update(loaded)
         # Warn on EVERY refit flush that vLLM ignored entirely (loaded nothing) -- a real
         # name-format break silently drops those updates -> stale rollout weights.
         # `load_weights` returns the set of *vLLM-internal* param names it assigned, which
@@ -102,8 +91,14 @@ class WorkerWrap:
             )
         del buf
 
-    def _float_param_fingerprints(self):
-        """One cheap value fingerprint per float param, keyed by vLLM-internal name."""
+    def _float_param_values(self):
+        """One cheap value fingerprint per float param, keyed by vLLM-internal name.
+
+        The refit is verified by VALUE, not by name: which names ``load_weights`` claims is
+        model-specific (some report none, some report the fused param rather than the key we
+        sent), and diffing those names produced false "stale weight" alarms on models whose
+        rollout was provably in sync.
+        """
         import torch
 
         with torch.no_grad():
@@ -114,30 +109,18 @@ class WorkerWrap:
             }
 
     def reset_weight_update_check(self):
-        """Arm the refit coverage check for the broadcast that is about to run.
-
-        Records the pre-broadcast values to diff against, and starts collecting the names
-        load_weights claims across this refit's flushes.
-        """
-        self._weight_update_loaded = set()
-        self._weight_update_names_reported = True
-        self._weight_update_before = self._float_param_fingerprints()
+        """Record this worker's weights so the next broadcast can be diffed against them."""
+        self._weight_update_before = self._float_param_values()
 
     def weight_update_missing(self):
-        """What the last broadcast failed to refresh on this worker, then stop tracking.
+        """Float params whose value the last broadcast did not move, then stop tracking.
 
-        Returns ``(stale, unchanged)``: params no flush claimed by name (``None`` when the
-        model reports no names), and params whose VALUE the broadcast did not move. The two
-        views answer different questions — a name vLLM never claimed is a mapping break, a
-        value that never moved is a weight the engine really did not receive. Frozen weights
-        land in ``unchanged`` legitimately, so read its count, not its list.
+        ``None`` when the check was never armed. Weights that are frozen (or whose step was
+        a no-op) land here legitimately, so the count is the signal: a healthy refit moves
+        most of the model, and "nothing moved" means the engine kept its old weights.
         """
-        loaded = getattr(self, "_weight_update_loaded", None)
-        self._weight_update_loaded = None
-        if loaded is None:
+        before, self._weight_update_before = getattr(self, "_weight_update_before", None), None
+        if before is None:
             return None
-        before, self._weight_update_before = self._weight_update_before, None
-        after = self._float_param_fingerprints()
-        unchanged = sorted(name for name, fp in after.items() if before.get(name) == fp)
-        stale = sorted(set(before) - loaded) if self._weight_update_names_reported else None
-        return stale, unchanged
+        after = self._float_param_values()
+        return sorted(name for name, value in after.items() if before.get(name) == value), len(after)

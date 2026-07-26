@@ -702,22 +702,14 @@ class PolicyTrainer:
 
         if check_weight_update:
             reports = [r for r in ray.get([e.weight_update_missing.remote() for e in self.vllm_engines]) if r]
-            stale = sorted({n for s, _ in reports if s for n in s})
-            unchanged = sorted({n for _, u in reports for n in u})
-            if stale:
-                logger.warning(
-                    f"[check_weight_update] {len(stale)} vLLM params NOT claimed by name in this "
-                    f"broadcast; sample: {stale[:10]}"
-                )
-            if unchanged:
-                # Frozen weights land here legitimately, so read the count: a param that is
-                # both unclaimed AND value-unchanged is a weight the engine never received.
-                logger.warning(
-                    f"[check_weight_update] {len(unchanged)} vLLM params unchanged in value "
-                    f"({len(set(stale) & set(unchanged))} of them also unclaimed); sample: {unchanged[:5]}"
-                )
-            if reports and not stale and not unchanged:
-                logger.info("[check_weight_update] all vLLM params refreshed by this broadcast")
+            unchanged = sorted({name for names, _ in reports for name in names})
+            total = max((count for _, count in reports), default=0)
+            # Frozen params (vision tower, MoE router) never move, so the count is what
+            # matters: "nothing moved" means the broadcast never reached the engine.
+            logger.info(
+                f"[check_weight_update] {total - len(unchanged)}/{total} vLLM params changed value; "
+                f"{len(unchanged)} unchanged (frozen weights included), sample: {unchanged[:5]}"
+            )
 
         torch.cuda.empty_cache()
         torch_dist_barrier_and_cuda_sync()

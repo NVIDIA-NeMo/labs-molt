@@ -227,16 +227,13 @@ class RolloutRayActor:
         await self.llm.collective_rpc("reset_weight_update_check")
 
     async def weight_update_missing(self):
-        # Union the per-worker (stale, unchanged) reports; weights are TP/EP-sharded across
-        # workers, so a param only has to be refreshed on the worker that holds it.
-        # None = the check was never armed on this engine.
+        # Union the per-worker reports: weights are TP/EP-sharded, so a param counts as
+        # refreshed once any worker holding a shard of it moved. None = check not armed.
         results = [r for r in await self.llm.collective_rpc("weight_update_missing") if r is not None]
         if not results:
             return None
-        unchanged = set().union(*(set(u) for _, u in results))
-        if any(stale is None for stale, _ in results):
-            return None, sorted(unchanged)
-        return sorted(set().union(*(set(s) for s, _ in results))), sorted(unchanged)
+        unchanged = set.intersection(*(set(names) for names, _ in results))
+        return sorted(unchanged), max(total for _, total in results)
 
     async def pause_generation(self):
         await self.llm.pause_generation(mode="keep")
