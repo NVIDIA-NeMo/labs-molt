@@ -98,12 +98,16 @@ class WorkerWrap:
         model-specific (some report none, some report the fused param rather than the key we
         sent), and diffing those names produced false "stale weight" alarms on models whose
         rollout was provably in sync.
+
+        Sum of SQUARES, not sum: a plain sum hides an update whose positive and negative
+        deltas cancel, which is exactly what a small optimizer step on a large embedding
+        looks like.
         """
         import torch
 
         with torch.no_grad():
             return {
-                name: float(param.detach().float().sum())
+                name: float(param.detach().float().square().sum())
                 for name, param in self.model_runner.model.named_parameters()
                 if param.is_floating_point()
             }
