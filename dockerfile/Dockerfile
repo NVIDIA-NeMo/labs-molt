@@ -202,6 +202,16 @@ RUN python -m pip install --no-cache-dir "tilelang==0.1.11" "tile-kernels==1.0.0
 # is container-local, so every job would recompile the DSA kernels from scratch.
 ENV TILELANG_CACHE_DIR=/root/.cache/tilelang
 
+# vLLM 0.26 hard-pins nvidia-cutlass-dsl==4.6.0, whose cutlass.cute DSL dropped `ThrMma`. The
+# quack-kernels that dion pulls can lag that API and then AttributeError at import, taking
+# `import mamba_ssm` (mamba3 -> quack) down with it. Pin quack to the 4.6.0-compatible 0.6.1.
+# -c pins the torch trio + cutlass 4.6.0 so this can't perturb the vLLM/CUDA stack.
+RUN T=$(python -c "import torch; print(torch.__version__)") && \
+    TV=$(python -c "import torchvision; print(torchvision.__version__)") && \
+    TA=$(python -c "import torchaudio; print(torchaudio.__version__)") && \
+    printf 'torch==%s\ntorchvision==%s\ntorchaudio==%s\nnvidia-cutlass-dsl==4.6.0\n' "$T" "$TV" "$TA" > /tmp/pin.txt && \
+    python -m pip install -c /tmp/pin.txt "quack-kernels==0.6.1" && rm -f /tmp/pin.txt
+
 # --- restore DeepEP's NVSHMEM ABI ----------------------------------------------
 # DeepEP (step c) built deep_ep_cpp.so against nvidia-nvshmem-cu13==3.6.5, but vLLM hard-pins
 # ==3.4.5, so its install above DOWNGRADED the wheel -> deep_ep_cpp.so then fails to load with
@@ -217,6 +227,15 @@ RUN python -m pip install --no-deps --force-reinstall nvidia-nvshmem-cu13==3.6.5
 # plus z3's, which ships libz3 that tvm-ffi (tilelang) loads at import.
 RUN { find ${SITE}/nvidia -mindepth 2 -maxdepth 2 -type d -name lib | sort; echo ${SITE}/z3/lib; } \
         > /etc/ld.so.conf.d/python-nvidia-libs.conf && ldconfig
+
+# --- build-time import self-check -----------------------------------------------
+# Fail the build if the installed stack can't import, so a dependency bump can't ship an image
+# that only crashes at a user's runtime — e.g. the quack-vs-cutlass-DSL drift that broke
+# `import mamba_ssm`. Every module below imports in the CPU-only builder; deep_ep is the lone
+# exception (needs libcuda at import) and is covered by the NVSHMEM restore step above.
+RUN python -c "import importlib; \
+[importlib.import_module(m) for m in ('torch','transformers','ray','nemo_automodel','quack','quack.layout_utils','fla','tilelang','tvm_ffi','vllm_router','transformer_engine.pytorch','flash_attn','causal_conv1d','mamba_ssm','vllm')]; \
+print('BUILD IMPORT CHECK OK')"
 
 # --- Entrypoint -----------------------------------------------------------------
 COPY dockerfile/docker-entrypoint.sh /app/docker-entrypoint.sh
