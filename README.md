@@ -401,6 +401,9 @@ families ship today, both on the AutoModel + FSDP2 backend:
 | Qwen3.6-35B-A3B VLM RL on geo3k (multi-turn Python tool) | `quick_start/rl_qwen3_6_35b.sh` | `slurm/rl_qwen3_6_35b.sh` |
 | Qwen3-4B dense SFT on text math | `quick_start/sft_qwen3_4b.sh` | `slurm/sft_qwen3_4b.sh` |
 | Qwen3-4B dense RL on text math | `quick_start/rl_qwen3_4b.sh` | `slurm/rl_qwen3_4b.sh` |
+| Nemotron-Omni-30B-A3B VLM RL on geo3k (hybrid SSM MoE, CP8+EP8) | — | `slurm/rl_omni3_30b.sh` |
+| Nemotron-Omni-30B-A3B on-policy distillation | — | `slurm/rl_distill_omni3_30b.sh` |
+| GLM-5.2 ~750B RL on text math (MLA + DSA sparse attention, EP256) | — | `slurm/rl_glm5_2_753b.sh` |
 
 Quick-start single-node usage:
 
@@ -502,7 +505,7 @@ Molt targets AutoModel custom models with FSDP2:
 |---|---|---|
 | **Actor** | Tensor parallel | `--fsdp.tp_size 2` |
 | | Expert parallel | `--fsdp.ep_size 8` (e.g. `256` for DeepSeek-V3-class MoE) |
-| | Context parallel | `--fsdp.cp_size 8` (32K+ sequences) |
+| | Context parallel | `--fsdp.cp_size 8` (32K+ sequences), incl. VLMs and MoE routing replay |
 | | Optimizer CPU offload | `--fsdp.offload optimizer` (frees VRAM for the largest actors) |
 | **vLLM rollout** | Tensor parallel | `--vllm.tensor_parallel_size 2` |
 | | Expert parallel | `--vllm.enable_expert_parallel` (EP = TP × DP) |
@@ -512,8 +515,13 @@ Molt targets AutoModel custom models with FSDP2:
 | **MoE stability** | Router replay (R3) | `--train.routing_replay` |
 | | Router freeze | `--actor.freeze_moe_router` |
 
-For CP training, packed RL batches are currently disabled. Packing is off by
-default, and CP rejects `--fsdp.packing_samples`.
+Context parallelism is delegated to AutoModel's `ContextParallelSharder`, so each
+model gets the sharding its attention backend needs — round-robin for hybrid
+SSM / linear-attention models (Nemotron Omni, Qwen3.5-MoE), flat THD streams for
+sparse-attention models (GLM-5.2 DSA). VLM vision towers and routing replay shard
+with the sequence, so `--fsdp.cp_size` composes with `--data.image_key` and
+`--train.routing_replay`. Sample packing (`--fsdp.packing_samples`) is text-only
+and off by default; under CP it takes the THD path.
 
 ### ⚡ MTP rollout (speculative decoding)
 
