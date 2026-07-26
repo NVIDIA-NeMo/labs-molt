@@ -13,12 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""`--train.check_weight_update_equal` asks whether vLLM holds the trainer's weights.
+"""`--train.check_weight_update_equal` finds the weights a refit broadcast never landed on.
 
-Names cannot be compared across the two sides — vLLM concatenates gate_proj|up_proj into
-w13_weight, fuses q|k|v, rewrites prefixes and shards params over its workers. None of that
-changes the multiset of values, so per-layer energy (sum of squares) is equal on both sides
-exactly when the engine holds what was sent, whatever the update's magnitude.
+vLLM's ``load_weights`` returns the params it assigned; anything it holds and never assigned
+kept its old value and makes the rollout stale. The one trap is the namespace: a vLLM model
+may report the pre-mapping or the fused name rather than its own parameter's, and then the
+set difference accuses the whole model. So the diff is reported only when the reported names
+really are its parameters.
 """
 
 import types
@@ -28,73 +29,35 @@ import torch
 from molt.trainer.vllm.vllm_worker_wrap import WorkerWrap
 
 
-def _worker(params):
-    """A WorkerWrap stub whose model exposes `params` as its float parameters."""
+def _worker(params, loaded):
+    """A WorkerWrap stub holding `params`, whose last broadcast assigned `loaded`."""
     worker = WorkerWrap.__new__(WorkerWrap)
     model = types.SimpleNamespace(named_parameters=lambda: iter(list(params.items())))
     worker.model_runner = types.SimpleNamespace(model=model)
-    return worker
-
-
-def test_energy_is_summed_per_decoder_layer():
-    worker = _worker(
-        {
-            "model.layers.0.self_attn.qkv_proj.weight": torch.tensor([3.0, 4.0]),  # 25
-            "model.layers.0.mlp.experts.w13_weight": torch.tensor([1.0]),  # 1
-            "model.layers.1.self_attn.qkv_proj.weight": torch.tensor([2.0]),  # 4
-        }
-    )
-    assert worker.weight_energy_by_layer() == {0: 26.0, 1: 4.0}
-
-
-def test_params_outside_the_decoder_stack_group_under_minus_one():
-    worker = _worker({"model.embed_tokens.weight": torch.tensor([2.0]), "model.layers.3.w": torch.tensor([1.0])})
-    assert worker.weight_energy_by_layer() == {-1: 4.0, 3: 1.0}
-
-
-def test_fusing_two_weights_into_one_preserves_the_layer_energy():
-    """gate_proj|up_proj -> w13_weight is a concatenation, so the sender and the engine agree."""
-    sender = _worker(
-        {
-            "model.layers.0.mlp.gate_proj.weight": torch.tensor([3.0]),
-            "model.layers.0.mlp.up_proj.weight": torch.tensor([4.0]),
-        }
-    )
-    engine = _worker({"model.layers.0.mlp.w13_weight": torch.tensor([3.0, 4.0])})
-    assert sender.weight_energy_by_layer() == engine.weight_energy_by_layer()
-
-
-def test_a_layer_the_engine_never_received_shows_up_as_energy_drift():
-    """Even an update too small for the weight's dtype to move leaves the energies unequal."""
-    sent = _worker({"model.layers.0.w": torch.tensor([1.001, 2.0])}).weight_energy_by_layer()
-    held = _worker({"model.layers.0.w": torch.tensor([1.0, 2.0])}).weight_energy_by_layer()
-    assert abs(sent[0] - held[0]) / held[0] > 1e-4
-
-
-def test_non_float_params_are_skipped():
-    worker = _worker({"model.layers.0.w": torch.tensor([2.0]), "model.layers.0.idx": torch.tensor([7])})
-    assert worker.weight_energy_by_layer() == {0: 4.0}
-
-
-def _armed_worker(params, loaded):
-    """A worker whose last broadcast reported `loaded` as the names it assigned."""
-    worker = _worker(params)
     worker._refit_loaded = set(loaded)
     return worker
 
 
-def test_by_name_coverage_lists_the_params_the_broadcast_never_addressed():
-    params = {"model.layers.0.w": torch.tensor([1.0]), "model.layers.0.experts": torch.tensor([1.0])}
-    worker = _armed_worker(params, ["model.layers.0.w"])
-    assert worker.refit_unaddressed_params() == ["model.layers.0.experts"]
+def test_lists_the_weights_the_broadcast_never_landed_on():
+    params = {"model.layers.0.w": torch.zeros(2), "model.layers.0.experts": torch.zeros(2)}
+    assert _worker(params, ["model.layers.0.w"]).refit_unaddressed_params() == ["model.layers.0.experts"]
 
 
-def test_by_name_coverage_is_unavailable_when_the_namespaces_differ():
-    """vLLM may report the pre-mapping or fused name; then a diff would flag the whole model."""
-    params = {"model.layers.0.w": torch.tensor([1.0])}
-    worker = _armed_worker(params, ["layers.0.w"])  # same weight, different namespace
-    assert worker.refit_unaddressed_params() is None
+def test_reports_nothing_when_every_weight_was_assigned():
+    params = {"model.layers.0.w": torch.zeros(2)}
+    assert _worker(params, ["model.layers.0.w"]).refit_unaddressed_params() == []
 
 
-def test_by_name_coverage_is_unavailable_when_the_model_reports_nothing():
-    assert _armed_worker({"model.layers.0.w": torch.tensor([1.0])}, []).refit_unaddressed_params() is None
+def test_cannot_verify_when_the_reported_names_are_from_another_namespace():
+    """vLLM may report the pre-mapping or fused name; a diff would then accuse everything."""
+    params = {"model.layers.0.w": torch.zeros(2)}
+    assert _worker(params, ["layers.0.w"]).refit_unaddressed_params() is None
+
+
+def test_cannot_verify_when_the_model_reports_nothing():
+    assert _worker({"model.layers.0.w": torch.zeros(2)}, []).refit_unaddressed_params() is None
+
+
+def test_non_float_params_are_not_expected_to_be_assigned():
+    params = {"model.layers.0.w": torch.zeros(2), "model.layers.0.idx": torch.tensor([7])}
+    assert _worker(params, ["model.layers.0.w"]).refit_unaddressed_params() == []

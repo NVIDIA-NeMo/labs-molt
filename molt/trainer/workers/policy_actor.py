@@ -17,7 +17,6 @@
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
 import os
-import re
 import socket
 import time
 from contextlib import ExitStack
@@ -602,10 +601,9 @@ class PolicyTrainer:
         # still call `gather_full_param` (an FSDP collective) but drop the
         # gathered tensor immediately — no point staging the batch on every rank.
         is_rank0 = torch.distributed.get_rank() == 0
-        # --train.check_weight_update_equal: rank 0 sums the energy of what it sends per layer,
-        # and compares it with the engine's after the last flush.
+        # --train.check_weight_update_equal: rank 0 arms the engines, and after the last flush
+        # asks which of their weights the broadcast never landed on.
         check_weight_update = is_rank0 and getattr(self.strategy.args.train, "check_weight_update_equal", False)
-        sent_energy: dict[int, float] = {}
         if check_weight_update:
             ray.get([engine.arm_refit_name_check.remote() for engine in self.vllm_engines])
         # 512 MiB flushes, matching slime's `--update-weight-buffer-size` default
@@ -712,41 +710,27 @@ class PolicyTrainer:
                 pending_metas.append((hf_name, hf_weight.dtype, tuple(hf_weight.shape)))
                 pending_tensors.append(hf_weight)
                 pending_bytes += nbytes
-                if check_weight_update:
-                    match = re.search(r"layers\.(\d+)", hf_name)
-                    layer = int(match.group(1)) if match else -1
-                    sent_energy[layer] = sent_energy.get(layer, 0.0) + float(hf_weight.float().square().sum())
             del weight
 
         if is_rank0:
             _flush()
 
         if check_weight_update:
-            # Does the engine hold the weights we just sent? Compare energy per layer: the
-            # engines are replicas, so one answers for all. This asks about equality, not
-            # about change — an update too small to move a bf16 weight cannot fool it, and a
-            # layer the engine never received drifts further from the trainer every step.
-            held = ray.get(self.vllm_engines[0].weight_energy_by_layer.remote())
-            drift = {
-                layer: abs(energy - held[layer]) / max(held[layer], 1e-9)
-                for layer, energy in sent_energy.items()
-                if layer in held
-            }
-            worst = max(drift.items(), key=lambda item: item[1], default=(None, 0.0))
-            # And by name where the two namespaces line up: which params the broadcast never
-            # addressed at all. None means vLLM reported names we cannot match, so the energy
-            # comparison above is the only verdict.
+            # Which of the engine's weights did this broadcast never land on? The engines are
+            # replicas, so one answers for all.
             unaddressed = ray.get(self.vllm_engines[0].refit_unaddressed_params.remote())
-            log = logger.warning if worst[1] > 1e-4 or unaddressed else logger.info
-            log(
-                f"[check_weight_update] trainer vs vLLM weight energy over {len(drift)} layers: "
-                f"max relative difference {worst[1]:.2e} at layer {worst[0]}; "
-                + (
-                    "by-name coverage unavailable (vLLM reports names we cannot match)"
-                    if unaddressed is None
-                    else f"{len(unaddressed)} params never addressed by name: {unaddressed[:5]}"
+            if unaddressed is None:
+                logger.warning(
+                    "[check_weight_update] cannot verify: vLLM reports assigned weights under names "
+                    "that do not match its own parameters"
                 )
-            )
+            elif unaddressed:
+                logger.warning(
+                    f"[check_weight_update] {len(unaddressed)} vLLM weights the broadcast never "
+                    f"landed on (the rollout keeps the old values): {unaddressed[:10]}"
+                )
+            else:
+                logger.info("[check_weight_update] the broadcast landed on every vLLM weight")
 
         torch.cuda.empty_cache()
         torch_dist_barrier_and_cuda_sync()

@@ -234,15 +234,6 @@ class RolloutRayActor:
             return None
         return sorted(set.intersection(*(set(names) for names in results)))
 
-    async def weight_energy_by_layer(self):
-        # Sum the workers' per-layer energy: TP and EP give each worker a disjoint slice of
-        # this engine's weights, so the total over the engine is the whole model.
-        merged: dict[int, float] = {}
-        for energy in await self.llm.collective_rpc("weight_energy_by_layer"):
-            for layer, value in energy.items():
-                merged[layer] = merged.get(layer, 0.0) + value
-        return merged
-
     async def pause_generation(self):
         await self.llm.pause_generation(mode="keep")
 

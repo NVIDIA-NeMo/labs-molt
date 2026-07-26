@@ -113,27 +113,3 @@ class WorkerWrap:
             return None
         held = {name for name, param in self.model_runner.model.named_parameters() if param.is_floating_point()}
         return sorted(held - loaded) if loaded <= held else None
-
-    def weight_energy_by_layer(self):
-        """This worker's float-param energy (sum of squares) per decoder layer.
-
-        Energy is what makes the trainer's weights and the engine's comparable at all: vLLM
-        concatenates (gate_proj|up_proj -> w13_weight, q|k|v -> qkv_proj) and shards params
-        across TP/EP workers, and neither transform changes the multiset of values — so the
-        per-layer total is identical on both sides iff the engine holds the weights that were
-        sent. Names cannot be compared; these numbers can. Layer -1 holds everything outside
-        the decoder stack.
-        """
-        import re
-
-        import torch
-
-        energy: dict[int, float] = {}
-        with torch.no_grad():
-            for name, param in self.model_runner.model.named_parameters():
-                if not param.is_floating_point():
-                    continue
-                match = re.search(r"layers\.(\d+)", name)
-                layer = int(match.group(1)) if match else -1
-                energy[layer] = energy.get(layer, 0.0) + float(param.detach().float().square().sum())
-        return energy
