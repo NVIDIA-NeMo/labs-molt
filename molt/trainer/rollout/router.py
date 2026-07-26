@@ -49,14 +49,25 @@ class VllmRouterActor:
     this actor: the daemon thread never gives the GIL back, the actor's MainThread can't finish
     ``Thread.start()``, ``__init__`` never returns, and the actor hangs forever in PENDING_CREATION.
     So it gets its own process (own GIL, blocks freely); the actor just supervises it and reports the
-    URL. Fixed port (single-job runs don't collide). Weight sync bypasses the router (NCCL straight
-    to the engines)."""
+    URL. Weight sync bypasses the router (NCCL straight to the engines).
 
-    def __init__(self, worker_urls, *, policy="consistent_hash", port=30000, max_payload_mb=512):
+    Both listen ports are taken from the kernel rather than left at the router's defaults (30000 /
+    29000): a router leaked by a killed job keeps those bound, and every later job landing on that
+    node then dies at startup — the metrics listener panics first, which kills the whole subprocess.
+    Callers discover the address through ``url()``, so nothing depends on a fixed number."""
+
+    @staticmethod
+    def _free_port(host: str) -> int:
+        with socket.socket() as s:
+            s.bind((host, 0))
+            return s.getsockname()[1]
+
+    def __init__(self, worker_urls, *, policy="consistent_hash", port=None, max_payload_mb=512):
         import subprocess
         import sys
 
-        self._host, self._port = ray.util.get_node_ip_address(), port
+        self._host = ray.util.get_node_ip_address()
+        self._port = port or self._free_port(self._host)
         self._proc = subprocess.Popen(
             [
                 sys.executable,
@@ -65,7 +76,11 @@ class VllmRouterActor:
                 "--host",
                 self._host,
                 "--port",
-                str(port),
+                str(self._port),
+                "--prometheus-host",
+                self._host,
+                "--prometheus-port",
+                str(self._free_port(self._host)),
                 "--policy",
                 policy,
                 "--max-payload-size",
@@ -367,7 +382,7 @@ class AgentRunnerActor:
         return results
 
 
-def create_vllm_router(engines, *, policy="consistent_hash", port=30000):
+def create_vllm_router(engines, *, policy="consistent_hash", port=None):
     """Serve each engine's OpenAI API + launch the vllm-router in front; return (router, url).
 
     Default policy ``consistent_hash`` routes by the ``x-session-id`` header so a rollout's render +
