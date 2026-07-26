@@ -36,26 +36,35 @@ def _worker(params):
     return worker
 
 
-def test_reports_only_the_params_the_broadcast_did_not_move():
-    params = {"a": torch.zeros(2), "b": torch.zeros(2)}
+def test_counts_unchanged_per_layer():
+    params = {"layers.0.w": torch.zeros(2), "layers.0.b": torch.zeros(2), "layers.1.w": torch.zeros(2)}
     worker = _worker(params)
     worker.reset_weight_update_check()
-    params["a"] = torch.ones(2)  # refreshed by the broadcast
-    assert worker.weight_update_missing() == (["b"], 2)
+    params["layers.0.w"] = torch.ones(2)  # only layer 0 was refreshed
+    assert worker.weight_update_missing() == {0: [1, 2], 1: [1, 1]}
 
 
-def test_a_fully_dropped_broadcast_shows_every_param_unchanged():
-    worker = _worker({"a": torch.zeros(2), "b": torch.zeros(2)})
+def test_a_fully_dropped_broadcast_leaves_every_layer_untouched():
+    worker = _worker({"layers.0.w": torch.zeros(2), "layers.1.w": torch.zeros(2)})
     worker.reset_weight_update_check()
-    assert worker.weight_update_missing() == (["a", "b"], 2)
+    assert worker.weight_update_missing() == {0: [1, 1], 1: [1, 1]}
 
 
-def test_a_complete_broadcast_reports_nothing_unchanged():
-    params = {"a": torch.zeros(2), "b": torch.zeros(2)}
+def test_params_outside_the_decoder_stack_group_under_minus_one():
+    params = {"embed_tokens.weight": torch.zeros(2), "layers.3.w": torch.zeros(2)}
     worker = _worker(params)
     worker.reset_weight_update_check()
-    params["a"], params["b"] = torch.ones(2), torch.full((2,), 3.0)
-    assert worker.weight_update_missing() == ([], 2)
+    params["embed_tokens.weight"] = torch.ones(2)
+    assert worker.weight_update_missing() == {-1: [0, 1], 3: [1, 1]}
+
+
+def test_a_sign_flipping_update_is_not_missed():
+    """Sum would cancel here; sum of squares must not."""
+    params = {"layers.0.w": torch.tensor([1.0, -1.0])}
+    worker = _worker(params)
+    worker.reset_weight_update_check()
+    params["layers.0.w"] = torch.tensor([2.0, -2.0])
+    assert worker.weight_update_missing() == {0: [0, 1]}
 
 
 def test_check_off_reports_nothing():

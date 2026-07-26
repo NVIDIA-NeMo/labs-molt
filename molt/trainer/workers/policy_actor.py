@@ -17,9 +17,9 @@
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
 import os
+import re
 import socket
 import time
-from collections import Counter
 from contextlib import ExitStack
 from dataclasses import fields
 from typing import Dict, List
@@ -602,8 +602,12 @@ class PolicyTrainer:
         # still call `gather_full_param` (an FSDP collective) but drop the
         # gathered tensor immediately — no point staging the batch on every rank.
         is_rank0 = torch.distributed.get_rank() == 0
-        # --train.check_weight_update_equal: rank 0 arms the check, evaluated after the last flush.
+        # --train.check_weight_update_equal: rank 0 arms the check, evaluated after the last
+        # flush. `sent_energy` is this broadcast's per-layer weight energy; comparing it with
+        # the previous broadcast tells which layers the trainer actually moved, which is the
+        # reference the engine-side diff needs to separate "stale" from "never updated".
         check_weight_update = is_rank0 and getattr(self.strategy.args.train, "check_weight_update_equal", False)
+        sent_energy: dict[int, float] = {}
         if check_weight_update:
             ray.get([engine.reset_weight_update_check.remote() for engine in self.vllm_engines])
         # 512 MiB flushes, matching slime's `--update-weight-buffer-size` default
@@ -710,25 +714,40 @@ class PolicyTrainer:
                 pending_metas.append((hf_name, hf_weight.dtype, tuple(hf_weight.shape)))
                 pending_tensors.append(hf_weight)
                 pending_bytes += nbytes
+                if check_weight_update:
+                    match = re.search(r"layers\.(\d+)", hf_name)
+                    layer = int(match.group(1)) if match else -1
+                    sent_energy[layer] = sent_energy.get(layer, 0.0) + float(hf_weight.float().square().sum())
             del weight
 
         if is_rank0:
             _flush()
 
         if check_weight_update:
-            reports = [r for r in ray.get([e.weight_update_missing.remote() for e in self.vllm_engines]) if r]
-            unchanged = sorted({name for names, _ in reports for name in names})
-            total = max((count for _, count in reports), default=0)
-            # Read this against actor_grad_norm: a step whose gradient was zero (uniform
-            # group reward) broadcasts identical weights, so 0 changed is correct there.
-            # Group the unchanged by module so a whole sub-tree that never moves stands out
-            # from the ones that legitimately don't: a frozen tower / router, or an update
-            # smaller than the param dtype's resolution.
-            by_module = Counter(name.rsplit(".", 2)[0].rsplit(".", 1)[-1] for name in unchanged)
-            logger.info(
-                f"[check_weight_update] {total - len(unchanged)}/{total} vLLM params changed value; "
-                f"{len(unchanged)} unchanged, by module: {by_module.most_common(8)}"
-            )
+            engine_counts: dict[int, list[int]] = {}
+            for report in ray.get([e.weight_update_missing.remote() for e in self.vllm_engines]):
+                for layer, (unchanged, total) in (report or {}).items():
+                    entry = engine_counts.setdefault(layer, [0, 0])
+                    entry[0] += unchanged
+                    entry[1] += total
+            # Cross-check both sides per layer: a layer whose weights the trainer changed
+            # this step but whose engine params all kept their value is genuinely stale.
+            # Layers the trainer did not touch (frozen tower / router, or a step smaller
+            # than the param dtype resolves) drop out on their own — no false alarm.
+            previous, self._weight_update_sent = getattr(self, "_weight_update_sent", None), sent_energy
+            trainer_moved = {layer for layer, e in sent_energy.items() if previous and previous.get(layer) != e}
+            engine_moved = {layer for layer, (unchanged, total) in engine_counts.items() if unchanged < total}
+            stale = sorted(trainer_moved - engine_moved)
+            if stale:
+                logger.warning(
+                    f"[check_weight_update] {len(stale)} layer(s) the trainer updated did NOT change "
+                    f"in vLLM (stale rollout weights): {stale[:10]}"
+                )
+            else:
+                logger.info(
+                    f"[check_weight_update] every layer the trainer updated changed in vLLM "
+                    f"({len(trainer_moved)} of {len(engine_counts)})"
+                )
 
         torch.cuda.empty_cache()
         torch_dist_barrier_and_cuda_sync()

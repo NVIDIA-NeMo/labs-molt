@@ -117,14 +117,23 @@ class WorkerWrap:
         self._weight_update_before = self._float_param_values()
 
     def weight_update_missing(self):
-        """Float params whose value the last broadcast did not move, then stop tracking.
+        """Per decoder layer, how many float params the last broadcast left untouched.
 
-        ``None`` when the check was never armed. Weights that are frozen (or whose step was
-        a no-op) land here legitimately, so the count is the signal: a healthy refit moves
-        most of the model, and "nothing moved" means the engine kept its old weights.
+        Returns ``{layer: [unchanged, total]}`` (layer ``-1`` for params outside the decoder
+        stack), or ``None`` when the check was never armed. Aggregating by layer is what makes
+        this comparable to the sender: vLLM fuses (gate_up -> w13), remaps prefixes and shards
+        params across workers, so no name survives the trip — but every one of those transforms
+        stays inside its own layer, so per-layer counts line up on both sides.
         """
+        import re
+
         before, self._weight_update_before = getattr(self, "_weight_update_before", None), None
         if before is None:
             return None
-        after = self._float_param_values()
-        return sorted(name for name, value in after.items() if before.get(name) == value), len(after)
+        counts: dict[int, list[int]] = {}
+        for name, value in self._float_param_values().items():
+            match = re.search(r"layers\.(\d+)", name)
+            entry = counts.setdefault(int(match.group(1)) if match else -1, [0, 0])
+            entry[0] += before.get(name) == value
+            entry[1] += 1
+        return counts
