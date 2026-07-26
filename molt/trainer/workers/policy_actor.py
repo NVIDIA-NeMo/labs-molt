@@ -702,8 +702,13 @@ class PolicyTrainer:
 
         if check_weight_update:
             per_engine = ray.get([e.weight_update_missing.remote() for e in self.vllm_engines])
-            missing = sorted({name for lst in per_engine for name in lst})
-            if missing:
+            missing = None if any(lst is None for lst in per_engine) else sorted(set().union(*per_engine))
+            if missing is None:
+                logger.warning(
+                    "[check_weight_update] unavailable: this vLLM model's load_weights does not "
+                    "report the names it assigned, so refit coverage cannot be verified"
+                )
+            elif missing:
                 logger.warning(
                     f"[check_weight_update] {len(missing)} vLLM params NOT refreshed by this broadcast "
                     f"(stale rollout weights); sample: {missing[:10]}"

@@ -228,10 +228,14 @@ class RolloutRayActor:
 
     async def weight_update_missing(self):
         # Union the per-worker missing-param lists (weights are TP/EP-sharded across workers).
+        # A worker returns None when its model never reported loaded names; propagate that
+        # so the caller says "unavailable" instead of "everything is stale".
         results = await self.llm.collective_rpc("weight_update_missing")
+        if any(r is None for r in results or []):
+            return None
         missing = set()
         for r in results or []:
-            missing.update(r or [])
+            missing.update(r)
         return sorted(missing)
 
     async def pause_generation(self):

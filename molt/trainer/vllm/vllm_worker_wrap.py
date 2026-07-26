@@ -77,8 +77,14 @@ class WorkerWrap:
         # Accumulate refreshed param names for the optional whole-broadcast coverage
         # check (--train.check_weight_update_equal); a no-op unless armed via
         # reset_weight_update_check().
-        if getattr(self, "_weight_update_loaded", None) is not None and loaded:
-            self._weight_update_loaded.update(loaded)
+        if getattr(self, "_weight_update_loaded", None) is not None:
+            if loaded is None:
+                # Not every vLLM model returns the names it assigned. Without them the
+                # coverage check has nothing to subtract and would report the whole model
+                # stale, so mark it unavailable instead of inventing a result.
+                self._weight_update_reported = False
+            else:
+                self._weight_update_loaded.update(loaded)
         # Warn on EVERY refit flush that vLLM ignored entirely (loaded nothing) -- a real
         # name-format break silently drops those updates -> stale rollout weights.
         # `load_weights` returns the set of *vLLM-internal* param names it assigned, which
@@ -99,14 +105,18 @@ class WorkerWrap:
     def reset_weight_update_check(self):
         """Begin tracking which params load_weights assigns across this refit's flushes."""
         self._weight_update_loaded = set()
+        self._weight_update_reported = True
 
     def weight_update_missing(self):
         """This worker's float params that NO flush of the last broadcast refreshed
         (stale rollout weights), then stop tracking. Names are vLLM-internal, matching
-        load_weights' return, so the set-difference is apples-to-apples."""
+        load_weights' return, so the set-difference is apples-to-apples. ``None`` means
+        this model never reported loaded names, so coverage is unknowable here."""
         loaded = getattr(self, "_weight_update_loaded", None)
         self._weight_update_loaded = None
         if loaded is None:
             return []
+        if not self._weight_update_reported:
+            return None
         held = {n for n, p in self.model_runner.model.named_parameters() if p.is_floating_point()}
         return sorted(held - loaded)
