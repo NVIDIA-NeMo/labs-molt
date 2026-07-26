@@ -102,21 +102,40 @@ class WorkerWrap:
             )
         del buf
 
+    def _float_param_fingerprints(self):
+        """One cheap value fingerprint per float param, keyed by vLLM-internal name."""
+        import torch
+
+        with torch.no_grad():
+            return {
+                name: float(param.detach().float().sum())
+                for name, param in self.model_runner.model.named_parameters()
+                if param.is_floating_point()
+            }
+
     def reset_weight_update_check(self):
         """Begin tracking which params load_weights assigns across this refit's flushes."""
         self._weight_update_loaded = set()
         self._weight_update_reported = True
+        # Fallback for models whose load_weights reports nothing: fingerprint now and
+        # diff after the broadcast to see which params it actually wrote.
+        self._weight_update_before = self._float_param_fingerprints()
 
     def weight_update_missing(self):
-        """This worker's float params that NO flush of the last broadcast refreshed
-        (stale rollout weights), then stop tracking. Names are vLLM-internal, matching
-        load_weights' return, so the set-difference is apples-to-apples. ``None`` means
-        this model never reported loaded names, so coverage is unknowable here."""
+        """What the last broadcast failed to refresh on this worker, then stop tracking.
+
+        Returns ``("names", stale)`` when the model reported the params it assigned —
+        ``stale`` is then the float params no flush touched, i.e. genuinely stale rollout
+        weights. Models that report nothing fall back to ``("unchanged", unchanged)``,
+        the params whose value the broadcast did not move; frozen weights legitimately
+        land there, so only the *count* is meaningful (0 changed = the refit is dropped).
+        """
         loaded = getattr(self, "_weight_update_loaded", None)
         self._weight_update_loaded = None
         if loaded is None:
-            return []
-        if not self._weight_update_reported:
             return None
-        held = {n for n, p in self.model_runner.model.named_parameters() if p.is_floating_point()}
-        return sorted(held - loaded)
+        before, self._weight_update_before = self._weight_update_before, None
+        if not self._weight_update_reported:
+            after = self._float_param_fingerprints()
+            return "unchanged", sorted(n for n, fp in after.items() if before.get(n) == fp)
+        return "names", sorted(set(before) - loaded)

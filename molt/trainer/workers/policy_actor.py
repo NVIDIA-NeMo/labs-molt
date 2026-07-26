@@ -701,19 +701,22 @@ class PolicyTrainer:
             _flush()
 
         if check_weight_update:
-            per_engine = ray.get([e.weight_update_missing.remote() for e in self.vllm_engines])
-            missing = None if any(lst is None for lst in per_engine) else sorted(set().union(*per_engine))
-            if missing is None:
+            reports = [r for r in ray.get([e.weight_update_missing.remote() for e in self.vllm_engines]) if r]
+            names = sorted({n for mode, lst in reports if mode == "names" for n in lst})
+            unchanged = sorted({n for mode, lst in reports if mode == "unchanged" for n in lst})
+            if names:
                 logger.warning(
-                    "[check_weight_update] unavailable: this vLLM model's load_weights does not "
-                    "report the names it assigned, so refit coverage cannot be verified"
+                    f"[check_weight_update] {len(names)} vLLM params NOT refreshed by this broadcast "
+                    f"(stale rollout weights); sample: {names[:10]}"
                 )
-            elif missing:
+            if unchanged:
+                # Value-based fallback (model reports no names): frozen weights land here
+                # too, so read the count, not the list. All of them unchanged = refit lost.
                 logger.warning(
-                    f"[check_weight_update] {len(missing)} vLLM params NOT refreshed by this broadcast "
-                    f"(stale rollout weights); sample: {missing[:10]}"
+                    f"[check_weight_update] {len(unchanged)} vLLM params unchanged in value by this "
+                    f"broadcast; sample: {unchanged[:5]}"
                 )
-            else:
+            if reports and not names and not unchanged:
                 logger.info("[check_weight_update] all vLLM params refreshed by this broadcast")
 
         torch.cuda.empty_cache()

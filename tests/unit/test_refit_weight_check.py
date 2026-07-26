@@ -28,14 +28,16 @@ import torch
 from molt.trainer.vllm.vllm_worker_wrap import WorkerWrap
 
 
-def _worker(loaded_return):
-    """A WorkerWrap stub whose model holds two float params and reports `loaded_return`."""
+def _worker(loaded_return, params=None):
+    """A WorkerWrap stub whose model holds `params` (default: two zero float params)."""
+    params = params if params is not None else {"layers.0.w": torch.zeros(2), "layers.1.w": torch.zeros(2)}
     worker = WorkerWrap.__new__(WorkerWrap)
     model = types.SimpleNamespace(
         load_weights=lambda weights: loaded_return,
-        named_parameters=lambda: iter([("layers.0.w", torch.zeros(2)), ("layers.1.w", torch.zeros(2))]),
+        named_parameters=lambda: iter(list(params.items())),
     )
     worker.model_runner = types.SimpleNamespace(model=model)
+    worker._params = params
     return worker
 
 
@@ -52,23 +54,24 @@ def test_all_params_refreshed_reports_empty():
     worker = _worker({"layers.0.w", "layers.1.w"})
     worker.reset_weight_update_check()
     _record(worker, {"layers.0.w", "layers.1.w"})
-    assert worker.weight_update_missing() == []
+    assert worker.weight_update_missing() == ("names", [])
 
 
 def test_partially_refreshed_reports_the_stale_names():
     worker = _worker({"layers.0.w"})
     worker.reset_weight_update_check()
     _record(worker, {"layers.0.w"})
-    assert worker.weight_update_missing() == ["layers.1.w"]
+    assert worker.weight_update_missing() == ("names", ["layers.1.w"])
 
 
-def test_model_without_loaded_names_reports_unavailable_not_all_stale():
+def test_model_without_loaded_names_falls_back_to_value_diff():
     worker = _worker(None)
     worker.reset_weight_update_check()
     _record(worker, None)
-    assert worker.weight_update_missing() is None
+    worker._params["layers.0.w"] = torch.ones(2)  # this one was written by the broadcast
+    assert worker.weight_update_missing() == ("unchanged", ["layers.1.w"])
 
 
-def test_check_off_reports_empty():
+def test_check_off_reports_nothing():
     worker = _worker(None)
-    assert worker.weight_update_missing() == []
+    assert worker.weight_update_missing() is None
