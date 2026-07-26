@@ -74,3 +74,27 @@ def test_a_layer_the_engine_never_received_shows_up_as_energy_drift():
 def test_non_float_params_are_skipped():
     worker = _worker({"model.layers.0.w": torch.tensor([2.0]), "model.layers.0.idx": torch.tensor([7])})
     assert worker.weight_energy_by_layer() == {0: 4.0}
+
+
+def _armed_worker(params, loaded):
+    """A worker whose last broadcast reported `loaded` as the names it assigned."""
+    worker = _worker(params)
+    worker._refit_loaded = set(loaded)
+    return worker
+
+
+def test_by_name_coverage_lists_the_params_the_broadcast_never_addressed():
+    params = {"model.layers.0.w": torch.tensor([1.0]), "model.layers.0.experts": torch.tensor([1.0])}
+    worker = _armed_worker(params, ["model.layers.0.w"])
+    assert worker.refit_unaddressed_params() == ["model.layers.0.experts"]
+
+
+def test_by_name_coverage_is_unavailable_when_the_namespaces_differ():
+    """vLLM may report the pre-mapping or fused name; then a diff would flag the whole model."""
+    params = {"model.layers.0.w": torch.tensor([1.0])}
+    worker = _armed_worker(params, ["layers.0.w"])  # same weight, different namespace
+    assert worker.refit_unaddressed_params() is None
+
+
+def test_by_name_coverage_is_unavailable_when_the_model_reports_nothing():
+    assert _armed_worker({"model.layers.0.w": torch.tensor([1.0])}, []).refit_unaddressed_params() is None

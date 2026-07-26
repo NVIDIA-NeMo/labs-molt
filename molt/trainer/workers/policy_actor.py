@@ -606,6 +606,8 @@ class PolicyTrainer:
         # and compares it with the engine's after the last flush.
         check_weight_update = is_rank0 and getattr(self.strategy.args.train, "check_weight_update_equal", False)
         sent_energy: dict[int, float] = {}
+        if check_weight_update:
+            ray.get([engine.arm_refit_name_check.remote() for engine in self.vllm_engines])
         # 512 MiB flushes, matching slime's `--update-weight-buffer-size` default
         # (512 * 1024**2). vLLM runs at high gpu_memory_utilization (~0.9-0.95) with
         # little free VRAM, and the receiver allocates a contiguous
@@ -731,10 +733,19 @@ class PolicyTrainer:
                 if layer in held
             }
             worst = max(drift.items(), key=lambda item: item[1], default=(None, 0.0))
-            log = logger.warning if worst[1] > 1e-4 else logger.info
+            # And by name where the two namespaces line up: which params the broadcast never
+            # addressed at all. None means vLLM reported names we cannot match, so the energy
+            # comparison above is the only verdict.
+            unaddressed = ray.get(self.vllm_engines[0].refit_unaddressed_params.remote())
+            log = logger.warning if worst[1] > 1e-4 or unaddressed else logger.info
             log(
                 f"[check_weight_update] trainer vs vLLM weight energy over {len(drift)} layers: "
-                f"max relative difference {worst[1]:.2e} at layer {worst[0]}"
+                f"max relative difference {worst[1]:.2e} at layer {worst[0]}; "
+                + (
+                    "by-name coverage unavailable (vLLM reports names we cannot match)"
+                    if unaddressed is None
+                    else f"{len(unaddressed)} params never addressed by name: {unaddressed[:5]}"
+                )
             )
 
         torch.cuda.empty_cache()

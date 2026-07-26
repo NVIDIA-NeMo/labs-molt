@@ -74,6 +74,10 @@ class WorkerWrap:
             (name, part.view(dtype).view(*shape)) for (name, dtype, shape), part in zip(metas, buf.split(sizes))
         ]
         loaded = self.model_runner.model.load_weights(weights=weights)
+        # Collect the names vLLM says it assigned, for the exact by-name coverage check
+        # (--train.check_weight_update_equal). Only armed between reset/report calls.
+        if getattr(self, "_refit_loaded", None) is not None and loaded:
+            self._refit_loaded.update(loaded)
         # Warn on EVERY refit flush that vLLM ignored entirely (loaded nothing) -- a real
         # name-format break silently drops those updates -> stale rollout weights.
         # `load_weights` returns the set of *vLLM-internal* param names it assigned, which
@@ -90,6 +94,25 @@ class WorkerWrap:
                 flush=True,
             )
         del buf
+
+    def arm_refit_name_check(self):
+        """Start collecting the param names ``load_weights`` assigns in the coming broadcast."""
+        self._refit_loaded = set()
+
+    def refit_unaddressed_params(self):
+        """This worker's float params that the broadcast never assigned, by exact name.
+
+        ``None`` when the names are not comparable — either the model reports nothing, or it
+        reports names from a different namespace than ``named_parameters()`` (vLLM models are
+        free to return the pre-mapping or the fused name). The subset test is what makes this
+        safe: without it, a namespace mismatch reads as "the whole model is stale", which is
+        how a by-name check false-alarms.
+        """
+        loaded, self._refit_loaded = getattr(self, "_refit_loaded", None), None
+        if not loaded:
+            return None
+        held = {name for name, param in self.model_runner.model.named_parameters() if param.is_floating_point()}
+        return sorted(held - loaded) if loaded <= held else None
 
     def weight_energy_by_layer(self):
         """This worker's float-param energy (sum of squares) per decoder layer.

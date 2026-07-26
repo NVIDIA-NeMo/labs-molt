@@ -223,6 +223,17 @@ class RolloutRayActor:
         )
         return result
 
+    async def arm_refit_name_check(self):
+        await self.llm.collective_rpc("arm_refit_name_check")
+
+    async def refit_unaddressed_params(self):
+        # A param only has to be assigned on the worker that holds its shard, so intersect.
+        # None from any worker means the names are not comparable there — say so for all.
+        results = await self.llm.collective_rpc("refit_unaddressed_params")
+        if any(names is None for names in results):
+            return None
+        return sorted(set.intersection(*(set(names) for names in results)))
+
     async def weight_energy_by_layer(self):
         # Sum the workers' per-layer energy: TP and EP give each worker a disjoint slice of
         # this engine's weights, so the total over the engine is the whole model.
