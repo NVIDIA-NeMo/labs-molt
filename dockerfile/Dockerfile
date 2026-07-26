@@ -150,7 +150,6 @@ RUN apt-get update && apt-get install -y --allow-change-held-packages rdma-core 
     python -m pip install --no-cache-dir nvidia-nvshmem-cu13==3.6.5 && \
     NVSHMEM_LIB_PATH=$(pip show nvidia-nvshmem-cu13 | grep "Location:" | cut -d' ' -f2)/nvidia/nvshmem/lib && \
     ln -sf ${NVSHMEM_LIB_PATH}/libnvshmem_host.so.3 ${NVSHMEM_LIB_PATH}/libnvshmem_host.so && \
-    apt-get update && apt-get install -y --no-install-recommends libnvidia-ml-dev && \
     env RDMA_CORE_HOME=${RDMA_CORE_HOME} HYBRID_EP_MULTINODE=1 \
         LD_LIBRARY_PATH=/usr/local/cuda/lib64/:${LD_LIBRARY_PATH:-} \
         TORCH_CUDA_ARCH_LIST="${DEEPEP_ARCH_LIST}" MAX_JOBS=8 \
@@ -168,11 +167,7 @@ RUN apt-get update && apt-get install -y --allow-change-held-packages rdma-core 
 # vision-only RL and the encoder is frozen — but the weights must load. Torch-pinned so the
 # [audio] extra (librosa/soundfile; torchaudio already in base) can't swap the torch trio.
 # Baking it here removes the per-run, per-node rl_omni3 MOLT_INSTALL_AUDIO install.
-RUN T=$(python -c "import torch; print(torch.__version__)") && \
-    TV=$(python -c "import torchvision; print(torchvision.__version__)") && \
-    TA=$(python -c "import torchaudio; print(torchaudio.__version__)") && \
-    printf 'torch==%s\ntorchvision==%s\ntorchaudio==%s\n' "$T" "$TV" "$TA" > /tmp/torch-pin.txt && \
-    python -m pip install -c /tmp/torch-pin.txt "vllm[audio]==0.26.0" && rm -f /tmp/torch-pin.txt
+RUN python -m pip install -c /opt/torch-pin.txt "vllm[audio]==0.26.0"
 
 # --- VLM modeling-code runtime deps + molt requirements + fla -----------
 # requirements.txt minus what's already pinned/built above (torch trio, TE, flash-attn,
@@ -211,11 +206,8 @@ ENV FLASHINFER_DISABLE_VERSION_CHECK=1
 # vLLM 0.26 hard-pins nvidia-cutlass-dsl==4.6.0, whose cutlass.cute DSL dropped `ThrMma`. The
 # quack-kernels that dion pulls can lag that API and then AttributeError at import, taking
 # `import mamba_ssm` (mamba3 -> quack) down with it. Pin quack to the 4.6.0-compatible 0.6.1.
-# -c pins the torch trio + cutlass 4.6.0 so this can't perturb the vLLM/CUDA stack.
-RUN T=$(python -c "import torch; print(torch.__version__)") && \
-    TV=$(python -c "import torchvision; print(torchvision.__version__)") && \
-    TA=$(python -c "import torchaudio; print(torchaudio.__version__)") && \
-    printf 'torch==%s\ntorchvision==%s\ntorchaudio==%s\nnvidia-cutlass-dsl==4.6.0\n' "$T" "$TV" "$TA" > /tmp/pin.txt && \
+# -c reuses the torch-trio pin from build start + cutlass 4.6.0 so this can't perturb the stack.
+RUN { cat /opt/torch-pin.txt; echo 'nvidia-cutlass-dsl==4.6.0'; } > /tmp/pin.txt && \
     python -m pip install -c /tmp/pin.txt "quack-kernels==0.6.1" && rm -f /tmp/pin.txt
 
 # --- restore DeepEP's NVSHMEM ABI ----------------------------------------------
