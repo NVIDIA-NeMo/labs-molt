@@ -17,6 +17,7 @@
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
 import os
+import re
 import socket
 import time
 from contextlib import ExitStack
@@ -715,23 +716,23 @@ class PolicyTrainer:
             _flush()
 
         if check_weight_update:
-            engine_counts: dict[int, list[int]] = {}
-            for report in ray.get([e.weight_update_missing.remote() for e in self.vllm_engines]):
-                for layer, (unchanged, total) in (report or {}).items():
-                    entry = engine_counts.setdefault(layer, [0, 0])
-                    entry[0] += unchanged
-                    entry[1] += total
-            # Decoder layers all train, so they are each other's reference: a layer whose
-            # every param kept its value while its peers moved did not receive the update.
-            # A step with no gradient (uniform group reward) or weights below the param
-            # dtype's resolution move nothing anywhere, which reads as "0 of N" — not as a
-            # per-layer fault. Layer -1 holds the non-layer params (frozen tower, embeddings).
-            layers = {layer: counts for layer, counts in engine_counts.items() if layer >= 0}
-            stale = sorted(layer for layer, (unchanged, total) in layers.items() if unchanged == total)
-            log = logger.warning if stale and len(stale) < len(layers) else logger.info
-            log(
-                f"[check_weight_update] {len(layers) - len(stale)}/{len(layers)} decoder layers changed "
-                f"in vLLM; unchanged: {stale[:10]}"
+            reports = [r for r in ray.get([e.weight_update_missing.remote() for e in self.vllm_engines]) if r]
+            unchanged = sorted({name for names, _ in reports for name in names})
+            total = max((count for _, count in reports), default=0)
+            broadcasts = getattr(self, "_weight_update_broadcasts", 0) + 1
+            self._weight_update_broadcasts = broadcasts
+            # An RL step is small enough that a weight can arrive and still round to the same
+            # bf16 value, so a single broadcast cannot tell "not received" from "received but
+            # below the dtype's resolution". Accumulate instead: a weight that is really being
+            # refreshed moves in SOME broadcast, while one that never arrives is unchanged in
+            # every one. Indices are normalised out of the name so the residue names the shape
+            # of the miss — one kind of weight across every layer, or one whole layer.
+            kinds = {re.sub(r"\.\d+\.", ".*.", name) for name in unchanged}
+            self._never_refreshed = kinds if broadcasts == 1 else self._never_refreshed & kinds
+            logger.info(
+                f"[check_weight_update] {total - len(unchanged)}/{total} vLLM params changed value; "
+                f"{len(self._never_refreshed)} weight kinds unchanged in all {broadcasts} broadcasts: "
+                f"{sorted(self._never_refreshed)[:6]}"
             )
 
         torch.cuda.empty_cache()

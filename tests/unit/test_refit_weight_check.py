@@ -21,6 +21,7 @@ values before and after the broadcast asks the only question that matters — di
 actually receive the new weights.
 """
 
+import re
 import types
 
 import torch
@@ -36,26 +37,18 @@ def _worker(params):
     return worker
 
 
-def test_counts_unchanged_per_layer():
-    params = {"layers.0.w": torch.zeros(2), "layers.0.b": torch.zeros(2), "layers.1.w": torch.zeros(2)}
+def test_reports_only_the_params_the_broadcast_did_not_move():
+    params = {"layers.0.w": torch.zeros(2), "layers.1.w": torch.zeros(2)}
     worker = _worker(params)
     worker.reset_weight_update_check()
-    params["layers.0.w"] = torch.ones(2)  # only layer 0 was refreshed
-    assert worker.weight_update_missing() == {0: [1, 2], 1: [1, 1]}
+    params["layers.0.w"] = torch.ones(2)
+    assert worker.weight_update_missing() == (["layers.1.w"], 2)
 
 
-def test_a_fully_dropped_broadcast_leaves_every_layer_untouched():
+def test_a_fully_dropped_broadcast_shows_every_param_unchanged():
     worker = _worker({"layers.0.w": torch.zeros(2), "layers.1.w": torch.zeros(2)})
     worker.reset_weight_update_check()
-    assert worker.weight_update_missing() == {0: [1, 1], 1: [1, 1]}
-
-
-def test_params_outside_the_decoder_stack_group_under_minus_one():
-    params = {"embed_tokens.weight": torch.zeros(2), "layers.3.w": torch.zeros(2)}
-    worker = _worker(params)
-    worker.reset_weight_update_check()
-    params["embed_tokens.weight"] = torch.ones(2)
-    assert worker.weight_update_missing() == {-1: [0, 1], 3: [1, 1]}
+    assert worker.weight_update_missing() == (["layers.0.w", "layers.1.w"], 2)
 
 
 def test_a_sign_flipping_update_is_not_missed():
@@ -64,7 +57,31 @@ def test_a_sign_flipping_update_is_not_missed():
     worker = _worker(params)
     worker.reset_weight_update_check()
     params["layers.0.w"] = torch.tensor([2.0, -2.0])
-    assert worker.weight_update_missing() == {0: [0, 1]}
+    assert worker.weight_update_missing() == ([], 1)
+
+
+def _never_refreshed(unchanged_per_broadcast):
+    """The trainer's accumulation: kinds unchanged in EVERY broadcast so far."""
+    residue = None
+    for unchanged in unchanged_per_broadcast:
+        kinds = {re.sub(r"\.\d+\.", ".*.", name) for name in unchanged}
+        residue = kinds if residue is None else residue & kinds
+    return residue
+
+
+def test_a_weight_too_small_to_move_every_step_drops_out_of_the_residue():
+    """An RL step can round to the same bf16 value, so one broadcast proves nothing."""
+    attn = "model.layers.0.self_attn.qkv_proj.weight"
+    expert = "model.layers.0.mlp.experts.w13_weight"
+    # attn misses two broadcasts but moves on the third; the expert never moves.
+    residue = _never_refreshed([[attn, expert], [attn, expert], [expert]])
+    assert residue == {"model.layers.*.mlp.experts.w13_weight"}
+
+
+def test_one_kind_missed_across_every_layer_collapses_to_one_entry():
+    """The shape a name-format break makes: every layer's experts stale, the rest fine."""
+    unchanged = [f"model.layers.{i}.mlp.experts.w13_weight" for i in range(40)]
+    assert _never_refreshed([unchanged]) == {"model.layers.*.mlp.experts.w13_weight"}
 
 
 def test_check_off_reports_nothing():
