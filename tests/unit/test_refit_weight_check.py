@@ -54,14 +54,14 @@ def test_all_params_refreshed_reports_empty():
     worker = _worker({"layers.0.w", "layers.1.w"})
     worker.reset_weight_update_check()
     _record(worker, {"layers.0.w", "layers.1.w"})
-    assert worker.weight_update_missing() == ("names", [])
+    assert worker.weight_update_missing() == ([], ["layers.0.w", "layers.1.w"])
 
 
 def test_partially_refreshed_reports_the_stale_names():
     worker = _worker({"layers.0.w"})
     worker.reset_weight_update_check()
     _record(worker, {"layers.0.w"})
-    assert worker.weight_update_missing() == ("names", ["layers.1.w"])
+    assert worker.weight_update_missing() == (["layers.1.w"], ["layers.0.w", "layers.1.w"])
 
 
 def test_model_without_loaded_names_falls_back_to_value_diff():
@@ -69,7 +69,7 @@ def test_model_without_loaded_names_falls_back_to_value_diff():
     worker.reset_weight_update_check()
     _record(worker, None)
     worker._params["layers.0.w"] = torch.ones(2)  # this one was written by the broadcast
-    assert worker.weight_update_missing() == ("unchanged", ["layers.1.w"])
+    assert worker.weight_update_missing() == (None, ["layers.1.w"])
 
 
 def test_check_off_reports_nothing():

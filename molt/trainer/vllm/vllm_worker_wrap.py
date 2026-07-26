@@ -124,18 +124,18 @@ class WorkerWrap:
     def weight_update_missing(self):
         """What the last broadcast failed to refresh on this worker, then stop tracking.
 
-        Returns ``("names", stale)`` when the model reported the params it assigned —
-        ``stale`` is then the float params no flush touched, i.e. genuinely stale rollout
-        weights. Models that report nothing fall back to ``("unchanged", unchanged)``,
-        the params whose value the broadcast did not move; frozen weights legitimately
-        land there, so only the *count* is meaningful (0 changed = the refit is dropped).
+        Returns ``(stale, unchanged)``: params no flush claimed by name (``None`` when the
+        model reports no names), and params whose VALUE the broadcast did not move. The two
+        views answer different questions — a name vLLM never claimed is a mapping break, a
+        value that never moved is a weight the engine really did not receive. Frozen weights
+        land in ``unchanged`` legitimately, so read its count, not its list.
         """
         loaded = getattr(self, "_weight_update_loaded", None)
         self._weight_update_loaded = None
         if loaded is None:
             return None
         before, self._weight_update_before = self._weight_update_before, None
-        if not self._weight_update_reported:
-            after = self._float_param_fingerprints()
-            return "unchanged", sorted(n for n, fp in after.items() if before.get(n) == fp)
-        return "names", sorted(set(before) - loaded)
+        after = self._float_param_fingerprints()
+        unchanged = sorted(name for name, fp in after.items() if before.get(name) == fp)
+        stale = sorted(set(before) - loaded) if self._weight_update_reported else None
+        return stale, unchanged

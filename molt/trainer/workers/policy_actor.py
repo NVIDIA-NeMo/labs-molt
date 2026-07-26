@@ -702,21 +702,21 @@ class PolicyTrainer:
 
         if check_weight_update:
             reports = [r for r in ray.get([e.weight_update_missing.remote() for e in self.vllm_engines]) if r]
-            names = sorted({n for mode, lst in reports if mode == "names" for n in lst})
-            unchanged = sorted({n for mode, lst in reports if mode == "unchanged" for n in lst})
-            if names:
+            stale = sorted({n for s, _ in reports if s for n in s})
+            unchanged = sorted({n for _, u in reports for n in u})
+            if stale:
                 logger.warning(
-                    f"[check_weight_update] {len(names)} vLLM params NOT refreshed by this broadcast "
-                    f"(stale rollout weights); sample: {names[:10]}"
+                    f"[check_weight_update] {len(stale)} vLLM params NOT claimed by name in this "
+                    f"broadcast; sample: {stale[:10]}"
                 )
             if unchanged:
-                # Value-based fallback (model reports no names): frozen weights land here
-                # too, so read the count, not the list. All of them unchanged = refit lost.
+                # Frozen weights land here legitimately, so read the count: a param that is
+                # both unclaimed AND value-unchanged is a weight the engine never received.
                 logger.warning(
-                    f"[check_weight_update] {len(unchanged)} vLLM params unchanged in value by this "
-                    f"broadcast; sample: {unchanged[:5]}"
+                    f"[check_weight_update] {len(unchanged)} vLLM params unchanged in value "
+                    f"({len(set(stale) & set(unchanged))} of them also unclaimed); sample: {unchanged[:5]}"
                 )
-            if reports and not names and not unchanged:
+            if reports and not stale and not unchanged:
                 logger.info("[check_weight_update] all vLLM params refreshed by this broadcast")
 
         torch.cuda.empty_cache()
