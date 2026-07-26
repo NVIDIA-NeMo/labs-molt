@@ -45,7 +45,7 @@ def _record(worker, loaded_return):
     """Replay what update_weights_packed does with load_weights' return value."""
     if getattr(worker, "_weight_update_loaded", None) is not None:
         if loaded_return is None:
-            worker._weight_update_reported = False
+            worker._weight_update_names_reported = False
         else:
             worker._weight_update_loaded.update(loaded_return)
 

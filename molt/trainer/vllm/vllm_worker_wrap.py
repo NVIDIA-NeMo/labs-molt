@@ -82,7 +82,7 @@ class WorkerWrap:
                 # Not every vLLM model returns the names it assigned. Without them the
                 # coverage check has nothing to subtract and would report the whole model
                 # stale, so mark it unavailable instead of inventing a result.
-                self._weight_update_reported = False
+                self._weight_update_names_reported = False
             else:
                 self._weight_update_loaded.update(loaded)
         # Warn on EVERY refit flush that vLLM ignored entirely (loaded nothing) -- a real
@@ -114,11 +114,13 @@ class WorkerWrap:
             }
 
     def reset_weight_update_check(self):
-        """Begin tracking which params load_weights assigns across this refit's flushes."""
+        """Arm the refit coverage check for the broadcast that is about to run.
+
+        Records the pre-broadcast values to diff against, and starts collecting the names
+        load_weights claims across this refit's flushes.
+        """
         self._weight_update_loaded = set()
-        self._weight_update_reported = True
-        # Fallback for models whose load_weights reports nothing: fingerprint now and
-        # diff after the broadcast to see which params it actually wrote.
+        self._weight_update_names_reported = True
         self._weight_update_before = self._float_param_fingerprints()
 
     def weight_update_missing(self):
@@ -137,5 +139,5 @@ class WorkerWrap:
         before, self._weight_update_before = self._weight_update_before, None
         after = self._float_param_fingerprints()
         unchanged = sorted(name for name, fp in after.items() if before.get(name) == fp)
-        stale = sorted(set(before) - loaded) if self._weight_update_reported else None
+        stale = sorted(set(before) - loaded) if self._weight_update_names_reported else None
         return stale, unchanged

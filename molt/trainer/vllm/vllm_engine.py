@@ -233,8 +233,10 @@ class RolloutRayActor:
         results = [r for r in await self.llm.collective_rpc("weight_update_missing") if r is not None]
         if not results:
             return None
-        stale = None if any(s is None for s, _ in results) else sorted(set().union(*(set(s) for s, _ in results)))
-        return stale, sorted(set().union(*(set(u) for _, u in results)))
+        unchanged = set().union(*(set(u) for _, u in results))
+        if any(stale is None for stale, _ in results):
+            return None, sorted(unchanged)
+        return sorted(set().union(*(set(s) for s, _ in results))), sorted(unchanged)
 
     async def pause_generation(self):
         await self.llm.pause_generation(mode="keep")
