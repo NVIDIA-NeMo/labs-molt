@@ -202,6 +202,12 @@ RUN python -m pip install --no-cache-dir "tilelang==0.1.11" "tile-kernels==1.0.0
 # is container-local, so every job would recompile the DSA kernels from scratch.
 ENV TILELANG_CACHE_DIR=/root/.cache/tilelang
 
+# vLLM 0.26 hard-pins flashinfer-python==0.6.14, but flashinfer-cubin was never published past
+# 0.6.13, so `import flashinfer` RuntimeErrors on the version mismatch. No matching pair exists,
+# so bypass the check — flashinfer JIT-compiles any kernel missing from the 0.6.13 cubins (a
+# prefill attention op verified working on an A100 this way).
+ENV FLASHINFER_DISABLE_VERSION_CHECK=1
+
 # vLLM 0.26 hard-pins nvidia-cutlass-dsl==4.6.0, whose cutlass.cute DSL dropped `ThrMma`. The
 # quack-kernels that dion pulls can lag that API and then AttributeError at import, taking
 # `import mamba_ssm` (mamba3 -> quack) down with it. Pin quack to the 4.6.0-compatible 0.6.1.
@@ -234,7 +240,7 @@ RUN { find ${SITE}/nvidia -mindepth 2 -maxdepth 2 -type d -name lib | sort; echo
 # `import mamba_ssm`. Every module below imports in the CPU-only builder; deep_ep is the lone
 # exception (needs libcuda at import) and is covered by the NVSHMEM restore step above.
 RUN python -c "import importlib; \
-[importlib.import_module(m) for m in ('torch','transformers','ray','nemo_automodel','quack','quack.layout_utils','fla','tilelang','tvm_ffi','vllm_router','transformer_engine.pytorch','flash_attn','causal_conv1d','mamba_ssm','vllm')]; \
+[importlib.import_module(m) for m in ('torch','transformers','ray','nemo_automodel','quack','quack.layout_utils','fla','tilelang','tvm_ffi','vllm_router','transformer_engine.pytorch','flash_attn','causal_conv1d','mamba_ssm','flashinfer','vllm')]; \
 print('BUILD IMPORT CHECK OK')"
 
 # --- Entrypoint -----------------------------------------------------------------
