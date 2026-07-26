@@ -204,13 +204,11 @@ RUN python -m pip install --no-cache-dir "tilelang==0.1.11" "tile-kernels==1.0.0
 ENV TILELANG_CACHE_DIR=/root/.cache/tilelang
 RUN mkdir -p /root/.cache/tilelang
 
-# --- keep mamba_ssm importable next to vLLM's cutlass pin -----------------------
-# vLLM 0.26 requires nvidia-cutlass-dsl==4.6.0, which dropped `cutlass.cute.core.ThrMma`;
-# mamba_ssm 2.3.2.post1 (the newest release, source-built in step d) imports it, so with
-# 4.6.0 every Mamba/GDN model fails at import. Hold the last version that has it — vLLM's
-# own kernels are compiled, only its optional DSL path reads this wheel.
-RUN python -m pip install --no-cache-dir "nvidia-cutlass-dsl==4.5.2" && \
-    python -c "from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined; import vllm"
+# --- assert the Mamba/GDN path still imports next to vLLM's own deps ------------
+# vLLM pins nvidia-cutlass-dsl, whose cute DSL mamba_ssm imports from; a bump that drops a
+# symbol it uses (4.6.0 removed `cutlass.cute.core.ThrMma`) makes every Mamba/GDN model die
+# at model load. Fail the build here instead of at the first job.
+RUN python -c "from mamba_ssm.ops.triton.ssd_combined import mamba_chunk_scan_combined; import vllm"
 
 # vLLM 0.26 hard-pins nvidia-cutlass-dsl==4.6.0, whose cutlass.cute DSL dropped `ThrMma`. The
 # quack-kernels that dion pulls can lag that API and then AttributeError at import, taking
