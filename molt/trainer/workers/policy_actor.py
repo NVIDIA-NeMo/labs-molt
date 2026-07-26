@@ -704,11 +704,13 @@ class PolicyTrainer:
             reports = [r for r in ray.get([e.weight_update_missing.remote() for e in self.vllm_engines]) if r]
             unchanged = sorted({name for names, _ in reports for name in names})
             total = max((count for _, count in reports), default=0)
-            # Frozen params (vision tower, MoE router) never move, so the count is what
-            # matters: "nothing moved" means the broadcast never reached the engine.
+            # Read this against actor_grad_norm: a step whose gradient was zero (uniform
+            # group reward) broadcasts identical weights, so 0 changed is correct there.
+            # Frozen params (vision tower, MoE router) never move either. It is only a
+            # fault when nothing moved after a step that did update the actor.
             logger.info(
                 f"[check_weight_update] {total - len(unchanged)}/{total} vLLM params changed value; "
-                f"{len(unchanged)} unchanged (frozen weights included), sample: {unchanged[:5]}"
+                f"{len(unchanged)} unchanged (frozen + no-op steps included), sample: {unchanged[:5]}"
             )
 
         torch.cuda.empty_cache()
