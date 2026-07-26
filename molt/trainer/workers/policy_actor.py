@@ -725,9 +725,11 @@ class PolicyTrainer:
                     "that do not match its own parameters"
                 )
             elif unaddressed:
+                # A tied lm_head is in here by design (it reaches vLLM via embed_tokens);
+                # anything else kept its old value and makes the rollout stale.
                 logger.warning(
                     f"[check_weight_update] {len(unaddressed)} vLLM weights the broadcast never "
-                    f"landed on (the rollout keeps the old values): {unaddressed[:10]}"
+                    f"landed on: {unaddressed[:10]}"
                 )
             else:
                 logger.info("[check_weight_update] the broadcast landed on every vLLM weight")

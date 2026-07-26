@@ -107,6 +107,9 @@ class WorkerWrap:
         free to return the pre-mapping or the fused name). The subset test is what makes this
         safe: without it, a namespace mismatch reads as "the whole model is stale", which is
         how a by-name check false-alarms.
+
+        A weight the refit skips on purpose is listed too — a tied ``lm_head`` is never sent
+        because it reaches vLLM through ``embed_tokens`` — so read the names, not the count.
         """
         loaded, self._refit_loaded = getattr(self, "_refit_loaded", None), None
         if not loaded:
