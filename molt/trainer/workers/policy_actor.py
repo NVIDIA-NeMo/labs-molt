@@ -19,6 +19,7 @@
 import os
 import socket
 import time
+from collections import Counter
 from contextlib import ExitStack
 from dataclasses import fields
 from typing import Dict, List
@@ -720,11 +721,13 @@ class PolicyTrainer:
             total = max((count for _, count in reports), default=0)
             # Read this against actor_grad_norm: a step whose gradient was zero (uniform
             # group reward) broadcasts identical weights, so 0 changed is correct there.
-            # Frozen params (vision tower, MoE router) never move either. It is only a
-            # fault when nothing moved after a step that did update the actor.
+            # Group the unchanged by module so a whole sub-tree that never moves stands out
+            # from the ones that legitimately don't: a frozen tower / router, or an update
+            # smaller than the param dtype's resolution.
+            by_module = Counter(name.rsplit(".", 2)[0].rsplit(".", 1)[-1] for name in unchanged)
             logger.info(
                 f"[check_weight_update] {total - len(unchanged)}/{total} vLLM params changed value; "
-                f"{len(unchanged)} unchanged (frozen + no-op steps included), sample: {unchanged[:5]}"
+                f"{len(unchanged)} unchanged, by module: {by_module.most_common(8)}"
             )
 
         torch.cuda.empty_cache()
