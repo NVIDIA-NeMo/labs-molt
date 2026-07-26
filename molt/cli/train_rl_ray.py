@@ -672,8 +672,9 @@ if __name__ == "__main__":
         help="vLLM prefix KV cache. Multi-turn rollouts re-prefill the growing history each turn; "
         "prefix caching cuts that cost. The trainer invalidates the cache after every weight "
         "broadcast, including the blocks held by requests that straddle it — without that, "
-        "rollouts get served KV computed under the previous policy and vllm_kl drifts up over "
-        "the run. Incompatible with MTP speculative decoding.",
+        "rollouts get served KV computed under the previous policy. Off by default: it makes "
+        "the rollout/train logprob drift arrive sooner and larger. Incompatible with MTP "
+        "speculative decoding.",
     )
     parser.add_argument(
         "--vllm.enable_chunked_prefill",
