@@ -197,12 +197,6 @@ RUN python -m pip install --no-cache-dir "tilelang==0.1.11" "tile-kernels==1.0.0
 # is container-local, so every job would recompile the DSA kernels from scratch.
 ENV TILELANG_CACHE_DIR=/root/.cache/tilelang
 
-# vLLM 0.26 hard-pins flashinfer-python==0.6.14, but flashinfer-cubin was never published past
-# 0.6.13, so `import flashinfer` RuntimeErrors on the version mismatch. No matching pair exists,
-# so bypass the check — flashinfer JIT-compiles any kernel missing from the 0.6.13 cubins (a
-# prefill attention op verified working on an A100 this way).
-ENV FLASHINFER_DISABLE_VERSION_CHECK=1
-
 # vLLM 0.26 hard-pins nvidia-cutlass-dsl==4.6.0, whose cutlass.cute DSL dropped `ThrMma`. The
 # quack-kernels that dion pulls can lag that API and then AttributeError at import, taking
 # `import mamba_ssm` (mamba3 -> quack) down with it. Pin quack to the 4.6.0-compatible 0.6.1.
