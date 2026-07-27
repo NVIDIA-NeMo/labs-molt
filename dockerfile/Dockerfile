@@ -220,6 +220,15 @@ RUN python -m pip install --no-deps --force-reinstall nvidia-nvshmem-cu13==3.6.5
 RUN { find ${SITE}/nvidia -mindepth 2 -maxdepth 2 -type d -name lib | sort; echo ${SITE}/z3/lib; } \
         > /etc/ld.so.conf.d/python-nvidia-libs.conf && ldconfig
 
+# --- CUDA forward compatibility -------------------------------------------------
+# Ship cuda-compat-13-0 (the CUDA 13.0 forward-compat libcuda) so the stack can run on Data
+# Center hosts whose NVIDIA kernel driver is older than 580 (native CUDA 13). It lands in
+# /usr/local/cuda/compat and is NOT on the loader path by default — docker-entrypoint.sh
+# prepends it at runtime only when the detected host driver is < 580, so native-driver hosts
+# are unaffected. (Do NOT ldconfig it in — that would force it on every host.)
+RUN apt-get update && apt-get install -y --no-install-recommends cuda-compat-13-0 && \
+    rm -rf /var/lib/apt/lists/*
+
 # --- build-time import self-check -----------------------------------------------
 # Fail the build if the installed stack can't import, so a dependency bump can't ship an image
 # that only crashes at a user's runtime — e.g. the quack-vs-cutlass-DSL drift that broke
