@@ -274,6 +274,15 @@ class CheckpointManager:
                 ),
             )
             if not candidates:
+                # regular_subdirs is exhausted (only current_tag/best* dirs remain, both
+                # protected from eviction) but max_mem is still over budget: warn instead of
+                # silently leaving the checkpoint dir over budget forever.
+                if overflow_mem:
+                    self.strategy.print(
+                        f"Warning: checkpoint dir {ckpt_path} exceeds --ckpt.max_mem "
+                        f"({max_mem}GB), but only protected current/best checkpoints "
+                        "remain; nothing can be evicted."
+                    )
                 break
             shutil.rmtree(candidates[0][0], ignore_errors=True)
 
