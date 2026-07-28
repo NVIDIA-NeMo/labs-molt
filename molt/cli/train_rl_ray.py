@@ -740,13 +740,25 @@ if __name__ == "__main__":
         default=False,
         help="Enable reproducible behavior during distributed training",
     )
-    # Dynamic batch changes microbatch grouping; the packed representation
-    # still follows the loaded actor model path.
+    # Dynamic batch changes microbatch grouping while preserving the model's
+    # configured packed or padded representation.
     parser.add_argument(
         "--train.dynamic_batch_enable",
         action="store_true",
         default=False,
-        help="Group packed samples by token budget; reuses the loaded model's packed forward path.",
+        help=(
+            "Group samples by length under a per-GPU token budget to improve training throughput "
+            "and avoid OOMs from variable batch lengths when the budget is set correctly."
+        ),
+    )
+    parser.add_argument(
+        "--train.dynamic_batch_pad_to_multiple",
+        type=int,
+        default=1,
+        help=(
+            "Round padded dynamic batches to this sequence-length multiple. "
+            "Use 1024 to reduce variable-shape recompilation with FlexAttention; 1 disables extra bucketing."
+        ),
     )
     parser.add_argument(
         "--train.force_on_policy",
@@ -1037,15 +1049,30 @@ if __name__ == "__main__":
             )
 
     # --- Training / rollout sizing ---
+    pad_multiple = args.train.dynamic_batch_pad_to_multiple
+    if pad_multiple < 1:
+        raise ValueError("--train.dynamic_batch_pad_to_multiple must be at least 1.")
+    if pad_multiple > 1 and not args.train.dynamic_batch_enable:
+        raise ValueError("--train.dynamic_batch_pad_to_multiple requires --train.dynamic_batch_enable.")
+    if pad_multiple > 1 and args.fsdp.packing_samples:
+        raise ValueError("--train.dynamic_batch_pad_to_multiple applies only to padded dynamic batches.")
+    cp_multiple = 2 * args.fsdp.cp_size if args.fsdp.cp_size > 1 else 1
+    if pad_multiple > 1 and pad_multiple % cp_multiple:
+        raise ValueError(
+            f"--train.dynamic_batch_pad_to_multiple must be divisible by 2 * cp_size ({cp_multiple})."
+        )
+
     if args.train.dynamic_batch_enable:
-        if not args.fsdp.packing_samples:
-            raise ValueError(
-                "--train.dynamic_batch_enable requires packed training batches; "
-                "pass --fsdp.packing_samples or disable dynamic batch."
-            )
         if args.rollout.max_tokens_per_gpu is None:
             print("[Warning] Set --rollout.max_tokens_per_gpu to --train.max_tokens_per_gpu.")
             args.rollout.max_tokens_per_gpu = args.train.max_tokens_per_gpu
+        layout = "packed" if args.fsdp.packing_samples else "padded"
+        shape_multiple = max(cp_multiple, pad_multiple) if layout == "padded" else 1
+        print(
+            f"[DynamicBatch] layout={layout}, train budget={args.train.max_tokens_per_gpu}, "
+            f"rollout budget={args.rollout.max_tokens_per_gpu} tokens/GPU, "
+            f"shape multiple={shape_multiple}."
+        )
 
     if args.train.force_on_policy and args.train.max_epochs != 1:
         raise ValueError(
