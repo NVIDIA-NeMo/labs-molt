@@ -411,6 +411,16 @@ Quick-start single-node usage:
 MODEL_PATH=/path/to/Qwen3-4B bash examples/scripts/quick_start/rl_qwen3_4b.sh
 ```
 
+Dense text Qwen3-4B can optionally use Liger layer kernels. Install the pinned
+extra, then add `--fsdp.use_liger_kernel` to the Qwen3-4B SFT or RL CLI command:
+
+```bash
+pip install -e '.[liger]'
+```
+
+This switch supports only the HF backend with TP, CP, and EP sizes of one. It
+does not enable a fused policy or language-model-head loss.
+
 The geo3k VLM scripts (`rl_qwen3_6_35b.sh` / `sft_qwen3_6_35b.sh`) auto-prepare the
 dataset on first run via `examples/python/utils/prepare_geo3k.py`. To pre-stage it
 manually (or refresh it), run:

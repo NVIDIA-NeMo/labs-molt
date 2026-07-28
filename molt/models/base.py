@@ -254,6 +254,7 @@ class BaseModel(nn.Module):
         moe_config=None,
         activation_checkpointing: Union[bool, str] = False,
         packing_samples: bool = False,
+        use_liger_kernel: bool = False,
         temperature: float = 1.0,
         freeze_visual_encoder: bool = False,
         freeze_moe_router: bool = False,
@@ -273,6 +274,11 @@ class BaseModel(nn.Module):
         cp_mesh = device_mesh["cp"] if device_mesh is not None and "cp" in mesh_dims else None
         self.cp_size = cp_mesh.size() if cp_mesh is not None else 1
 
+        if use_liger_kernel and not isinstance(pretrain_or_model, str):
+            raise ValueError(
+                "--fsdp.use_liger_kernel requires loading a model path through AutoModel; "
+                "a pre-instantiated model has already bypassed the Liger patch point."
+            )
         if not isinstance(pretrain_or_model, str):
             self.model = pretrain_or_model
             self.is_vlm = False
@@ -295,15 +301,32 @@ class BaseModel(nn.Module):
 
         from molt.utils.utils import convert_to_torch_dtype, is_vlm_model
 
+        ep_active = moe_mesh is not None
+        if use_liger_kernel:
+            if find_spec("liger_kernel") is None:
+                raise RuntimeError(
+                    "--fsdp.use_liger_kernel requires the optional dependency; install it with "
+                    "`pip install -e '.[liger]'`."
+                )
+            tp_size = device_mesh["tp"].size() if device_mesh is not None and "tp" in mesh_dims else 1
+            if tp_size > 1 or self.cp_size > 1 or ep_active:
+                raise ValueError("--fsdp.use_liger_kernel requires --fsdp.tp_size=--fsdp.cp_size=--fsdp.ep_size=1.")
+            if getattr(distributed_config, "sequence_parallel", False):
+                raise ValueError("--fsdp.use_liger_kernel does not support --fsdp.sequence_parallel.")
+
         # Trainable actors keep fp32 master weights unless the architecture
         # requires compute-dtype parameters. FSDP2 handles bf16 fwd/bwd via
         # MixedPrecisionPolicy.
         compute_dtype = convert_to_torch_dtype(param_dtype)
         is_moe = _detect_moe_arch(pretrain_or_model)
-        ep_active = moe_mesh is not None
         if is_moe and not ep_active:
             raise ValueError("MoE models require --fsdp.ep_size > 1 in the AutoModel custom-only branch.")
         use_hf_model = _will_use_hf_model(pretrain_or_model)
+        if use_liger_kernel and not use_hf_model:
+            raise RuntimeError(
+                "--fsdp.use_liger_kernel supports the HuggingFace fallback for dense text Qwen3 only; "
+                "AutoModel predicts a native backend for this checkpoint."
+            )
         # EP dispatch is a nemo_automodel custom-path feature; HF has no equivalent. An
         # HF-fallback model under active EP would silently mis-shard experts / train on
         # wrong grads, so forbid it loudly. (TP/CP run on HF, so they aren't gated here.)
@@ -336,7 +359,8 @@ class BaseModel(nn.Module):
         # rounds away AdamW updates (~LR < bf16 ULP) at small LR, so the MoE never learns.
         torch_dtype = compute_dtype if not use_fp32_master_weights else torch.float32
         self.is_vlm = is_vlm_model(pretrain_or_model)
-
+        if use_liger_kernel and self.is_vlm:
+            raise ValueError("--fsdp.use_liger_kernel supports text-only Qwen3; VLM models are not enabled.")
         if self.is_vlm:
             from nemo_automodel import NeMoAutoModelForImageTextToText as ModelCls
         else:
@@ -424,7 +448,7 @@ class BaseModel(nn.Module):
             torch_dtype=torch_dtype,
             attn_implementation=attn_for_from_pretrained,
             distributed_setup=dist_setup,
-            use_liger_kernel=False,
+            use_liger_kernel=use_liger_kernel,
             has_packed_sequence=packing_samples,
             force_hf=False,
             # Disable the MTP head via AutoModel's config-override deep-merge (see
@@ -436,6 +460,19 @@ class BaseModel(nn.Module):
         # from_pretrained may downgrade to HF even when custom was requested;
         # re-derive from the loaded class so the forward picks the right pack style.
         self._packing_style = "automodel" if is_automodel_custom_model(self.model) else "hf"
+        if use_liger_kernel:
+            has_liger_forward = any(
+                getattr(getattr(module, "forward", None), "__module__", "").startswith("liger_kernel.")
+                for module in self.model.modules()
+            )
+            if self._packing_style != "hf" or not has_liger_forward:
+                raise RuntimeError(
+                    "--fsdp.use_liger_kernel was requested, but AutoModel returned a model without observable "
+                    "Liger patch evidence. Use a supported dense text HF Qwen3 checkpoint and verify the pinned "
+                    "liger dependency is installed."
+                )
+            if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+                print("[Liger] enabled on HF backend.")
         configure_nemo_moe_aux_loss(self.model, moe_aux_loss_coef)
         if routing_replay:
             # R3: give every MoE gate a RouterReplay handle so the training forward
