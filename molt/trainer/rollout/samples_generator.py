@@ -213,6 +213,7 @@ class SamplesGenerator:
 
         prompts_dispatched = 0
         groups_accepted = 0
+        groups_completed = 0
         drop_counts: Dict[str, int] = defaultdict(int)
         score_stats: Dict[str, float] = defaultdict(float)  # pre-DAPO-filter score stats
         progress = tqdm(
@@ -241,6 +242,7 @@ class SamplesGenerator:
             # Take the first rollout to finish; the slow ones keep generating in vLLM.
             ready, self._inflight_rollouts = ray.wait(self._inflight_rollouts, num_returns=1)
             for finished_rollout in ready:
+                groups_completed += 1
                 # Dropped groups (filtered or all-unusable) come back empty; their
                 # slot is refilled with a fresh prompt on the next iteration.
                 group_samples = self._filter_group(
@@ -256,8 +258,8 @@ class SamplesGenerator:
         rollout_metrics = {f"rollout/dropped/{reason}": float(n) for reason, n in drop_counts.items()}
         if drop_counts:
             rollout_metrics["rollout/dropped/total"] = float(sum(drop_counts.values()))
-        if dynamic_filtering and prompts_dispatched:
-            rollout_metrics["dynamic_filtering_pass_rate"] = groups_accepted / prompts_dispatched * 100
+        if dynamic_filtering and groups_completed:
+            rollout_metrics["dynamic_filtering_pass_rate"] = groups_accepted / groups_completed * 100
         # Pre-filter stats: the model's TRUE judge pass rate over ALL scored rollouts, BEFORE DAPO
         # drops uniform groups. (post-filter `reward`/`pivotrl_correct` only covers kept MIXED groups
         # ~0.5-0.65 by construction, so it hides the real pass rate + the all-pass saturation.)

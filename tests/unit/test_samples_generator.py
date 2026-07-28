@@ -215,7 +215,7 @@ def test_generate_samples_drops_filtered_groups_and_refills_their_slots(monkeypa
     # p1 is dropped; p2 (refilled into p1's freed slot) completes the batch.
     assert [sample.group_ids[0] for sample in samples] == ["p0", "p2"]
     assert prompts_dispatched == 4  # p0,p1 up front; p2,p3 refilled one per completion
-    assert rollout_metrics["dynamic_filtering_pass_rate"] == 2 / 4 * 100
+    assert rollout_metrics["dynamic_filtering_pass_rate"] == 2 / 3 * 100
     # The filtered group is tallied by reason for observability.
     assert rollout_metrics["rollout/dropped/dynamic_filter"] == 1.0
     assert rollout_metrics["rollout/dropped/total"] == 1.0
