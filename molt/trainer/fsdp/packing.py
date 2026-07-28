@@ -61,7 +61,7 @@ def is_automodel_custom_model(model: Any) -> bool:
     for cls in type(model).__mro__:
         if getattr(cls, "_molt_automodel_custom", False):
             return True
-        if cls.__module__.startswith("nemo_automodel.components.models"):
+        if issubclass(cls, torch.nn.Module) and cls.__module__.startswith("nemo_automodel.components.models"):
             return True
     return False
 
