@@ -28,6 +28,7 @@ from tqdm import tqdm
 from vllm import SamplingParams
 
 from molt.agents.base import _first_scalar as _to_scalar  # dedupe: same tensor/list/scalar normalizer
+from molt.trainer.algorithm.advantage import GROUP_ADVANTAGE_ESTIMATORS
 from molt.trainer.algorithm.experience import Experience
 from molt.utils.logging_utils import init_logger
 
@@ -207,6 +208,9 @@ class SamplesGenerator:
         groups_per_batch = self.args.rollout.batch_size
         inflight_capacity = getattr(self.args.rollout, "vllm_generate_batch_size", None) or groups_per_batch
         dynamic_filtering = self.args.algo.dynamic_filtering_enable
+        # Only group-advantage estimators need every group to keep all n_samples rollouts
+        # (a partial group changes its intended statistics/baselines); per-sample estimators don't.
+        require_complete_group = self.args.algo.advantage.estimator in GROUP_ADVANTAGE_ESTIMATORS
 
         def finished_group_count() -> int:
             return len({_sample_group_key(sample) for sample in self._finished_samples})
@@ -244,7 +248,12 @@ class SamplesGenerator:
                 # Dropped groups (filtered or all-unusable) come back empty; their
                 # slot is refilled with a fresh prompt on the next iteration.
                 group_samples = self._filter_group(
-                    finished_rollout, dynamic_filtering, drop_counts, score_stats=score_stats, **generate_kwargs
+                    finished_rollout,
+                    dynamic_filtering,
+                    drop_counts,
+                    score_stats=score_stats,
+                    require_complete_group=require_complete_group,
+                    **generate_kwargs,
                 )
                 if group_samples:
                     self._finished_samples.extend(group_samples)
@@ -309,17 +318,19 @@ class SamplesGenerator:
         dynamic_filtering: bool,
         drop_counts: Dict[str, int],
         score_stats: Dict[str, float] | None = None,
+        require_complete_group: bool = False,
         **generate_kwargs,
     ) -> List[Experience]:
         """Filter one finished rollout (a prompt's N responses = one group) down to
         its kept Experiences, tallying every drop into ``drop_counts`` by reason.
 
-        The single place the keep/drop policy lives, applying both filters:
-        per-response (unusable trajectories dropped by ``_process_response_into_experience``)
-        and the group-level DAPO dynamic-reward filter. Returns ``[]`` when the
-        whole group is dropped. Both the streaming (``generate_samples``) and
-        batch/eval (``_generate_batch``) paths call it, so the per-group filter loop
-        is never reimplemented.
+        The single place the keep/drop policy lives, applying: per-response drops
+        (unusable trajectories dropped by ``_process_response_into_experience``), the
+        group-completeness check (when ``require_complete_group``), and the group-level
+        DAPO dynamic-reward filter (when ``dynamic_filtering``). Returns ``[]`` when the
+        whole group is dropped. Both the streaming (``generate_samples``) and batch/eval
+        (``_generate_batch``) paths call it, so the per-group filter loop is never
+        reimplemented.
         """
         # run_group already built each usable trajectory into a light Experience (heavy tensors
         # kept on the runner behind heavy_ref) or reported a drop reason — the controller only
@@ -331,16 +342,16 @@ class SamplesGenerator:
             elif drop_reason is not None:
                 drop_counts[drop_reason] += 1
 
-        if dynamic_filtering and group_samples:
+        if group_samples:
             # Compaction can emit several step-samples with the same terminal score. Keep one
             # representative per rollout for filtering; all segments still enter training below.
             rollout_samples = {
                 (s.rollout_ids[0] if getattr(s, "rollout_ids", None) else id(s)): s for s in group_samples
             }.values()
             # Pre-filter score stats (the model's TRUE judge pass rate over scored rollouts, BEFORE
-            # DAPO drops uniform groups). Accumulate here, before any keep/drop decision, so the
-            # logged mean reflects all-pass + all-fail + mixed (not just the kept mixed groups).
-            if score_stats is not None:
+            # any keep/drop decision), so the logged mean reflects all-pass + all-fail + mixed
+            # groups — including incomplete ones — not just the groups that survive filtering.
+            if dynamic_filtering and score_stats is not None:
                 scored = [s.scores[0].item() for s in rollout_samples if s.scores is not None]
                 if scored:
                     min_score, max_score = self.args.algo.dynamic_filtering_range
@@ -351,17 +362,19 @@ class SamplesGenerator:
                     score_stats["all_pass"] += float(gmean >= max_score)
                     score_stats["all_fail"] += float(gmean <= min_score)
             # Require COMPLETE groups: a group that lost a response to a per-response drop
-            # (vlm_truncation / no_action_tokens / logprob_misalign / ...) has < n_samples
-            # usable samples, which would pull the accepted count off train_batch_size and make
-            # it indivisible by the DP-rank count -> per-sample forward microbatches split unevenly
-            # -> NCCL collective desync/hang. Drop+backfill the whole group so each accepted group
-            # contributes exactly n_samples (batch stays a clean groups_per_batch * n_samples).
-            n_samples = generate_kwargs.get("n_samples_per_prompt", self.args.rollout.n_samples_per_prompt)
-            n_rollouts = len(rollout_samples)
-            if n_rollouts < n_samples:
-                drop_counts["incomplete_group"] += len(group_samples)
-                return []
-            if not self._passes_dynamic_filter(rollout_samples):
+            # (vlm_truncation / no_action_tokens / logprob_misalign / ...) has fewer than
+            # n_samples usable rollouts, so its advantages are computed from a partial group —
+            # changing the intended group statistics/baselines. Required when either (a) a group
+            # advantage estimator is training (the caller sets require_complete_group for
+            # grpo/dr_grpo/reinforce_baseline/rloo) or (b) dynamic filtering is on (its
+            # uniform-vs-mixed decision is itself group-based, so a partial group can flip it).
+            # Per-sample estimators without dynamic filtering, and eval, keep the partial group.
+            if require_complete_group or dynamic_filtering:
+                n_samples = generate_kwargs.get("n_samples_per_prompt", self.args.rollout.n_samples_per_prompt)
+                if len(rollout_samples) != n_samples:
+                    drop_counts["incomplete_group"] += len(group_samples)
+                    return []
+            if dynamic_filtering and not self._passes_dynamic_filter(rollout_samples):
                 drop_counts["dynamic_filter"] += len(group_samples)
                 return []
         return group_samples

@@ -96,7 +96,7 @@ def test_generate_samples_returns_batch_as_rollouts_finish_and_keeps_pool_satura
     generator = object.__new__(SamplesGenerator)
     generator.args = SimpleNamespace(
         rollout=SimpleNamespace(batch_size=3, n_samples_per_prompt=1, vllm_generate_batch_size=5),
-        algo=SimpleNamespace(dynamic_filtering_enable=False),
+        algo=SimpleNamespace(dynamic_filtering_enable=False, advantage=SimpleNamespace(estimator="reinforce_baseline")),
         ckpt=SimpleNamespace(warm_resume_rollouts=False),
     )
     generator.prompts_dataloader = _prompt_loader(10)
@@ -120,7 +120,7 @@ def test_generate_samples_emits_short_batch_when_dataloader_exhausted(monkeypatc
     generator = object.__new__(SamplesGenerator)
     generator.args = SimpleNamespace(
         rollout=SimpleNamespace(batch_size=4, n_samples_per_prompt=1, vllm_generate_batch_size=5),
-        algo=SimpleNamespace(dynamic_filtering_enable=False),
+        algo=SimpleNamespace(dynamic_filtering_enable=False, advantage=SimpleNamespace(estimator="reinforce_baseline")),
         ckpt=SimpleNamespace(warm_resume_rollouts=False),
     )
     generator.prompts_dataloader = _prompt_loader(2)
@@ -138,7 +138,7 @@ def test_generate_samples_pool_persists_across_calls(monkeypatch):
     generator = object.__new__(SamplesGenerator)
     generator.args = SimpleNamespace(
         rollout=SimpleNamespace(batch_size=3, n_samples_per_prompt=1, vllm_generate_batch_size=5),
-        algo=SimpleNamespace(dynamic_filtering_enable=False),
+        algo=SimpleNamespace(dynamic_filtering_enable=False, advantage=SimpleNamespace(estimator="reinforce_baseline")),
         ckpt=SimpleNamespace(warm_resume_rollouts=False),
     )
     generator.prompts_dataloader = _prompt_loader(10)
@@ -168,7 +168,7 @@ def test_generator_keeps_no_checkpoint_state_and_resumes_from_dataloader(monkeyp
     generator = object.__new__(SamplesGenerator)
     generator.args = SimpleNamespace(
         rollout=SimpleNamespace(batch_size=3, n_samples_per_prompt=1, vllm_generate_batch_size=5),
-        algo=SimpleNamespace(dynamic_filtering_enable=False),
+        algo=SimpleNamespace(dynamic_filtering_enable=False, advantage=SimpleNamespace(estimator="reinforce_baseline")),
         ckpt=SimpleNamespace(warm_resume_rollouts=False),
     )
     generator.prompts_dataloader = _prompt_loader(10)
@@ -198,7 +198,11 @@ def test_generate_samples_drops_filtered_groups_and_refills_their_slots(monkeypa
     generator = object.__new__(SamplesGenerator)
     generator.args = SimpleNamespace(
         rollout=SimpleNamespace(batch_size=2, n_samples_per_prompt=1, vllm_generate_batch_size=2),
-        algo=SimpleNamespace(dynamic_filtering_enable=True, dynamic_filtering_range=(0.0, 1.0)),
+        algo=SimpleNamespace(
+            dynamic_filtering_enable=True,
+            dynamic_filtering_range=(0.0, 1.0),
+            advantage=SimpleNamespace(estimator="reinforce_baseline"),
+        ),
     )
     generator.prompts_dataloader = _prompt_loader(10)
 
@@ -240,6 +244,117 @@ def test_dynamic_filtering_counts_compaction_segments_once_per_rollout(monkeypat
 
     assert kept == samples
     assert dict(score_stats) == {"score_sum": 1.0, "score_n": 2, "groups": 1.0, "all_pass": 0.0, "all_fail": 0.0}
+
+
+def _incomplete_group(monkeypatch, n_kept=3):
+    """A group with n_kept usable rollouts where n_samples_per_prompt=4 (one lost upstream)."""
+    generator = object.__new__(SamplesGenerator)
+    generator.args = SimpleNamespace(rollout=SimpleNamespace(n_samples_per_prompt=4))
+    samples = [SimpleNamespace(rollout_ids=[rid], scores=None) for rid in ["a", "b", "c", "d"][:n_kept]]
+    monkeypatch.setattr(samples_generator.ray, "get", lambda _: [(sample, None) for sample in samples])
+    return generator, samples
+
+
+def test_incomplete_group_dropped_when_completeness_required(monkeypatch):
+    """A group that lost a rollout to a per-response drop (vlm_truncation, logprob_misalign, ...)
+    is rejected when require_complete_group is set — even with dynamic_filtering off — because a
+    partial group changes the intended group statistics/baselines for GRPO-family estimators. The
+    training caller sets require_complete_group when the estimator is in GROUP_ADVANTAGE_ESTIMATORS.
+    """
+    generator, samples = _incomplete_group(monkeypatch)
+    drop_counts = defaultdict(int)
+
+    kept = generator._filter_group(object(), False, drop_counts, require_complete_group=True)
+
+    assert kept == []
+    assert drop_counts["incomplete_group"] == 3
+
+
+def test_incomplete_group_kept_for_per_sample_estimator(monkeypatch):
+    """Per-sample estimators (gae/reinforce/on_policy_distill) score each sample independently
+    and do not need complete groups, so the caller leaves require_complete_group=False and the
+    3 usable rollouts are kept rather than discarded.
+    """
+    generator, samples = _incomplete_group(monkeypatch)
+
+    kept = generator._filter_group(object(), False, defaultdict(int), require_complete_group=False)
+
+    assert kept == samples
+
+
+def test_incomplete_group_kept_for_eval(monkeypatch):
+    """Eval (the _generate_batch path) never requests completeness: it does not compute group
+    advantages and does not backfill, so an incomplete eval group keeps its usable responses
+    instead of silently losing the whole prompt.
+    """
+    generator, samples = _incomplete_group(monkeypatch)
+
+    # Eval calls _filter_group with the default require_complete_group=False.
+    kept = generator._filter_group(object(), False, defaultdict(int))
+
+    assert kept == samples
+
+
+def test_dynamic_filtering_requires_complete_group_regardless_of_estimator(monkeypatch):
+    """Dynamic filtering is itself group-based (its uniform-vs-mixed decision depends on the whole
+    group), so an incomplete group must be dropped whenever dynamic_filtering is on — even for a
+    per-sample estimator (require_complete_group=False). Mixed scores here would otherwise PASS
+    _passes_dynamic_filter, proving the drop is for incompleteness, not uniform-score filtering.
+    """
+    generator = object.__new__(SamplesGenerator)
+    generator.args = SimpleNamespace(
+        rollout=SimpleNamespace(n_samples_per_prompt=4),
+        algo=SimpleNamespace(dynamic_filtering_range=(0.0, 1.0)),
+    )
+    # 3 mixed-score rollouts of an expected 4: mean 0.5 sits inside (0, 1) → would pass DF.
+    samples = [
+        SimpleNamespace(rollout_ids=[rid], scores=torch.tensor([score]))
+        for rid, score in [("a", 1.0), ("b", 0.5), ("c", 0.0)]
+    ]
+    monkeypatch.setattr(samples_generator.ray, "get", lambda _: [(sample, None) for sample in samples])
+    drop_counts = defaultdict(int)
+
+    kept = generator._filter_group(object(), True, drop_counts, require_complete_group=False)
+
+    assert kept == []
+    assert drop_counts["incomplete_group"] == 3
+    assert drop_counts["dynamic_filter"] == 0  # dropped for incompleteness, not the DF filter
+
+
+def test_complete_group_kept_when_completeness_required(monkeypatch):
+    """Sanity check: a full group passes the completeness check."""
+    generator = object.__new__(SamplesGenerator)
+    generator.args = SimpleNamespace(rollout=SimpleNamespace(n_samples_per_prompt=2))
+    samples = [SimpleNamespace(rollout_ids=[rid], scores=None) for rid in ["a", "b"]]
+    monkeypatch.setattr(samples_generator.ray, "get", lambda _: [(sample, None) for sample in samples])
+
+    kept = generator._filter_group(object(), False, defaultdict(int), require_complete_group=True)
+
+    assert kept == samples
+
+
+def test_score_stats_record_incomplete_scored_groups(monkeypatch):
+    """Pre-filter score stats must include an incomplete group's scores even when the group is
+    then dropped for incompleteness — the logged pre-filter score rate is defined over ALL
+    scored rollouts, so the completeness drop must not remove them from the metric.
+    """
+    generator = object.__new__(SamplesGenerator)
+    generator.args = SimpleNamespace(
+        rollout=SimpleNamespace(n_samples_per_prompt=4),
+        algo=SimpleNamespace(dynamic_filtering_range=(0.4, 0.6)),
+    )
+    # 3 scored rollouts of an expected 4 → dropped for incompleteness, but still counted.
+    samples = [SimpleNamespace(rollout_ids=[rid], scores=torch.tensor([1.0])) for rid in ["a", "b", "c"]]
+    monkeypatch.setattr(samples_generator.ray, "get", lambda _: [(sample, None) for sample in samples])
+    score_stats = defaultdict(float)
+
+    kept = generator._filter_group(
+        object(), True, defaultdict(int), score_stats=score_stats, require_complete_group=True
+    )
+
+    assert kept == []  # dropped for incompleteness
+    assert score_stats["score_n"] == 3  # but its scores were recorded first
+    assert score_stats["groups"] == 1.0
 
 
 def test_process_response_counts_only_action_tokens_for_multiturn_lengths():
