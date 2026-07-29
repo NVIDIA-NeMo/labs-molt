@@ -16,12 +16,12 @@ Ray · vLLM · NVIDIA AutoModel — the smallest PyTorch-native stack for
 ![vLLM](https://img.shields.io/badge/Rollout-vLLM-7c3aed?style=flat-square)
 ![Ray](https://img.shields.io/badge/Runtime-Ray-028CF0?style=flat-square)
 ![RL code](https://img.shields.io/badge/RL_code-~9.2K_LOC-10b981?style=flat-square)
-[![Tech Report](https://img.shields.io/badge/Tech_Report-ResearchGate-00CCBB?style=flat-square)](https://www.researchgate.net/publication/409325071_Molt_A_Scalable_PyTorch-Native_Training_Framework_for_Agentic_Reinforcement_Learning)
+[![Tech Report](https://img.shields.io/badge/Tech_Report-arXiv:2607.21653-b31b1b?style=flat-square)](https://arxiv.org/abs/2607.21653)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/NVIDIA-NeMo/labs-molt)
 
 <br/>
 
-[**Paper**](https://www.researchgate.net/publication/409325071_Molt_A_Scalable_PyTorch-Native_Training_Framework_for_Agentic_Reinforcement_Learning) ·
+[**Paper**](https://arxiv.org/abs/2607.21653) ·
 [**Architecture**](#-architecture) ·
 [**Why Molt**](#-why-molt) ·
 [**Quick Start**](#-quick-start) ·
@@ -624,11 +624,13 @@ If you use Molt in your research, please cite:
 
 ```bibtex
 @article{hu2026molt,
-  title        = {Molt: A Scalable PyTorch-Native Training Framework for Agentic Reinforcement Learning},
-  author       = {Jian Hu and Molt Contributors},
-  year         = {2026},
-  howpublished = {\url{https://github.com/NVIDIA-NeMo/labs-molt}},
-  doi          = {10.13140/RG.2.2.23375.65447}
+  title         = {Molt: A Scalable PyTorch-Native Training Framework for Agentic Reinforcement Learning},
+  author        = {Jian Hu and Molt Contributors},
+  year          = {2026},
+  eprint        = {2607.21653},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.LG},
+  url           = {https://arxiv.org/abs/2607.21653}
 }
 ```
 
