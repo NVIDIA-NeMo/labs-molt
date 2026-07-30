@@ -121,7 +121,10 @@ class CheckpointManager:
             model_repo_id=model_repo_id,
             save_consolidated=save_consolidated,
             original_model_root_dir=model_cache_dir,
-            is_peft=False,
+            # PEFT runs train adapters only and leave the base bit-identical, so AutoModel
+            # saves/loads just the adapter safetensors and skips consolidation. Derived from the
+            # model (all three call sites pass it) so save, resume and export stay in agreement.
+            is_peft=any("lora_" in name for name, _ in model.named_parameters()) if model is not None else False,
         )
         return Checkpointer(
             config=config,

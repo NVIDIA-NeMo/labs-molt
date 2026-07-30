@@ -168,6 +168,26 @@ def add_optimizer_args(parser, prefix: str = "", default_adam_lr: float = 5e-6) 
     parser.add_argument(f"{g}max_norm", type=float, default=1.0, help="Gradient clipping")
 
 
+def add_lora_args(parser, prefix: str = "") -> None:
+    """LoRA / PEFT block. ``prefix`` namespaces the flags the same way as the optimizer block.
+
+    Off unless ``lora.rank > 0``. AutoModel then injects the adapters and freezes the base, so
+    only the adapters carry gradients and optimizer state.
+    """
+    g = f"--{prefix}"
+    parser.add_argument(f"{g}lora.rank", type=int, default=0, help="LoRA rank; 0 (default) trains all parameters")
+    parser.add_argument(f"{g}lora.alpha", type=int, default=32, help="LoRA alpha; the update scales as alpha/rank")
+    parser.add_argument(f"{g}lora.dropout", type=float, default=0.0, help="Dropout on the LoRA branch input")
+    parser.add_argument(
+        f"{g}lora.target_modules",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Wildcard patterns of linear modules to adapt (anchored fullmatch), default '*_proj'. "
+        "Custom-MoE grouped experts are named '*_projs' and need an explicit pattern, e.g. '*' for every linear.",
+    )
+
+
 def add_logger_args(parser, default_wandb_project: str, run_name_prefix: str) -> None:
     """wandb + TensorBoard sinks and the metric-logging cadence. Shared by SFT + RL."""
     parser.add_argument("--logger.logging_steps", type=int, default=1, help="Log metrics every N steps.")
