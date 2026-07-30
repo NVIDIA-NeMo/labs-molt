@@ -524,12 +524,15 @@ if __name__ == "__main__":
         "--actor.loss_mode",
         type=str,
         default="ppo",
-        choices=["ppo", "cispo"],
+        choices=["ppo", "cispo", "gspo"],
         help="Policy-gradient surrogate: ppo (clipped min(surr1,surr2), optionally --actor.dual_clip) or "
         "cispo (https://arxiv.org/abs/2506.13585 — clips only the upper side of the IS ratio, "
         "stop-gradient through that weight, gradient flows through log-probs only; pass "
         "--actor.eps_clip_low_high's high value as the absolute ratio ceiling, e.g. 1.2, not a +offset; "
-        "--actor.dual_clip is unused in this mode).",
+        "--actor.dual_clip is unused in this mode) or "
+        "gspo (https://arxiv.org/abs/2507.18071 — clips ONE ratio per sequence, its geometric mean, "
+        "so a single outlier token cannot clip the whole update; pair with "
+        "--actor.loss_agg_mode seq-mean-token-mean; --actor.dual_clip is unused in this mode).",
     )
     parser.add_argument(
         "--actor.entropy_coef",

@@ -340,10 +340,82 @@ def test_compute_approx_kl_sanitizes_equal_negative_infinity_logprobs():
 def test_policy_loss_registry_rejects_unknown_and_duplicate_names():
     from molt.models.loss import POLICY_LOSSES, get_policy_loss, register_policy_loss
 
-    assert {"ppo", "cispo"} <= set(POLICY_LOSSES)  # built-in surrogates are registered
+    assert {"ppo", "cispo", "gspo"} <= set(POLICY_LOSSES)  # built-in surrogates are registered
     with pytest.raises(ValueError, match="Unknown policy loss"):
         get_policy_loss("nope")
     with pytest.raises(ValueError, match="Unknown policy loss"):
         PolicyLoss(loss_mode="nope")  # surfaced at construction
     with pytest.raises(ValueError, match="already registered"):
         register_policy_loss("ppo")(lambda *a, **k: None)  # no silent shadowing
+
+
+def test_gspo_scores_every_token_with_the_sequence_geometric_mean_ratio():
+    # log-ratios [0.3, -0.1] -> geometric mean exp(mean) = exp(0.1), inside the [0.8, 1.2]
+    # clip band, so both tokens are weighted by that single sequence ratio.
+    loss_fn = PolicyLoss(loss_mode="gspo")
+    log_probs = torch.tensor([[0.3, -0.1]])
+
+    loss, *_ = loss_fn(
+        log_probs,
+        torch.zeros(1, 2),
+        torch.ones(1, 2),
+        action_mask=torch.ones(1, 2, dtype=torch.bool),
+    )
+
+    torch.testing.assert_close(loss, -torch.tensor(0.1).exp())
+
+
+def test_gspo_does_not_clip_when_only_individual_tokens_are_off_policy():
+    # The defining GSPO property. Per-token ratios exp(+-1) = [2.72, 0.37] are both far
+    # outside [0.8, 1.2], so PPO clips every token; the sequence geometric mean is exp(0)
+    # = 1.0, so GSPO clips nothing.
+    log_probs = torch.tensor([[1.0, -1.0]])
+    args = (log_probs, torch.zeros(1, 2), torch.ones(1, 2))
+    mask = torch.ones(1, 2, dtype=torch.bool)
+
+    gspo_loss, _, gspo_clip, *_ = PolicyLoss(loss_mode="gspo")(*args, action_mask=mask)
+    ppo_loss, _, ppo_clip, *_ = PolicyLoss(loss_mode="ppo")(*args, action_mask=mask)
+
+    torch.testing.assert_close(gspo_loss, torch.tensor(-1.0))
+    torch.testing.assert_close(gspo_clip, torch.tensor(0.0))
+    # PPO keeps the clipped 1.2 on one token and the raw 0.37 on the other.
+    torch.testing.assert_close(ppo_loss, -(torch.tensor(1.2) + torch.tensor(-1.0).exp()) / 2.0)
+    torch.testing.assert_close(ppo_clip, torch.tensor(0.5))
+
+
+def test_gspo_padding_never_enters_the_sequence_ratio():
+    # A masked-out token with a huge log-ratio must not move the geometric mean; only the
+    # single valid token (log-ratio 0.1, inside the clip band) may set it.
+    loss_fn = PolicyLoss(loss_mode="gspo")
+
+    loss, *_ = loss_fn(
+        torch.tensor([[0.1, 5.0]]),
+        torch.zeros(1, 2),
+        torch.ones(1, 2),
+        action_mask=torch.tensor([[1, 0]], dtype=torch.bool),
+    )
+
+    torch.testing.assert_close(loss, -torch.tensor(0.1).exp())
+
+
+def test_gspo_gradient_reaches_each_token_through_its_own_log_prob():
+    # log s_t = sg[log s] + log_prob_t - sg[log_prob_t] is numerically log s, so the ratio is
+    # shared, but d(loss)/d(log_prob_t) = -A * s / N stays per token -- no token is starved.
+    loss_fn = PolicyLoss(loss_mode="gspo")
+    log_probs = torch.tensor([[0.3, -0.1]], requires_grad=True)
+
+    loss, *_ = loss_fn(
+        log_probs,
+        torch.zeros(1, 2),
+        torch.ones(1, 2),
+        action_mask=torch.ones(1, 2, dtype=torch.bool),
+    )
+    loss.backward()
+
+    expected = -torch.tensor(0.1).exp() / 2.0
+    torch.testing.assert_close(log_probs.grad, expected.expand(1, 2).contiguous())
+
+
+def test_gspo_rejects_dual_clip():
+    with pytest.raises(ValueError, match="dual_clip is a PPO-only extra bound"):
+        PolicyLoss(loss_mode="gspo", dual_clip=3.0)

@@ -218,6 +218,28 @@ def ppo_policy_loss(ratio, advantages, log_probs, action_mask, *, clip_eps_low, 
     return loss, clip_ratio
 
 
+@register_policy_loss("gspo")
+def gspo_policy_loss(ratio, advantages, log_probs, action_mask, *, clip_eps_low, clip_eps_high, policy_log_ratio, **_):
+    """GSPO (https://arxiv.org/abs/2507.18071): clip one IS ratio per SEQUENCE, not per token.
+
+    The ratio is the sequence's geometric mean `s = exp(mean_t log(pi/pi_old))`, so a single
+    outlier token can no longer clip (or blow up) the whole update -- the failure mode PPO's
+    per-token ratio has on long MoE rollouts. Gradient still flows per token via the identity
+    `log s_t = sg[log s] + log_prob - sg[log_prob]`, which is numerically `log s` but carries
+    each token's own gradient (GSPO-token in the paper). Recommended with
+    `--actor.loss_agg_mode seq-mean-token-mean`, the aggregation the objective is defined over.
+    """
+    # `policy_log_ratio` is forward's already-clamped log-ratio, so `s` inherits the same
+    # +-log_ratio_limit bound (a mean of bounded terms) and needs no clamp of its own.
+    seq_log_ratio = masked_mean(policy_log_ratio, action_mask, dim=-1).detach().unsqueeze(-1)
+    seq_ratio = (log_probs - log_probs.detach() + seq_log_ratio).exp()
+    surr1 = seq_ratio * advantages
+    surr2 = seq_ratio.clamp(1 - clip_eps_low, 1 + clip_eps_high) * advantages
+    loss = -torch.min(surr1, surr2)
+    clip_ratio = masked_mean(torch.lt(surr2, surr1).float(), action_mask, dim=None)
+    return loss, clip_ratio
+
+
 @register_policy_loss("cispo")
 def cispo_policy_loss(ratio, advantages, log_probs, action_mask, *, clip_eps_high, **_):
     """CISPO (https://arxiv.org/abs/2506.13585): stop-gradient upper-clipped IS weight,
@@ -278,10 +300,12 @@ class PolicyLoss(nn.Module):
             # CISPO clamps the raw ratio to an absolute ceiling (not a +offset like PPO's
             # surr2), so clip_eps_high here must be passed as that ceiling (e.g. 1.2).
             assert clip_eps_high >= 1.0, f"clip_eps_high must be >= 1.0 if loss_mode='cispo', got {clip_eps_high}"
-            # dual_clip only has meaning for the min(surr1, surr2) PPO surrogate CISPO
-            # doesn't compute; reject rather than silently ignore it.
-            if dual_clip is not None:
-                raise ValueError("dual_clip is a PPO-only extra bound; it has no effect under loss_mode='cispo'")
+        # dual_clip is an extra bound on PPO's min(surr1, surr2); the other surrogates do not
+        # compute that min, so reject it rather than silently ignore it.
+        if dual_clip is not None and self.loss_mode != "ppo":
+            raise ValueError(
+                f"dual_clip is a PPO-only extra bound; it has no effect under loss_mode={self.loss_mode!r}"
+            )
 
         if self.is_correction_level not in {"off", "token", "seq", "geo"}:
             raise ValueError(f"is_correction_level must be off/token/seq/geo, got {self.is_correction_level}")
@@ -330,6 +354,7 @@ class PolicyLoss(nn.Module):
             clip_eps_low=self.clip_eps_low,
             clip_eps_high=self.clip_eps_high,
             dual_clip=self.dual_clip,
+            policy_log_ratio=policy_log_ratio,
         )
 
         vllm_kl = None
