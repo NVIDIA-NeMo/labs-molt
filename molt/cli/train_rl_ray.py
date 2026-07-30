@@ -963,11 +963,21 @@ if __name__ == "__main__":
             "--algo.advantage.is_correction_level (token|seq|geo) to correct rollout logprobs during training."
         )
     elif args.train.partial_rollout_enable:
-        # IS is on, so the off-policy tokens are corrected; note only that slime-style MASKING is not.
+        # slime's mask_offpolicy_in_partial_rollout has no equivalent here: the HTTP transport
+        # can't observe a mid-request weight swap, so off_policy_len is always 0. What stands in
+        # for it is the IS correction, and the levels behave very differently on a rollout that
+        # straddles the broadcast — say which, so the choice is deliberate.
+        if args.algo.advantage.is_correction_level == "token":
+            effect = "per-token IS reweights each stale token in place, wherever it sits in the trajectory"
+        else:
+            effect = (
+                f"is_correction_level={args.algo.advantage.is_correction_level} gates per SEQUENCE, so a "
+                "straddling rollout is dropped whole — on-policy tail included — once its aggregate ratio "
+                "leaves the band; use token to keep that tail"
+            )
         print(
             "[Warning] --train.partial_rollout_enable: slime-style off-policy token MASKING "
-            "(off_policy_len) is INACTIVE on the HTTP router path — the transport can't observe a "
-            "mid-request weight swap. Per-token IS is correcting those tokens instead."
+            f"(off_policy_len) is INACTIVE on the HTTP router path. {effect}."
         )
 
     if args.algo.advantage.is_correction_level != "off" and args.rollout.top_p < 1.0:

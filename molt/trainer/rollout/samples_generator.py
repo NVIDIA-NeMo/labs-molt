@@ -44,8 +44,12 @@ def _build_action_token_mask(
     partial rollout. Those positions are left False, so they get zero policy
     gradient AND drop out of the global token-mean denominator — slime's
     mask_offpolicy_in_partial_rollout, but folded into the action mask so the loss
-    path is unchanged. It is also used for the streaming slow tail when a refit
-    spans requests that outlive their originating generation call.
+    path is unchanged.
+
+    Inactive on the shipped HTTP router path, which cannot see a mid-request weight
+    swap and always reports 0; per-token IS corrects those tokens instead, and covers
+    turns that finished before the broadcast — which this per-request count cannot
+    mark, since their generate() call returned before the swap happened.
     """
     mask = torch.zeros(num_tokens, dtype=torch.bool)
     for i, (start, end) in enumerate(action_ranges):
