@@ -252,3 +252,61 @@ def test_backward_divides_main_loss_by_accumulated_gradient():
     loss = (w * 3.0).sum()
     strat.backward(loss, model, optimizer=None)
     assert w.grad.item() == 3.0 / 4
+
+
+def test_fit_logs_the_window_token_mean_not_a_microbatch_fraction():
+    # Every microbatch loss is divided by the WHOLE window's token count, so one alone is
+    # a 1/accum_steps fraction. The step metric must be their sum (the quantity AutoModel's
+    # train_ft reports as "loss", and the units eval already uses), while the per-microbatch
+    # value stays a plain per-token mean so the progress bar shows a real loss.
+    accum, batch_size, seqlen = 4, 2, 9
+    torch.manual_seed(0)
+    log_probs = [-torch.rand(batch_size, seqlen - 1).abs() - 0.1 for _ in range(accum)]
+
+    class _Scripted(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.param = torch.nn.Parameter(torch.zeros(()))
+            self.idx = 0
+
+        def forward(self, input_ids, attention_mask=None, cp_context_stack=None, **mm_inputs):
+            out = log_probs[self.idx] + self.param
+            self.idx += 1
+            return {"log_probs": out}
+
+    class _Loader(list):
+        sampler = None  # fit() only isinstance-checks this against DistributedSampler
+
+    strategy = _TrainStrategy()
+    strategy.accumulated_gradient = accum
+    seen = []
+    # Snapshot: fit() overwrites logs_dict["sft_loss"] in place at the window boundary.
+    strategy.all_reduce = lambda data, op="mean": (seen.append(dict(data) if isinstance(data, dict) else data), data)[
+        1
+    ]
+
+    trainer = _make_trainer(_Scripted(), strategy)
+    ones = torch.ones(batch_size, seqlen, dtype=torch.long)
+    trainer.train_dataloader = _Loader([(ones, ones, torch.ones(batch_size, seqlen), {})] * accum)
+    trainer.epochs = 1
+    logged = []
+    trainer.save_logs_and_checkpoints = lambda a, gs, bar, logs=None, states=None: logged.append(dict(logs))
+
+    trainer.fit(
+        SimpleNamespace(
+            train=SimpleNamespace(batch_size=batch_size * accum),
+            eval=SimpleNamespace(steps=-1),
+            ckpt=SimpleNamespace(save_steps=-1),
+            logger=SimpleNamespace(logging_steps=1),
+        ),
+        consumed_samples=0,
+        num_update_steps_per_epoch=1,
+    )
+
+    window_token_mean = sum((-lp).sum().item() for lp in log_probs) / (accum * batch_size * (seqlen - 1))
+    assert len(logged) == 1
+    assert abs(logged[0]["sft_loss"] - window_token_mean) < 1e-6, logged[0]["sft_loss"]
+    assert "loss_mean" not in logged[0]  # one loss key, not a correct one next to a wrong one
+    # Each microbatch reported its OWN per-token mean, on the same scale as the step metric.
+    per_microbatch = [d["sft_loss"] for d in seen if isinstance(d, dict) and "sft_loss" in d]
+    assert per_microbatch == [(-lp).mean().item() for lp in log_probs]

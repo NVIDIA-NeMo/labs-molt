@@ -24,7 +24,7 @@ from torch.optim import Optimizer
 from tqdm import tqdm
 
 from molt.models import SFTLoss
-from molt.models.utils import split_moe_aux_loss
+from molt.models.utils import masked_mean, split_moe_aux_loss
 from molt.utils.distributed_sampler import DistributedSampler
 
 
@@ -196,14 +196,17 @@ class SFTTrainer:
         if backward:
             self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler)
 
-        reported_sft_loss = sft_loss.detach()
-        logs_dict = {"sft_loss": reported_sft_loss.item()}
+        # Reported loss is a plain per-token mean, decoupled from the gradient
+        # normalization: `sft_loss` is divided by the WHOLE window's token count, so on
+        # its own it is a 1/accum_steps fraction, not a loss. Same reporting contract as
+        # PolicyLoss on the RL side; the window aggregate is returned separately below.
+        logs_dict = {"sft_loss": masked_mean(-per_token_log_probs.detach(), shifted_loss_mask, dim=None).item()}
         if backward:
             logs_dict["lr"] = self.scheduler.get_last_lr()[0]
             logs_dict["grad_norm"] = self.strategy.get_grad_norm(self.model)
         if self.aux_loss:
             logs_dict["aux_loss"] = aux_loss_log.item() if torch.is_tensor(aux_loss_log) else float(aux_loss_log)
-        return logs_dict, reported_sft_loss.item()
+        return logs_dict, sft_loss.detach().item()
 
     def fit(self, args, consumed_samples=0, num_update_steps_per_epoch=None):
         # Infer num_update_steps_per_epoch from dataloader if not provided
@@ -263,21 +266,21 @@ class SFTTrainer:
                     # Last microbatch of the window = the optimizer-step boundary, so it
                     # carries the deferred grad reduce-scatter (when MOLT_DEFER_GRAD_SYNC=1).
                     is_last_microbatch = mb_idx == len(prepared) - 1
-                    logs_dict, _ = self._run_microbatch(
+                    logs_dict, window_frac = self._run_microbatch(
                         prepared_batch, batch_num_tokens, accum_steps, is_last_microbatch=is_last_microbatch
                     )
-                    # Accumulate the DP-reduced per-microbatch loss: each already carries
-                    # the global-token denominator, so summing the reduced values over the
-                    # window gives the true window token-mean (loss_mean below). Summing the
-                    # pre-reduce local value /accum_steps would log a per-rank, mis-scaled number.
+                    # logs_dict["sft_loss"] is this microbatch's own per-token mean (live in the
+                    # bar); window_frac carries the whole window's token denominator, so only the
+                    # sum over the window is a per-token mean — that sum is the step metric, the
+                    # same quantity AutoModel's train_ft reports as "loss". Reduce it once here.
+                    loss_sum += window_frac
                     logs_dict = self.strategy.all_reduce(logs_dict)
-                    loss_sum += logs_dict["sft_loss"]
                     step_bar.set_postfix(logs_dict)
                     step_bar.update()
 
                     # logs/checkpoints/evaluation
                     if step % self.strategy.accumulated_gradient == 0:
-                        logs_dict["loss_mean"] = loss_sum
+                        logs_dict["sft_loss"] = self.strategy.all_reduce(loss_sum)
                         loss_sum = 0
                         global_step = step // self.strategy.accumulated_gradient
                         client_states = {"consumed_samples": global_step * args.train.batch_size}
@@ -354,7 +357,7 @@ class SFTTrainer:
             device = next(self.model.parameters()).device
             for batch in eval_dataloader:
                 prepared, batch_num_tokens = self._prepare_accum_window([batch], device)
-                _, reported_sft_loss = self._run_microbatch(
+                _, batch_frac = self._run_microbatch(
                     prepared[0],
                     batch_num_tokens,
                     accum_steps=1,
@@ -365,7 +368,7 @@ class SFTTrainer:
                 # eval would drift from the train loss on heterogeneous reply
                 # lengths. Weighting by the batch token count makes the final
                 # value the exact global token mean after the DP all-reduce.
-                loss_sum += reported_sft_loss * batch_num_tokens
+                loss_sum += batch_frac * batch_num_tokens
                 token_sum += batch_num_tokens
                 bar_dict = {"eval sft_loss": loss_sum / token_sum}
                 step_bar.update()
