@@ -65,7 +65,7 @@ def add_fsdp_args(parser) -> None:
         "--fsdp.use_liger_kernel",
         action="store_true",
         default=False,
-        help="Enable Liger layer kernels for dense text HF Qwen3; TP/CP/EP/VLM and fused loss are not enabled.",
+        help="Enable Liger MLP/RMSNorm kernels for dense text Qwen3; TP/CP/EP/VLM and fused loss are not enabled.",
     )
 
 

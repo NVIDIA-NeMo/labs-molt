@@ -14,15 +14,26 @@ from molt.models import base
 
 
 def _stub_model(patched: bool):
+    class Qwen3MLP(nn.Module):
+        pass
+
+    class Qwen3RMSNorm(nn.Module):
+        pass
+
     model = nn.Module()
-    model.config = SimpleNamespace(use_cache=True)
+    model.config = SimpleNamespace(use_cache=True, model_type="qwen3")
+    model.mlp = Qwen3MLP()
+    model.norm = Qwen3RMSNorm()
 
     def forward(self, **kwargs):
         return kwargs
 
-    if patched:
-        forward.__module__ = "liger_kernel.transformers.qwen3"
     model.forward = MethodType(forward, model)
+    for module in (model.mlp, model.norm):
+        module.forward = MethodType(forward, module)
+    if patched:
+        for module in (model.mlp, model.norm):
+            module.forward.__func__.__module__ = "liger_kernel.transformers.qwen3"
     return model
 
 
@@ -57,12 +68,23 @@ def loader_env(monkeypatch):
     config.DistributedSetup = lambda **kwargs: SimpleNamespace(**kwargs)
     mesh = ModuleType("nemo_automodel.components.distributed.mesh")
     mesh.MeshContext = SimpleNamespace(from_meshes=lambda *meshes: meshes)
+    liger_patch = ModuleType("liger_kernel.transformers.monkey_patch")
+
+    def apply_liger_kernel_to_qwen3(*, model, **_kwargs):
+        for module in model.modules():
+            if type(module).__name__ in {"Qwen3MLP", "Qwen3RMSNorm"}:
+                module.forward.__func__.__module__ = "liger_kernel.transformers.qwen3"
+
+    liger_patch.apply_liger_kernel_to_qwen3 = apply_liger_kernel_to_qwen3
     for name, module in {
         "nemo_automodel": nemo,
         "nemo_automodel.components": ModuleType("nemo_automodel.components"),
         "nemo_automodel.components.distributed": ModuleType("nemo_automodel.components.distributed"),
         "nemo_automodel.components.distributed.config": config,
         "nemo_automodel.components.distributed.mesh": mesh,
+        "liger_kernel": ModuleType("liger_kernel"),
+        "liger_kernel.transformers": ModuleType("liger_kernel.transformers"),
+        "liger_kernel.transformers.monkey_patch": liger_patch,
     }.items():
         monkeypatch.setitem(sys.modules, name, module)
 
@@ -88,17 +110,17 @@ def test_shared_parser_defaults_off_and_accepts_opt_in():
     assert vars(parser.parse_args(["--fsdp.use_liger_kernel"]))["fsdp.use_liger_kernel"] is True
 
 
-@pytest.mark.parametrize(("enabled", "patched"), [(False, False), (True, True)])
-def test_loader_receives_exact_liger_setting(loader_env, enabled, patched):
+@pytest.mark.parametrize(("enabled", "patched"), [(False, False), (True, False)])
+def test_loader_defers_liger_patching_until_after_load(loader_env, enabled, patched):
     state, calls = loader_env
     state["model"] = _stub_model(patched)
 
     base.BaseModel("qwen3", use_liger_kernel=enabled)
 
-    assert calls[0]["use_liger_kernel"] is enabled
+    assert calls[0]["use_liger_kernel"] is False
 
 
-@pytest.mark.parametrize("unsupported", ["missing", "native", "tp", "cp", "ep", "sp", "vlm", "instance"])
+@pytest.mark.parametrize("unsupported", ["missing", "tp", "cp", "ep", "sp", "vlm", "instance"])
 def test_liger_rejects_unsupported_request_before_model_load(loader_env, monkeypatch, unsupported):
     state, calls = loader_env
     kwargs = {"use_liger_kernel": True}
@@ -106,8 +128,6 @@ def test_liger_rejects_unsupported_request_before_model_load(loader_env, monkeyp
 
     if unsupported == "missing":
         monkeypatch.setattr(base, "find_spec", lambda _name: None)
-    elif unsupported == "native":
-        state["predicted_hf"] = False
     elif unsupported == "tp":
         kwargs["device_mesh"] = _mesh(tp_size=2)
     elif unsupported == "cp":
@@ -127,13 +147,12 @@ def test_liger_rejects_unsupported_request_before_model_load(loader_env, monkeyp
     assert calls == []
 
 
-@pytest.mark.parametrize(("patched", "loaded_native"), [(False, False), (True, True)])
-def test_liger_rejects_unpatched_or_native_loader_result(loader_env, capsys, patched, loaded_native):
+def test_liger_rejects_missing_qwen3_layers(loader_env, capsys):
     state, calls = loader_env
-    state["model"] = _stub_model(patched)
-    state["loaded_native"] = loaded_native
+    state["model"] = nn.Module()
+    state["model"].config = SimpleNamespace(use_cache=True, model_type="qwen3")
 
-    with pytest.raises(RuntimeError, match="without observable Liger patch evidence"):
+    with pytest.raises(RuntimeError, match="did not patch every Qwen3"):
         base.BaseModel("qwen3", use_liger_kernel=True)
 
     assert len(calls) == 1
@@ -146,4 +165,4 @@ def test_liger_reports_rank_zero_success_after_patch_evidence(loader_env, capsys
     base.BaseModel("qwen3", use_liger_kernel=True)
 
     assert len(calls) == 1
-    assert capsys.readouterr().out.count("[Liger] enabled on HF backend.") == 1
+    assert capsys.readouterr().out.count("[Liger] enabled on hf Qwen3 backend.") == 1

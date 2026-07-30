@@ -322,11 +322,6 @@ class BaseModel(nn.Module):
         if is_moe and not ep_active:
             raise ValueError("MoE models require --fsdp.ep_size > 1 in the AutoModel custom-only branch.")
         use_hf_model = _will_use_hf_model(pretrain_or_model)
-        if use_liger_kernel and not use_hf_model:
-            raise RuntimeError(
-                "--fsdp.use_liger_kernel supports the HuggingFace fallback for dense text Qwen3 only; "
-                "AutoModel predicts a native backend for this checkpoint."
-            )
         # EP dispatch is a nemo_automodel custom-path feature; HF has no equivalent. An
         # HF-fallback model under active EP would silently mis-shard experts / train on
         # wrong grads, so forbid it loudly. (TP/CP run on HF, so they aren't gated here.)
@@ -448,7 +443,9 @@ class BaseModel(nn.Module):
             torch_dtype=torch_dtype,
             attn_implementation=attn_for_from_pretrained,
             distributed_setup=dist_setup,
-            use_liger_kernel=use_liger_kernel,
+            # Patch the loaded instance below. AutoModel's built-in option only patches
+            # its HF fallback, while the native Qwen3 modules are the intended path.
+            use_liger_kernel=False,
             has_packed_sequence=packing_samples,
             force_hf=False,
             # Disable the MTP head via AutoModel's config-override deep-merge (see
@@ -461,18 +458,32 @@ class BaseModel(nn.Module):
         # re-derive from the loaded class so the forward picks the right pack style.
         self._packing_style = "automodel" if is_automodel_custom_model(self.model) else "hf"
         if use_liger_kernel:
-            has_liger_forward = any(
-                getattr(getattr(module, "forward", None), "__module__", "").startswith("liger_kernel.")
-                for module in self.model.modules()
+            if getattr(getattr(self.model, "config", None), "model_type", None) != "qwen3":
+                raise ValueError("--fsdp.use_liger_kernel supports dense text Qwen3 only.")
+            from liger_kernel.transformers.monkey_patch import apply_liger_kernel_to_qwen3
+
+            # Keep Molt's attention, RoPE, and policy-loss paths intact. Liger replaces
+            # only the Qwen3 MLP and RMSNorm module forwards on this model instance.
+            apply_liger_kernel_to_qwen3(
+                rope=False,
+                cross_entropy=False,
+                fused_linear_cross_entropy=False,
+                model=self.model,
             )
-            if self._packing_style != "hf" or not has_liger_forward:
+            qwen3_layers = [
+                module
+                for name, module in self.model.named_modules()
+                if name in {"norm", "model.norm"}
+                or name.endswith((".mlp", ".input_layernorm", ".post_attention_layernorm"))
+            ]
+            if not qwen3_layers or not all(
+                getattr(module.forward, "__module__", "").startswith("liger_kernel.") for module in qwen3_layers
+            ):
                 raise RuntimeError(
-                    "--fsdp.use_liger_kernel was requested, but AutoModel returned a model without observable "
-                    "Liger patch evidence. Use a supported dense text HF Qwen3 checkpoint and verify the pinned "
-                    "liger dependency is installed."
+                    "--fsdp.use_liger_kernel was requested, but Liger did not patch every Qwen3 MLP and RMSNorm."
                 )
             if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-                print("[Liger] enabled on HF backend.")
+                print(f"[Liger] enabled on {self._packing_style} Qwen3 backend.")
         configure_nemo_moe_aux_loss(self.model, moe_aux_loss_coef)
         if routing_replay:
             # R3: give every MoE gate a RouterReplay handle so the training forward

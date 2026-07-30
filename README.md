@@ -418,8 +418,10 @@ extra, then add `--fsdp.use_liger_kernel` to the Qwen3-4B SFT or RL CLI command:
 pip install -e '.[liger]'
 ```
 
-This switch supports only the HF backend with TP, CP, and EP sizes of one. It
-does not enable a fused policy or language-model-head loss.
+This switch supports native or HF dense text Qwen3 with TP, CP, and EP sizes
+of one, including padded and TE packed batches. It replaces only MLP and
+RMSNorm layers; attention, RoPE, and the policy/language-model-head loss stay
+on Molt's regular path.
 
 The geo3k VLM scripts (`rl_qwen3_6_35b.sh` / `sft_qwen3_6_35b.sh`) auto-prepare the
 dataset on first run via `examples/python/utils/prepare_geo3k.py`. To pre-stage it

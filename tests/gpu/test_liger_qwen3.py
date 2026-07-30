@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+from importlib.util import find_spec
 from types import SimpleNamespace
 
 import pytest
@@ -68,7 +69,7 @@ def _strategy():
 def _load(model_cls, checkpoint, strategy, packing_samples, use_liger_kernel):
     return model_cls(
         str(checkpoint),
-        attn_implementation="flash_attention_2",
+        attn_implementation="te" if packing_samples else "sdpa",
         param_dtype="bf16",
         device_mesh=strategy.device_mesh,
         moe_mesh=strategy.moe_mesh,
@@ -120,11 +121,17 @@ def _assert_finite(tensors):
 def test_single_rank_liger_qwen3_parity(tmp_path, packing_samples):
     if os.environ.get("WORLD_SIZE") != "1" or "LOCAL_RANK" not in os.environ:
         pytest.skip("single-rank case runs under torchrun --nproc-per-node=1")
+    if packing_samples and find_spec("transformer_engine") is None:
+        pytest.skip("packed native Qwen3 requires transformer-engine")
     checkpoint = tmp_path / "tiny-qwen3"
     _save_tiny_qwen3(checkpoint)
     strategy = _strategy()
     baseline = _load(Actor, checkpoint, strategy, packing_samples, False)
     liger = _load(Actor, checkpoint, strategy, packing_samples, True)
+    assert any(
+        name.endswith(".mlp") and module.forward.__module__.startswith("liger_kernel.")
+        for name, module in liger.named_modules()
+    )
     batch = _batch()
 
     assert baseline.state_dict().keys() == liger.state_dict().keys()
@@ -182,28 +189,24 @@ def test_single_rank_liger_qwen3_parity(tmp_path, packing_samples):
 def test_fsdp2_liger_qwen3_step_matches_baseline_loss(tmp_path, packing_samples):
     if os.environ.get("WORLD_SIZE") != "2" or "LOCAL_RANK" not in os.environ:
         pytest.skip("FSDP2 case runs under torchrun --nproc-per-node=2")
+    if packing_samples and find_spec("transformer_engine") is None:
+        pytest.skip("packed native Qwen3 requires transformer-engine")
     checkpoint = tmp_path / f"tiny-qwen3-rank-{os.environ['RANK']}"
     _save_tiny_qwen3(checkpoint)
     strategy = _strategy()
-    baseline_model = Qwen3ForCausalLM.from_pretrained(
-        checkpoint,
-        torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
-    ).cuda()
-    baseline_model.config.use_cache = False
-    baseline = Actor(baseline_model, packing_samples=packing_samples)
+    baseline = _load(Actor, checkpoint, strategy, packing_samples, False)
     liger = _load(Actor, checkpoint, strategy, packing_samples, True)
     batch = _batch()
 
-    with torch.no_grad():
-        _baseline_output, _baseline_loss, baseline_reported = _policy_step(baseline, batch)
+    _baseline_output, baseline_loss, baseline_reported = _policy_step(baseline, batch, dp_size=2)
     _liger_output, liger_loss, liger_reported = _policy_step(liger, batch, dp_size=2)
-    global_reported = liger_reported.detach().clone()
-    dist.all_reduce(global_reported)
-    global_reported /= dist.get_world_size()
-    torch.testing.assert_close(global_reported, baseline_reported, atol=1e-2, rtol=5e-2)
+    for reported in (baseline_reported, liger_reported):
+        dist.all_reduce(reported)
+        reported /= dist.get_world_size()
+    torch.testing.assert_close(liger_reported, baseline_reported, atol=1e-2, rtol=5e-2)
 
-    liger_loss.backward()
-    _assert_finite(param.grad for param in liger.parameters() if param.grad is not None)
-    torch.optim.AdamW(liger.parameters(), lr=1e-3).step()
-    _assert_finite(liger.parameters())
+    for model, loss in ((baseline, baseline_loss), (liger, liger_loss)):
+        loss.backward()
+        _assert_finite(param.grad for param in model.parameters() if param.grad is not None)
+        torch.optim.AdamW(model.parameters(), lr=1e-3).step()
+        _assert_finite(model.parameters())
