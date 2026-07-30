@@ -531,8 +531,8 @@ if __name__ == "__main__":
         "--actor.eps_clip_low_high's high value as the absolute ratio ceiling, e.g. 1.2, not a +offset; "
         "--actor.dual_clip is unused in this mode) or "
         "gspo (https://arxiv.org/abs/2507.18071 — clips ONE ratio per sequence, its geometric mean, "
-        "so a single outlier token cannot clip the whole update; pair with "
-        "--actor.loss_agg_mode seq-mean-token-mean; --actor.dual_clip is unused in this mode).",
+        "so a single outlier token cannot clip the whole update; aggregated with molt's global "
+        "token-mean denominator, not the paper's per-sequence 1/|y|; --actor.dual_clip is unused).",
     )
     parser.add_argument(
         "--actor.entropy_coef",
