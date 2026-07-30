@@ -58,6 +58,8 @@ class CheckpointManager:
         # Use AutoModel's Checkpointer: its custom-model save_pretrained mixin
         # requires it (raises "No checkpointer provided" otherwise). Outputs
         # consolidated HF safetensors that vLLM can hot-load.
+        # Read the PEFT config off the wrapper before unwrapping strips it away.
+        peft_config = getattr(model, "peft_config", None)
         model = self.strategy._unwrap_model(model)
         # Declare the export precision on the config and every nested sub-config: loaders (vLLM/HF)
         # build each submodule at its config dtype, so a stale fp32 `dtype` (an fp32 master) left on
@@ -65,8 +67,8 @@ class CheckpointManager:
         from molt.utils.utils import convert_to_torch_dtype
 
         self._set_config_dtype(model.config, convert_to_torch_dtype(self.strategy.param_dtype))
-        ckpt = self._build_checkpointer(output_dir, save_consolidated=True, model=model)
-        ckpt.save_model(model=model, weights_path=output_dir, tokenizer=tokenizer)
+        ckpt = self._build_checkpointer(output_dir, save_consolidated=True, model=model, peft_config=peft_config)
+        ckpt.save_model(model=model, weights_path=output_dir, tokenizer=tokenizer, peft_config=peft_config)
         if dist.is_initialized():
             dist.barrier()
         self._promote_hf_export(output_dir)
@@ -108,7 +110,9 @@ class CheckpointManager:
             shutil.move(src, dst)
         shutil.rmtree(model_dir, ignore_errors=True)
 
-    def _build_checkpointer(self, output_dir: str, save_consolidated: bool, model: nn.Module | None = None):
+    def _build_checkpointer(
+        self, output_dir: str, save_consolidated: bool, model: nn.Module | None = None, peft_config=None
+    ):
         from nemo_automodel.components.checkpoint.checkpointing import Checkpointer, CheckpointingConfig
 
         model_cache_dir, model_repo_id = self._checkpoint_source(model) if model is not None else (None, None)
@@ -121,10 +125,9 @@ class CheckpointManager:
             model_repo_id=model_repo_id,
             save_consolidated=save_consolidated,
             original_model_root_dir=model_cache_dir,
-            # PEFT runs train adapters only and leave the base bit-identical, so AutoModel
-            # saves/loads just the adapter safetensors and skips consolidation. Derived from the
-            # model (all three call sites pass it) so save, resume and export stay in agreement.
-            is_peft=any("lora_" in name for name, _ in model.named_parameters()) if model is not None else False,
+            # PEFT runs train adapters only and leave the base bit-identical, so AutoModel saves
+            # and loads just the adapter safetensors and skips consolidation.
+            is_peft=peft_config is not None,
         )
         return Checkpointer(
             config=config,
@@ -315,6 +318,7 @@ class CheckpointManager:
         """DCP-format checkpoint for resumable training (model + optimizer +
         scheduler + RL stats). HF-safetensors export goes through ``save_model``.
         """
+        peft_config = getattr(model, "peft_config", None)
         model = self.strategy._unwrap_model(model)
         is_rank0 = (not dist.is_initialized()) or dist.get_rank() == 0
         is_best = tag.startswith("best")
@@ -328,8 +332,8 @@ class CheckpointManager:
         save_dir = os.path.join(ckpt_path, tag)
         os.makedirs(save_dir, exist_ok=True)
 
-        ckpt = self._build_checkpointer(save_dir, save_consolidated=False, model=model)
-        ckpt.save_model(model=model, weights_path=save_dir, tokenizer=None)
+        ckpt = self._build_checkpointer(save_dir, save_consolidated=False, model=model, peft_config=peft_config)
+        ckpt.save_model(model=model, weights_path=save_dir, tokenizer=None, peft_config=peft_config)
         optimizer = kwargs.get("optimizer")
         scheduler = kwargs.get("scheduler")
         if optimizer is not None:
@@ -359,6 +363,7 @@ class CheckpointManager:
         if load_dir is None:
             return None, {}
 
+        peft_config = getattr(model, "peft_config", None)
         model = self.strategy._unwrap_model(model)
 
         # Load the model through the SAME AutoModel Checkpointer that save_ckpt uses,
@@ -372,7 +377,7 @@ class CheckpointManager:
         # dcp.load matched the model's NATIVE keys against the HF-keyed shards, so for
         # adapter models the renamed params were silently skipped (allow_partial_load)
         # and the resume kept base weights; dense models were unaffected (native == HF).
-        ckpt = self._build_checkpointer(load_dir, save_consolidated=False, model=model)
+        ckpt = self._build_checkpointer(load_dir, save_consolidated=False, model=model, peft_config=peft_config)
         ckpt.load_model(model=model, model_path=os.path.join(load_dir, "model"))
 
         optim_dir = os.path.join(load_dir, "optim")

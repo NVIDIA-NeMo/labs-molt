@@ -306,6 +306,9 @@ class BaseModel(nn.Module):
         mesh_dims = getattr(device_mesh, "mesh_dim_names", ()) or ()
         cp_mesh = device_mesh["cp"] if device_mesh is not None and "cp" in mesh_dims else None
         self.cp_size = cp_mesh.size() if cp_mesh is not None else 1
+        # Retained for the checkpointer: AutoModel needs the config back at save time to emit
+        # `adapter_config.json`, exactly as its own recipes keep it on the recipe object.
+        self.peft_config = None
 
         if not isinstance(pretrain_or_model, str):
             if lora_rank > 0:
@@ -457,6 +460,14 @@ class BaseModel(nn.Module):
             moe_parallel_config=moe_config,
             activation_checkpointing=ac_setting,
         )
+        self.peft_config = _lora_peft_config(
+            lora_rank,
+            lora_alpha,
+            lora_dropout,
+            lora_target_modules,
+            is_moe=is_moe,
+            tp_size=device_mesh["tp"].size() if device_mesh is not None and "tp" in mesh_dims else 1,
+        )
         self.model = ModelCls.from_pretrained(
             pretrain_or_model,
             trust_remote_code=True,
@@ -466,14 +477,7 @@ class BaseModel(nn.Module):
             use_liger_kernel=False,
             has_packed_sequence=packing_samples,
             force_hf=False,
-            peft_config=_lora_peft_config(
-                lora_rank,
-                lora_alpha,
-                lora_dropout,
-                lora_target_modules,
-                is_moe=is_moe,
-                tp_size=device_mesh["tp"].size() if device_mesh is not None and "tp" in mesh_dims else 1,
-            ),
+            peft_config=self.peft_config,
             # Disable the MTP head via AutoModel's config-override deep-merge (see
             # _mtp_off_kwargs); no-op without MTP.
             **_mtp_off_kwargs(pretrain_or_model),
