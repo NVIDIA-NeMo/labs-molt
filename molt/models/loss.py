@@ -179,7 +179,7 @@ class ValueLoss(nn.Module):
 # A surrogate maps the per-token IS ``ratio`` + advantages to a per-token loss and the
 # clip-fraction metric; PolicyLoss.forward owns everything shared (ratio, IS correction,
 # aggregation). Register a new surrogate the same way advantage estimators register, so it
-# plugs in without editing forward:  @register_policy_loss("gspo") def ...(...).
+# plugs in without editing forward:  @register_policy_loss("my_surrogate") def ...(...).
 PolicyLossFn = Callable[..., Tuple[torch.Tensor, torch.Tensor]]
 POLICY_LOSSES: Dict[str, PolicyLossFn] = {}
 
@@ -229,8 +229,10 @@ def gspo_policy_loss(ratio, advantages, log_probs, action_mask, *, clip_eps_low,
     each token's own gradient (GSPO-token in the paper). Recommended with
     `--actor.loss_agg_mode seq-mean-token-mean`, the aggregation the objective is defined over.
     """
-    # `policy_log_ratio` is forward's already-clamped log-ratio, so `s` inherits the same
-    # +-log_ratio_limit bound (a mean of bounded terms) and needs no clamp of its own.
+    # `policy_log_ratio` is forward's sanitized log-ratio (nan/+-inf mapped to finite values,
+    # padding zeroed); the masked mean keeps padding out of `s`. Unlike PPO's `ratio` it is not
+    # clamped: a finite per-token log-ratio anywhere near +-log_ratio_limit already means a
+    # broken run, and averaging is far more robust to one outlier than a per-token ratio is.
     seq_log_ratio = masked_mean(policy_log_ratio, action_mask, dim=-1).detach().unsqueeze(-1)
     seq_ratio = (log_probs - log_probs.detach() + seq_log_ratio).exp()
     surr1 = seq_ratio * advantages
