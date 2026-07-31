@@ -274,6 +274,7 @@ if __name__ == "__main__":
         add_ckpt_args,
         add_fsdp_args,
         add_logger_args,
+        add_lora_args,
         add_optimizer_args,
         resolve_ckpt_retention,
     )
@@ -283,6 +284,8 @@ if __name__ == "__main__":
     add_fsdp_args(parser)
     # Optimizer + scheduler + grad clip for the actor ("actor." prefix + lr default 1e-6).
     add_optimizer_args(parser, prefix="actor.", default_adam_lr=1e-6)
+    # LoRA on the actor (off unless --actor.lora.rank > 0). The critic stays full-parameter.
+    add_lora_args(parser, prefix="actor.")
     # Checkpoints; RL disables eval when --eval.steps is -1 and adds best-ckpt selection.
     add_ckpt_args(parser, default_ckpt_path="./ckpt/checkpoints_rl_ray")
     parser.add_argument(
@@ -987,6 +990,16 @@ if __name__ == "__main__":
     # --- Parallelism / FSDP ---
     if args.fsdp.pp_size > 1:
         raise NotImplementedError("Molt trainers are not pipeline-parallel aware yet; set --fsdp.pp_size 1")
+
+    if args.actor.lora.rank > 0 and args.actor.lora.dropout > 0:
+        # Refit merges the adapters into one deterministic weight, so the rollout sees no
+        # dropout while the training forward is stochastic. That mismatch biases the
+        # importance ratio and inflates vllm_kl. SFT has no refit and allows dropout.
+        raise ValueError(
+            f"--actor.lora.dropout must be 0 under RL (got {args.actor.lora.dropout}): the rollout "
+            "engine serves the merged, deterministic adapter, so a stochastic training forward "
+            "would bias the importance-sampling ratio."
+        )
 
     if args.train.routing_replay and args.train.partial_rollout_enable:
         # vLLM frees a request's captured routing on preemption, and partial
