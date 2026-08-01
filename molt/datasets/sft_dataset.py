@@ -130,6 +130,7 @@ class SFTDataset(Dataset):
         image_key: Optional[str] = None,
         max_images_per_prompt: int = 4,
         train_on_last_turn_only: bool = False,
+        pad_to_max_len: bool = False,
     ) -> None:
         super().__init__()
         # An AutoProcessor (VLM) keeps the plain text tokenizer under `.tokenizer`.
@@ -137,6 +138,7 @@ class SFTDataset(Dataset):
         self.text_tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
         self.processor = tokenizer if hasattr(tokenizer, "image_processor") else None
         self.max_length = max_length
+        self.pad_to_max_len = pad_to_max_len
         self.image_key = image_key
         self.max_images_per_prompt = max_images_per_prompt
         self.train_on_last_turn_only = train_on_last_turn_only
@@ -329,10 +331,11 @@ class SFTDataset(Dataset):
     # ------------------------------------------------------------------
     def collate_fn(self, items):
         input_ids, attention_mask, loss_mask, mm_inputs = zip(*items)
+        pad_to = self.max_length if self.pad_to_max_len else None
         return (
-            zero_pad_sequences(list(input_ids), "right", self.pad_token_id),
-            zero_pad_sequences(list(attention_mask), "right"),
-            zero_pad_sequences(list(loss_mask), "right"),
+            zero_pad_sequences(list(input_ids), "right", self.pad_token_id, pad_to=pad_to),
+            zero_pad_sequences(list(attention_mask), "right", pad_to=pad_to),
+            zero_pad_sequences(list(loss_mask), "right", pad_to=pad_to),
             self._stack_mm_inputs(mm_inputs),
         )
 

@@ -16,7 +16,7 @@
 # Adapted from OpenRLHF (https://github.com/OpenRLHF/OpenRLHF),
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
-from typing import List
+from typing import List, Optional
 
 import torch
 import torch.nn.functional as F
@@ -91,10 +91,12 @@ def get_tokenizer(pretrain, model, padding_side="left", use_fast=True):
 
 
 def zero_pad_sequences(
-    sequences: List[torch.Tensor], side: str = "left", value: int = 0, stack: bool = False
+    sequences: List[torch.Tensor], side: str = "left", value: int = 0, stack: bool = False, pad_to: Optional[int] = None
 ) -> torch.Tensor:
     assert side in ("left", "right")
     max_len = max(seq.size(-1) for seq in sequences)
+    if pad_to is not None:
+        max_len = max(max_len, pad_to)
     padded_sequences = []
     for seq in sequences:
         pad_len = max_len - seq.size(-1)

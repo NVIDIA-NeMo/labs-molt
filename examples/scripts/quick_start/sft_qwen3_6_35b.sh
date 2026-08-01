@@ -54,6 +54,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 cd "$REPO_ROOT"
 torchrun --standalone --nproc_per_node="$GPUS_PER_NODE" -m molt.cli.train_sft \
   --data.max_len "$MAX_LEN" \
+  --data.pad_to_max_len \
   --data.dataset "$SFT_DATASET" \
   --data.input_key prompt \
   --data.output_key response \

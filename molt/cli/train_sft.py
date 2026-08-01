@@ -66,6 +66,7 @@ def train(args):
         image_key=args.data.image_key,
         max_images_per_prompt=args.data.max_images_per_prompt,
         train_on_last_turn_only=args.data.train_on_last_turn_only,
+        pad_to_max_len=args.data.pad_to_max_len,
     )
     train_dataloader = strategy.setup_dataloader(
         train_dataset,
@@ -92,6 +93,7 @@ def train(args):
             image_key=args.data.image_key,
             max_images_per_prompt=args.data.max_images_per_prompt,
             train_on_last_turn_only=args.data.train_on_last_turn_only,
+            pad_to_max_len=args.data.pad_to_max_len,
         )
         eval_dataloader = strategy.setup_dataloader(
             eval_dataset,
@@ -193,6 +195,12 @@ if __name__ == "__main__":
     parser.add_argument("--data.dataset_split", type=str, default="train")
     parser.add_argument("--data.max_samples", type=int, default=1000000, help="Maximum number of samples to use")
     parser.add_argument("--data.max_len", type=int, default=2048, help="Max total sequence length (prompt + response)")
+    parser.add_argument(
+        "--data.pad_to_max_len",
+        action="store_true",
+        default=False,
+        help="Pad every batch to --data.max_len (needed for MoE + ep_size>1 + gradient_checkpoint).",
+    )
     parser.add_argument("--data.input_key", type=str, default="input", help="JSON dataset key")
     parser.add_argument(
         "--data.output_key", type=str, default=None, help="Dataset column holding the assistant reply (SFT target)."

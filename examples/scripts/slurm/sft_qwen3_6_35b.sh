@@ -92,6 +92,7 @@ head_addr="$(srun --nodes=1 --ntasks=1 -w "$head_node" hostname --ip-address | a
 
 TRAIN_ARGS=(
   --data.max_len "$MAX_LEN"
+  --data.pad_to_max_len
   --data.dataset "$SFT_DATASET"
   --data.input_key prompt
   --data.output_key response
