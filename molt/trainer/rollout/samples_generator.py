@@ -159,6 +159,12 @@ class SamplesGenerator:
     @torch.no_grad()
     def generate_eval_samples(self, **generate_kwargs) -> List[Experience]:
         """Generate evaluation samples for the entire eval dataloader."""
+        eval_batch_size = getattr(getattr(self.args, "eval", None), "batch_size", None)
+        if eval_batch_size is None:
+            eval_batch_size = self.args.rollout.batch_size
+        if eval_batch_size <= 0:
+            raise ValueError("--eval.batch_size must be greater than zero")
+
         if getattr(self, "_eval_dataloader_iter", None) is None:
             self._eval_dataloader_iter = iter(self.eval_dataloader)
 
@@ -167,7 +173,7 @@ class SamplesGenerator:
             while True:
                 experiences, _, exhausted = self._generate_batch(
                     dataloader_iter=self._eval_dataloader_iter,
-                    num_prompts=self.args.rollout.batch_size,
+                    num_prompts=eval_batch_size,
                     dynamic_filtering=False,
                     **generate_kwargs,
                 )

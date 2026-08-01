@@ -22,6 +22,32 @@ import os
 from molt.trainer.algorithm.experience import get_model_parallel_size
 
 
+def _ray_runtime_env_vars():
+    """Build the environment inherited by Ray workers."""
+    env_vars = {
+        "TOKENIZERS_PARALLELISM": os.environ.get("TOKENIZERS_PARALLELISM", "true"),
+        "NCCL_DEBUG": os.environ.get("NCCL_DEBUG", "WARN"),
+        "RAY_ENABLE_ZERO_COPY_TORCH_TENSORS": os.environ.get("RAY_ENABLE_ZERO_COPY_TORCH_TENSORS", "1"),
+    }
+    for name in (
+        "FLASHINFER_WORKSPACE_BASE",
+        "FLASHINFER_WORKSPACE_DIR",
+        "HF_HOME",
+        "HF_HUB_CACHE",
+        "HUGGINGFACE_HUB_CACHE",
+        "TRANSFORMERS_CACHE",
+        "TORCH_COMPILE_DISABLE",
+        "PYTORCH_CUDA_ALLOC_CONF",
+        "VLLM_WORKER_MULTIPROC_METHOD",
+        "WANDB_API_KEY",
+        "WANDB_ENTITY",
+        "WANDB_MODE",
+    ):
+        if os.environ.get(name):
+            env_vars[name] = os.environ[name]
+    return env_vars
+
+
 def train(args):
     import ray
     from ray.util.placement_group import placement_group
@@ -37,25 +63,7 @@ def train(args):
         # Defaults respect user overrides (e.g. NCCL_DEBUG=INFO via
         # `ray job submit --runtime-env-json`); the listed names are
         # cache/workspace knobs vLLM and HF read inside Ray actors.
-        env_vars = {
-            "TOKENIZERS_PARALLELISM": os.environ.get("TOKENIZERS_PARALLELISM", "true"),
-            "NCCL_DEBUG": os.environ.get("NCCL_DEBUG", "WARN"),
-            "RAY_ENABLE_ZERO_COPY_TORCH_TENSORS": os.environ.get("RAY_ENABLE_ZERO_COPY_TORCH_TENSORS", "1"),
-        }
-        for name in (
-            "FLASHINFER_WORKSPACE_BASE",
-            "FLASHINFER_WORKSPACE_DIR",
-            "HF_HOME",
-            "HF_HUB_CACHE",
-            "HUGGINGFACE_HUB_CACHE",
-            "TRANSFORMERS_CACHE",
-            "TORCH_COMPILE_DISABLE",
-            "PYTORCH_CUDA_ALLOC_CONF",
-            "VLLM_WORKER_MULTIPROC_METHOD",
-        ):
-            if os.environ.get(name):
-                env_vars[name] = os.environ[name]
-        ray.init(runtime_env={"env_vars": env_vars})
+        ray.init(runtime_env={"env_vars": _ray_runtime_env_vars()})
 
     # configure strategy
     strategy = get_strategy(args)
@@ -823,6 +831,12 @@ if __name__ == "__main__":
 
     # Eval
     parser.add_argument("--eval.dataset", type=str, default=None, help="Path to the evaluation dataset")
+    parser.add_argument(
+        "--eval.batch_size",
+        type=int,
+        default=None,
+        help="Concurrent eval prompt groups; defaults to --rollout.batch_size when unset.",
+    )
     parser.add_argument("--eval.split", type=str, default="train")
     parser.add_argument("--eval.steps", type=int, default=-1, help="Evaluate every N steps; -1 disables eval.")
     parser.add_argument(

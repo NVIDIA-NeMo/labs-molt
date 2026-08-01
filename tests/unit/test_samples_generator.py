@@ -35,6 +35,7 @@ if "ray" not in sys.modules:
         return decorator
 
     fake_ray.remote = remote
+    fake_ray.put = MagicMock()
     fake_ray.get = MagicMock()
     fake_ray.wait = MagicMock()
     fake_ray.cancel = MagicMock()
@@ -132,6 +133,66 @@ def test_generate_samples_emits_short_batch_when_dataloader_exhausted(monkeypatc
     assert prompts_dispatched == 2
     assert exhausted is True
     assert generator._inflight_rollouts == []
+
+
+def _wire_eval_generator(generator, monkeypatch, num_prompts):
+    generator.eval_dataloader = _prompt_loader(num_prompts)
+    dispatch_sizes = []
+
+    def dispatch(prompts, labels, images, **kwargs):
+        dispatch_sizes.append(len(prompts))
+        return [SimpleNamespace(group_id=prompt) for prompt in prompts]
+
+    generator._dispatch_to_agent_runners = dispatch
+    monkeypatch.setattr(
+        samples_generator.ray, "wait", lambda handles, num_returns=1, timeout=None: ([handles[0]], list(handles[1:]))
+    )
+    monkeypatch.setattr(samples_generator.ray, "get", lambda handle: [(_sample(handle.group_id), None)])
+    return dispatch_sizes
+
+
+def test_generate_eval_samples_uses_independent_eval_batch_size(monkeypatch):
+    generator = object.__new__(SamplesGenerator)
+    generator.args = SimpleNamespace(
+        rollout=SimpleNamespace(batch_size=1, n_samples_per_prompt=1),
+        eval=SimpleNamespace(batch_size=4),
+        algo=SimpleNamespace(dynamic_filtering_enable=False),
+    )
+    dispatch_sizes = _wire_eval_generator(generator, monkeypatch, num_prompts=5)
+
+    samples = generator.generate_eval_samples()
+
+    assert [sample.group_ids[0] for sample in samples] == ["p0", "p1", "p2", "p3", "p4"]
+    assert dispatch_sizes == [4, 1]
+
+
+def test_generate_eval_samples_defaults_to_rollout_batch_size(monkeypatch):
+    generator = object.__new__(SamplesGenerator)
+    generator.args = SimpleNamespace(
+        rollout=SimpleNamespace(batch_size=2, n_samples_per_prompt=1),
+        eval=SimpleNamespace(batch_size=None),
+        algo=SimpleNamespace(dynamic_filtering_enable=False),
+    )
+    dispatch_sizes = _wire_eval_generator(generator, monkeypatch, num_prompts=5)
+
+    samples = generator.generate_eval_samples()
+
+    assert len(samples) == 5
+    assert dispatch_sizes == [2, 2, 1]
+
+
+@pytest.mark.parametrize("batch_size", [0, -1])
+def test_generate_eval_samples_rejects_nonpositive_batch_size(batch_size):
+    generator = object.__new__(SamplesGenerator)
+    generator.args = SimpleNamespace(
+        rollout=SimpleNamespace(batch_size=2, n_samples_per_prompt=1),
+        eval=SimpleNamespace(batch_size=batch_size),
+        algo=SimpleNamespace(dynamic_filtering_enable=False),
+    )
+    generator.eval_dataloader = _prompt_loader(1)
+
+    with pytest.raises(ValueError, match="--eval.batch_size must be greater than zero"):
+        generator.generate_eval_samples()
 
 
 def test_generate_samples_pool_persists_across_calls(monkeypatch):
