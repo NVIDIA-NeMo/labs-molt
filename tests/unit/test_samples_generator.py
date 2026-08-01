@@ -181,20 +181,6 @@ def test_generate_eval_samples_defaults_to_rollout_batch_size(monkeypatch):
     assert dispatch_sizes == [2, 2, 1]
 
 
-@pytest.mark.parametrize("batch_size", [0, -1])
-def test_generate_eval_samples_rejects_nonpositive_batch_size(batch_size):
-    generator = object.__new__(SamplesGenerator)
-    generator.args = SimpleNamespace(
-        rollout=SimpleNamespace(batch_size=2, n_samples_per_prompt=1),
-        eval=SimpleNamespace(batch_size=batch_size),
-        algo=SimpleNamespace(dynamic_filtering_enable=False),
-    )
-    generator.eval_dataloader = _prompt_loader(1)
-
-    with pytest.raises(ValueError, match="--eval.batch_size must be greater than zero"):
-        generator.generate_eval_samples()
-
-
 def test_generate_samples_pool_persists_across_calls(monkeypatch):
     generator = object.__new__(SamplesGenerator)
     generator.args = SimpleNamespace(

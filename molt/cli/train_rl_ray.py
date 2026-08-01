@@ -1080,6 +1080,9 @@ if __name__ == "__main__":
     if args.eval.dataset:
         assert args.train.agent_path, "`--eval.dataset` requires `--train.agent_path`."
 
+    if args.eval.batch_size is not None and args.eval.batch_size <= 0:
+        raise ValueError(f"--eval.batch_size must be greater than zero, got {args.eval.batch_size}.")
+
     # --- Runtime ---
     if args.use_ms:
         from modelscope.utils.hf_util import patch_hub
