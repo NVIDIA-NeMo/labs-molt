@@ -34,7 +34,7 @@ from molt.models import Actor, PolicyLoss, agg_loss
 from molt.models.utils import compute_approx_kl, masked_mean, split_moe_aux_loss
 from molt.trainer.algorithm.experience import Experience, get_model_parallel_size
 from molt.trainer.fsdp import FsdpStrategy
-from molt.trainer.fsdp.refit import gather_full_param, lora_refit_merges
+from molt.trainer.fsdp.refit import gather_full_param
 from molt.utils import get_tokenizer
 from molt.utils.distributed_util import stateless_init_process_group, torch_dist_barrier_and_cuda_sync
 from molt.utils.logging_utils import init_logger
@@ -628,18 +628,13 @@ class PolicyTrainer:
             pending_tensors.clear()
             pending_bytes = 0
 
-        # Materialize the state_dict once: the LoRA merge map is validated against these exact
-        # keys, and `{}` here keeps the full-parameter path byte-for-byte unchanged.
-        state_dict = model.state_dict()
-        lora_merges = lora_refit_merges(model, state_dict)
-
-        for name, tensor in state_dict.items():
-            # Refit every state_dict entry except the two skips below (each converted to HF
-            # names further down). vLLM's load_weights matches by name and ignores what it
-            # doesn't have, so the "which weights to accept" decision lives on the vLLM side.
-            # We deliberately do NOT pre-filter by a named_parameters requires_grad map: its
-            # FQNs differ from state_dict's (custom-AutoModel / FSDP naming), so that filter
-            # silently skipped ~all trained weights and left vLLM stuck on the base checkpoint
+        for name, tensor in model.state_dict().items():
+            # Refit EVERY state_dict entry (each converted to HF names below). vLLM's
+            # load_weights matches by name and ignores what it doesn't have, so the
+            # "which weights to accept" decision lives on the vLLM side. We deliberately
+            # do NOT pre-filter by a named_parameters requires_grad map: its FQNs differ
+            # from state_dict's (custom-AutoModel / FSDP naming), so that filter silently
+            # skipped ~all trained weights and left vLLM stuck on the base checkpoint
             # (vllm_kl then grew with training as the actor drifted from the stale engine).
             # Skip TE `_extra_state` (fp8 amax bookkeeping — a uint8 tensor in recent
             # TE, a BytesIO in older) and any other non-tensor. It is never a real
@@ -647,11 +642,6 @@ class PolicyTrainer:
             # `exclude_key_regex` anyway (NeMo-RL relies on that same regex). Skip it
             # here so a tensor-valued `_extra_state` can't trip the expert guard below.
             if not torch.is_tensor(tensor) or name.endswith("_extra_state"):
-                continue
-
-            # LoRA adapters have no vLLM counterpart; they reach the engine merged into their
-            # base weight below. Every rank skips the same keys, so no collective is missed.
-            if any(part.startswith("lora_") for part in name.split(".")):
                 continue
 
             # EP-sharded experts must be DTensors so `gather_full_param`'s
@@ -671,14 +661,6 @@ class PolicyTrainer:
 
             # Collective; every rank participates.
             weight, _ = gather_full_param(tensor)
-            if name in lora_merges:
-                # Also collectives, so they must run before the non-rank-0 early-out below.
-                # `.to(weight.dtype)` keeps the refit dtype-faithful when the adapters were
-                # built in a different dtype than the base weight.
-                lora_first, lora_second, lora_scale = lora_merges[name]
-                first, _ = gather_full_param(lora_first)
-                second, _ = gather_full_param(lora_second)
-                weight = weight + lora_scale * (first @ second).to(weight.dtype)
             if not is_rank0:
                 del weight
                 continue
@@ -789,10 +771,6 @@ class PolicyModelActor(BaseModelActor):
             freeze_moe_router=getattr(strategy.args.actor, "freeze_moe_router", False),
             moe_aux_loss_coef=args.actor.aux_loss_coef,
             routing_replay=getattr(args.train, "routing_replay", False),
-            lora_rank=args.actor.lora.rank,
-            lora_alpha=args.actor.lora.alpha,
-            lora_dropout=args.actor.lora.dropout,
-            lora_target_modules=args.actor.lora.target_modules,
         )
         if vllm_engines is not None:
             adapter = getattr(actor.model, "state_dict_adapter", None)

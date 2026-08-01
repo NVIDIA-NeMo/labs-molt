@@ -234,28 +234,24 @@ def _mtp_off_kwargs(pretrain_or_model) -> dict:
 
 
 def _lora_peft_config(rank: int, alpha: int, dropout: float, target_modules, *, is_moe: bool, tp_size: int):
-    """Return AutoModel's ``PeftConfig`` for ``from_pretrained``, or ``None`` when LoRA is off.
+    """AutoModel's ``PeftConfig`` for ``from_pretrained``, or ``None`` when LoRA is off.
 
-    AutoModel owns the adapter lifecycle: it injects LoRA inside ``from_pretrained`` *before*
-    FSDP2 shards, then freezes every non-``lora_`` parameter *after* parallelization (so params
-    materialized during sharding are caught too). The optimizer already selects on
-    ``requires_grad``, so nothing else has to opt out of training the base weights."""
+    AutoModel injects the adapters before FSDP2 shards and freezes the base after, so the
+    optimizer's ``requires_grad`` filter already trains adapters only."""
     if rank <= 0:
         return None
     from nemo_automodel.components._peft.lora import PeftConfig
 
-    # Fail before the (minutes-long) weight load instead of inside AutoModel's post-shard
-    # validator: its safe custom-MoE TP path replicates non-expert modules across TP ranks and
-    # rejects PEFT there, because rank-initialized adapters would diverge between ranks.
+    # AutoModel's safe custom-MoE TP path rejects PEFT only after the slow weight load; fail
+    # here instead (adapters would diverge across the TP-replicated non-expert modules).
     if is_moe and tp_size > 1:
         raise ValueError(
             f"LoRA on a custom-MoE model requires --fsdp.tp_size 1 (got {tp_size}): AutoModel's safe "
             "MoE tensor-parallel path does not support PEFT. Scale MoE with --fsdp.ep_size instead."
         )
     return PeftConfig(
-        # AutoModel's own implicit default. Patterns are anchored fullmatches, so this covers
-        # dense `*_proj` linears but not custom-MoE grouped experts (`*_projs`); pass an
-        # explicit `*` to adapt those too.
+        # Default `*_proj` (AutoModel's) matches dense linears but not grouped experts
+        # (`*_projs`); pass an explicit `*` to adapt those too.
         target_modules=list(target_modules) if target_modules else ["*_proj"],
         dim=rank,
         alpha=alpha,
@@ -306,8 +302,7 @@ class BaseModel(nn.Module):
         mesh_dims = getattr(device_mesh, "mesh_dim_names", ()) or ()
         cp_mesh = device_mesh["cp"] if device_mesh is not None and "cp" in mesh_dims else None
         self.cp_size = cp_mesh.size() if cp_mesh is not None else 1
-        # Retained for the checkpointer: AutoModel needs the config back at save time to emit
-        # `adapter_config.json`, exactly as its own recipes keep it on the recipe object.
+        # Kept for the checkpointer: AutoModel needs it back at save time to emit adapter_config.json.
         self.peft_config = None
 
         if not isinstance(pretrain_or_model, str):
@@ -562,8 +557,7 @@ class BaseModel(nn.Module):
             if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
                 print(f"[MoE] freeze_moe_router=True: froze {n_frozen} router param tensors")
 
-        # LoRA keeps the base frozen, so surface what actually trains: a near-100% share here
-        # means the adapters never attached (e.g. target_modules matched nothing).
+        # Base is frozen under LoRA; a near-100% trainable share means target_modules matched nothing.
         if lora_rank > 0 and (not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0):
             n_train = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
             n_all = sum(p.numel() for p in self.model.parameters())

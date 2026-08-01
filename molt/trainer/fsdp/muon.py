@@ -60,9 +60,8 @@ def _classify_params(model: nn.Module, experts_to_muon: bool):
         if isinstance(module, nn.Embedding):
             embed.append(param)
         elif "lora_" in name:
-            # LoRA adapters -> AdamW. They are the only trainable tensors under PEFT, and
-            # Muon's orthogonalized update is defined for a full-rank layer, not for a
-            # rank-r factor pair whose product is the actual weight delta.
+            # LoRA adapters -> AdamW: Muon's orthogonalized update assumes a full-rank layer,
+            # not a rank-r factor pair whose product is the weight delta.
             vector.append(param)
         elif "lm_head" in name:
             lm_head.append(param)

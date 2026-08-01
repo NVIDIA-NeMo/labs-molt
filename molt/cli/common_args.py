@@ -169,11 +169,7 @@ def add_optimizer_args(parser, prefix: str = "", default_adam_lr: float = 5e-6) 
 
 
 def add_lora_args(parser, prefix: str = "") -> None:
-    """LoRA / PEFT block. ``prefix`` namespaces the flags the same way as the optimizer block.
-
-    Off unless ``lora.rank > 0``. AutoModel then injects the adapters and freezes the base, so
-    only the adapters carry gradients and optimizer state.
-    """
+    """LoRA / PEFT flags, off unless ``lora.rank > 0``. ``prefix`` namespaces them like the optimizer block."""
     g = f"--{prefix}"
     parser.add_argument(f"{g}lora.rank", type=int, default=0, help="LoRA rank; 0 (default) trains all parameters")
     parser.add_argument(f"{g}lora.alpha", type=int, default=32, help="LoRA alpha; the update scales as alpha/rank")
