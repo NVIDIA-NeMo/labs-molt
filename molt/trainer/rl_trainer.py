@@ -15,6 +15,7 @@
 
 import asyncio
 import os
+import statistics
 import time
 from typing import Dict, Tuple
 
@@ -29,7 +30,7 @@ from molt.datasets.utils import blending_datasets
 from molt.trainer.algorithm.experience import balance_experiences
 from molt.trainer.algorithm.kl_controller import AdaptiveKLController, FixedKLController
 from molt.trainer.fsdp import FsdpStrategy
-from molt.trainer.rollout.experience_maker import RemoteExperienceMaker
+from molt.trainer.rollout.experience_maker import RemoteExperienceMaker, rollout_and_group_ids
 from molt.trainer.rollout.samples_generator import SamplesGenerator
 from molt.trainer.vllm.vllm_engine import batch_vllm_engine_call
 from molt.trainer.workers.actor_group import RayActorGroup
@@ -121,6 +122,35 @@ def prepare_datasets(strategy, tokenizer):
             * args.train.max_epochs
         )
     return prompts_dataloader, eval_dataloader, max_steps
+
+
+def _collect_rollout_rewards(rollout_samples):
+    """Regroup the flattened rollout rows back into rollouts and prompt groups.
+
+    A multi-turn rollout appears in ``rollout_samples`` once per step it took, and every one of
+    those rows carries the same terminal reward, so averaging the rows weights each trajectory by
+    its length. The weighting is not neutral: a failing episode runs to the step cap while a
+    successful one stops as soon as it is done, so the rows that dominate the mean are the
+    zero-reward ones. On an OSWorld run this read 0.28 where the same checkpoint scored 0.4487 on
+    the same tasks through the eval path, which groups before averaging.
+
+    Returns (one reward per rollout, one mean reward per prompt group).
+    """
+    reward_of_rollout: dict = {}  # every row of a rollout carries the same terminal reward
+    rewards_in_group: dict = {}
+    for sample in rollout_samples:
+        if "reward" not in sample.info:
+            continue
+        rollout_ids, group_ids = rollout_and_group_ids(sample)
+        sample_rewards = sample.info["reward"].flatten().tolist()
+        for rollout_id, group_id, reward in zip(rollout_ids, group_ids, sample_rewards, strict=True):
+            if rollout_id not in reward_of_rollout:
+                reward_of_rollout[rollout_id] = reward
+                rewards_in_group.setdefault(group_id, []).append(reward)
+    return (
+        list(reward_of_rollout.values()),
+        [statistics.fmean(rewards) for rewards in rewards_in_group.values()],
+    )
 
 
 def compute_eval_metrics(eval_dataloader, samples_list, n_samples_per_prompt):
@@ -326,15 +356,22 @@ class BaseRLTrainer:
         # Ground-truth rollout stats over the FULL generated set — from the lightweight fields present
         # on every rollout sample, and computed on `rollout_samples` (before balance_experiences drops
         # the trailing remainder), so num_samples and the means reflect everything we generated.
-        all_rewards = torch.cat([s.info["reward"] for s in rollout_samples if "reward" in s.info])
-        all_response_lengths = torch.cat([s.response_length for s in rollout_samples if s.response_length is not None])
-        all_truncated = torch.cat([s.truncated for s in rollout_samples if s.truncated is not None])
+        per_rollout, per_group = _collect_rollout_rewards(rollout_samples)
+        response_lengths = torch.cat([s.response_length for s in rollout_samples if s.response_length is not None])
+        truncated = torch.cat([s.truncated for s in rollout_samples if s.truncated is not None])
+        num_turn_rows = sum(s.info["reward"].numel() for s in rollout_samples if "reward" in s.info)
         rollout_stats = {
-            "rollout/reward_mean": all_rewards.float().mean().item(),
-            "rollout/reward_std": all_rewards.float().std().item() if len(all_rewards) > 1 else 0.0,
-            "rollout/response_length_mean": all_response_lengths.float().mean().item(),
-            "rollout/truncated_rate": all_truncated.float().mean().item(),
-            "rollout/num_samples": float(len(all_rewards)),
+            "rollout/reward_mean": statistics.fmean(per_rollout) if per_rollout else 0.0,
+            "rollout/reward_std": statistics.stdev(per_rollout) if len(per_rollout) > 1 else 0.0,
+            # Same name as eval's pass1 because it is the same quantity, on the same scale.
+            "rollout/pass1": statistics.fmean(per_group) if per_group else 0.0,
+            "rollout/num_rollouts": float(len(per_rollout)),
+            "rollout/num_prompt_groups": float(len(per_group)),
+            # Per turn rather than per rollout — these are per-generation quantities, and
+            # num_samples counts the flattened rows that sized the training batch.
+            "rollout/response_length_mean": response_lengths.float().mean().item(),
+            "rollout/truncated_rate": truncated.float().mean().item(),
+            "rollout/num_samples": float(num_turn_rows),
         }
 
         # Push the experiences to the actor shards (and the critic, which trains on the same batch

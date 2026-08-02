@@ -39,6 +39,17 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def rollout_and_group_ids(experience):
+    """Per-sample rollout and prompt-group ids, with the fallbacks the pipeline shares.
+
+    Multi-turn agents stamp both. Legacy single-turn rollouts stamp neither, and there every
+    sample is its own rollout and its own group, so the sample index serves as both. Kept in one
+    place because every consumer that averages per rollout has to agree on it.
+    """
+    rollout_ids = experience.rollout_ids or list(experience.index)
+    return rollout_ids, (experience.group_ids or rollout_ids)
+
+
 class RemoteExperienceMaker:
     """Builds train-ready experiences from rollout samples and remote model forwards."""
 
@@ -152,10 +163,9 @@ class RemoteExperienceMaker:
             exp_len           = [3, 2]            # samples per experience, to re-split later
         """
         exp_len = [len(e.index) for e in experiences]
-        rollout_ids = list(itertools.chain.from_iterable(e.rollout_ids or list(e.index) for e in experiences))
-        group_ids = list(
-            itertools.chain.from_iterable(e.group_ids or e.rollout_ids or list(e.index) for e in experiences)
-        )
+        ids = [rollout_and_group_ids(e) for e in experiences]
+        rollout_ids = list(itertools.chain.from_iterable(r for r, _ in ids))
+        group_ids = list(itertools.chain.from_iterable(g for _, g in ids))
         rewards = torch.cat([e.rewards for e in experiences], dim=0)
         if not (len(rollout_ids) == len(group_ids) == rewards.numel()):
             raise ValueError(
