@@ -215,6 +215,27 @@ def test_build_routing_targets_preserves_minus_one_sentinel():
         assert targets[layer][1:, 0].tolist() == [10 * layer + 1, 10 * layer + 2]
 
 
+def test_build_routing_targets_pads_hybridep_suffix_with_valid_masked_expert():
+    routed = torch.zeros(1, L, K, 3, dtype=torch.int16)
+    for layer in range(L):
+        routed[0, layer, 0] = torch.tensor([10 * layer, 10 * layer + 1, 10 * layer + 2])
+
+    stub = SimpleNamespace(packing_samples=True, _num_routing_gates=L, _moe_layer_global_ids=list(range(L)))
+    # Only tokens 0 and 1 are real on this rank; HybridEP equalizes it to four.
+    targets = BaseModel._build_routing_targets(
+        stub,
+        routed,
+        indices=torch.tensor([0, 1]),
+        cp_forward=False,
+        packed_tokens=4,
+    )
+
+    for layer in range(L):
+        assert targets[layer].shape == (4, K)
+        assert targets[layer][:2, 0].tolist() == [10 * layer, 10 * layer + 1]
+        assert (targets[layer][2:] == 0).all()
+
+
 def test_make_experience_batch_mixed_none_routed_experts():
     # A batch mixing a captured-routing sample with an unrouted (None) one must neither
     # silently drop the batch's routing (leading None -> first-item dispatch returned None)

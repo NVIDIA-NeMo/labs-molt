@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -269,6 +270,7 @@ class BaseModel(nn.Module):
         self.temperature = temperature
         self.packing_samples = packing_samples
         self.device_mesh = device_mesh
+        self.moe_mesh = moe_mesh
         mesh_dims = getattr(device_mesh, "mesh_dim_names", ()) or ()
         cp_mesh = device_mesh["cp"] if device_mesh is not None and "cp" in mesh_dims else None
         self.cp_size = cp_mesh.size() if cp_mesh is not None else 1
@@ -544,7 +546,7 @@ class BaseModel(nn.Module):
             return unpack_to_padded(t, indices, batch, seqlen)
         return t
 
-    def _build_routing_targets(self, routed_experts, indices, cp_forward):
+    def _build_routing_targets(self, routed_experts, indices, cp_forward, packed_tokens=None):
         """Shard the R3 routing ids to this rank's forward token order (RouterReplay).
 
         ``routed_experts`` is ``(B, vllm_layers, topk, S)`` (rollout top-k expert ids per
@@ -573,6 +575,20 @@ class BaseModel(nn.Module):
             per_token = routing.permute(0, 3, 1, 2).reshape(b * s, n_layers, topk).long()
             if self.packing_samples:
                 per_token = per_token.index_select(0, indices)  # drop pad tokens for the packed order
+                if packed_tokens is not None:
+                    trailing_pad = int(packed_tokens) - per_token.shape[0]
+                    if trailing_pad < 0:
+                        raise ValueError(
+                            f"Packed model input has {packed_tokens} tokens but routing has "
+                            f"{per_token.shape[0]} real-token rows"
+                        )
+                    if trailing_pad:
+                        # HybridEP equalizes local token counts across its EP group.
+                        # Use an in-range placeholder because Gate gathers routing
+                        # weights before the expert path applies padding_mask. The
+                        # masked rows are then changed to -1 before dispatch.
+                        pad = per_token.new_zeros((trailing_pad, *per_token.shape[1:]))
+                        per_token = torch.cat((per_token, pad), dim=0)
         if per_token.shape[1] <= max(global_ids):
             raise ValueError(
                 f"rollout routing has {per_token.shape[1]} layers but a MoE gate maps to global "
@@ -612,8 +628,27 @@ class BaseModel(nn.Module):
             # cp1 real-token packing. CP is incompatible with packed sequences: cp>1
             # falls through to the padded branch, where the model-owned sharder
             # flattens the padded [B,S] batch to THD itself (from seq_lens).
+            pad_to_tokens = None
+            mesh_dims = getattr(self.moe_mesh, "mesh_dim_names", ()) or ()
+            if (
+                self.moe_mesh is not None
+                and "ep" in mesh_dims
+                and self.moe_mesh["ep"].size() > 1
+                and os.environ.get("MOLT_MOE_DISPATCHER", "hybridep").lower() == "hybridep"
+            ):
+                # HybridEP all-gathers a [local_tokens, num_experts] routing map.
+                # Packed RL responses have rank-local lengths, so equalize the token
+                # dimension within the exact EP group before entering the model.
+                local_tokens = attention_mask.sum(dtype=torch.int64)
+                dist.all_reduce(local_tokens, op=dist.ReduceOp.MAX, group=self.moe_mesh.get_group("ep"))
+                pad_to_tokens = int(local_tokens.item())
+            padding_token_id = getattr(getattr(self.model, "config", None), "pad_token_id", None)
             sequences, position_ids, rolled_sequences, indices, attn_kwargs = pack_padded_batch(
-                sequences, attention_mask, style=self._packing_style
+                sequences,
+                attention_mask,
+                style=self._packing_style,
+                pad_to_tokens=pad_to_tokens,
+                padding_token_id=padding_token_id if padding_token_id is not None else 0,
             )
             forward_attention_mask = None
         else:
@@ -769,7 +804,14 @@ class BaseModel(nn.Module):
         if routed_experts is not None:
             from nemo_automodel.components.moe.router_replay import RouterReplay
 
-            replay_ctx = RouterReplay.replay(self._build_routing_targets(routed_experts, indices, cp_forward))
+            replay_ctx = RouterReplay.replay(
+                self._build_routing_targets(
+                    routed_experts,
+                    indices,
+                    cp_forward,
+                    packed_tokens=sequences.numel() if self.packing_samples and not cp_forward else None,
+                )
+            )
             # Replay must stay active through the activation-checkpoint recompute in
             # backward, else the recompute reverts to the live router and disagrees with
             # the replayed forward (CheckpointError). Keep it on the caller's stack; the

@@ -66,7 +66,14 @@ def is_automodel_custom_model(model: Any) -> bool:
     return False
 
 
-def pack_padded_batch(sequences: torch.Tensor, attention_mask: torch.Tensor, *, style: str = "hf"):
+def pack_padded_batch(
+    sequences: torch.Tensor,
+    attention_mask: torch.Tensor,
+    *,
+    style: str = "hf",
+    pad_to_tokens: int | None = None,
+    padding_token_id: int = 0,
+):
     """Convert a padded `(B, S)` batch to packed `(1, total_real_tokens)` format.
 
     Returns:
@@ -75,6 +82,12 @@ def pack_padded_batch(sequences: torch.Tensor, attention_mask: torch.Tensor, *, 
         rolled_input_ids: `(1, total_real_tokens)` from `torch.roll(input_ids, -1)` then unpadded
         indices:          flat indices into `(B*S,)` of real tokens (for `unpack_to_padded`)
         attn_kwargs:      HF FlashAttention kwargs or AutoModel THD kwargs
+
+    ``pad_to_tokens`` appends synthetic tokens to the final packed sequence. This is
+    used by HybridEP, whose routing-map all-gather requires every rank in an EP group
+    to contribute the same ``[tokens, experts]`` shape. The synthetic suffix is causal
+    (so real tokens cannot attend to it), is marked in AutoModel's ``padding_mask`` so
+    it is not routed to experts, and is dropped by :func:`unpack_to_padded`.
     """
     if style not in {"hf", "automodel"}:
         raise ValueError(f"Unsupported packing style: {style}")
@@ -98,6 +111,35 @@ def pack_padded_batch(sequences: torch.Tensor, attention_mask: torch.Tensor, *, 
     position_ids_full = torch.clip(torch.cumsum(attention_mask, dim=-1) - 1, min=0)
     position_ids = position_ids_full.reshape(batch * seqlen).index_select(0, indices).unsqueeze(0)
 
+    real_tokens = int(indices.numel())
+    target_tokens = real_tokens if pad_to_tokens is None else int(pad_to_tokens)
+    if target_tokens < real_tokens:
+        raise ValueError(f"pad_to_tokens ({target_tokens}) must be >= real token count ({real_tokens})")
+    trailing_pad = target_tokens - real_tokens
+    if trailing_pad:
+        token_pad = torch.full(
+            (1, trailing_pad),
+            padding_token_id,
+            dtype=packed_ids.dtype,
+            device=packed_ids.device,
+        )
+        packed_ids = torch.cat((packed_ids, token_pad), dim=1)
+        rolled_packed = torch.cat((rolled_packed, token_pad), dim=1)
+
+        # Treat the synthetic suffix as part of the final causal sequence. Real
+        # positions precede it, so their attention outputs remain unchanged.
+        last_real_length = int(seq_lens[-1].item()) if seq_lens.numel() else 0
+        pad_positions = torch.arange(
+            last_real_length,
+            last_real_length + trailing_pad,
+            dtype=position_ids.dtype,
+            device=position_ids.device,
+        ).unsqueeze(0)
+        position_ids = torch.cat((position_ids, pad_positions), dim=1)
+        cu_seq_lens = cu_seq_lens.clone()
+        cu_seq_lens[-1] += trailing_pad
+        max_length = max(max_length, last_real_length + trailing_pad)
+
     if style == "automodel":
         attn_kwargs = {
             "qkv_format": "thd",
@@ -105,6 +147,10 @@ def pack_padded_batch(sequences: torch.Tensor, attention_mask: torch.Tensor, *, 
             "cu_seqlens_padded": cu_seq_lens,
             "max_seqlen": int(max_length),
         }
+        if trailing_pad:
+            padding_mask = torch.zeros((1, target_tokens), dtype=torch.bool, device=sequences.device)
+            padding_mask[:, real_tokens:] = True
+            attn_kwargs["padding_mask"] = padding_mask
     else:
         attn_kwargs = {
             "cu_seq_lens_q": cu_seq_lens,
@@ -122,6 +168,14 @@ def unpack_to_padded(packed: torch.Tensor, indices: torch.Tensor, batch: int, se
     using the `indices` from the original pack.
     """
     packed_values = packed.squeeze(0) if packed.dim() > 1 and packed.shape[0] == 1 else packed
+    real_tokens = int(indices.numel())
+    if packed_values.shape[0] < real_tokens:
+        raise ValueError(
+            f"Packed output has {packed_values.shape[0]} tokens, fewer than the {real_tokens} real-token indices"
+        )
+    # HybridEP equalization may append a synthetic suffix. It has no destination
+    # in the caller's original padded [B, S] coordinates and must be discarded.
+    packed_values = packed_values[:real_tokens]
     output = packed_values.new_zeros((batch * seqlen, *packed_values.shape[1:]))
     output.index_copy_(0, indices, packed_values)
     return output.view(batch, seqlen, *packed_values.shape[1:])
