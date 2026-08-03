@@ -223,11 +223,7 @@ def test_build_routing_targets_pads_hybridep_suffix_with_valid_masked_expert():
     stub = SimpleNamespace(packing_samples=True, _num_routing_gates=L, _moe_layer_global_ids=list(range(L)))
     # Only tokens 0 and 1 are real on this rank; HybridEP equalizes it to four.
     targets = BaseModel._build_routing_targets(
-        stub,
-        routed,
-        indices=torch.tensor([0, 1]),
-        cp_forward=False,
-        packed_tokens=4,
+        stub, routed, indices=torch.tensor([0, 1]), cp_forward=False, pad_to_tokens=4
     )
 
     for layer in range(L):

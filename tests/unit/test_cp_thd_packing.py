@@ -74,14 +74,10 @@ def test_ep_equalized_packing_masks_and_drops_synthetic_suffix():
     attention_mask = torch.tensor([[1, 1, 0, 0], [1, 1, 1, 0]])
 
     packed, positions, _rolled, indices, kwargs = pack_padded_batch(
-        sequences,
-        attention_mask,
-        style="automodel",
-        pad_to_tokens=8,
-        padding_token_id=99,
+        sequences, attention_mask, style="automodel", pad_to_tokens=8
     )
 
-    assert packed.tolist() == [[10, 11, 20, 21, 22, 99, 99, 99]]
+    assert packed.tolist() == [[10, 11, 20, 21, 22, 0, 0, 0]]
     assert positions.tolist() == [[0, 1, 0, 1, 2, 3, 4, 5]]
     assert kwargs["cu_seqlens"].tolist() == [0, 2, 8]
     assert kwargs["cu_seqlens_padded"].tolist() == [0, 2, 8]
