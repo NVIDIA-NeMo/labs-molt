@@ -244,11 +244,12 @@ class FsdpStrategy:
         # the topk routing is NOT recomputed in backward; otherwise a near-tie token
         # re-routes on recompute → per-expert counts shift → grouped-GEMM shapes drift
         # ±1 → CheckpointError.
-        # reshard_after_forward (MOLT_MOE_RESHARD_AFTER_FWD): free the all-gathered
-        # experts after forward and re-gather in backward — one extra all-gather for a
-        # lower activation peak. Default OFF (bit-identical); opt in for memory-bound
-        # runs (e.g. 32K/CP8). Smoke-test under deepep+AC: the re-gather must not
-        # perturb the AC recompute and logprobs_diff must stay 0.
+        # reshard_after_forward (MOLT_MOE_RESHARD_AFTER_FWD): despite the name, AutoModel
+        # applies this to every FSDP unit (blocks, experts, embed/lm_head, VLM towers) of
+        # every model built from this strategy — policy, ref and critic. One extra
+        # backward all-gather for a lower activation peak; default OFF (bit-identical).
+        # Each worker re-reads it here, so it must reach the Ray runtime env, not just
+        # the submit shell. Smoke-test under deepep+AC: logprobs_diff must stay 0.
         _reshard_after_fwd = os.environ.get("MOLT_MOE_RESHARD_AFTER_FWD", "0") == "1"
         self.moe_config = (
             MoEParallelizerConfig(
