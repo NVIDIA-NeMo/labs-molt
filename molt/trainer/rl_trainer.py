@@ -632,8 +632,20 @@ class GenerateSamplesActor:
         from molt.trainer.rollout.router import AgentRunnerActor
 
         num_runners = max(1, getattr(strategy.args.rollout, "num_runners", 2))
+        # SPREAD the runners across the cluster. AgentRunnerActor already asks for num_cpus=1 so
+        # that Ray *can* balance it, and the comment on that decorator assumes SPREAD is in
+        # effect -- but nothing ever passed it, and Ray's default packs onto the first node with
+        # room. A node with dozens of free CPUs has room for every runner, so all of them land
+        # there, and so do all of their desktop-env VMs.
+        #
+        # Measured on an OSWorld run: every AgentRunnerActor reported the same ip, putting 128
+        # containers on one node. That node hands out 128 x 4 ports from the provider's ranges,
+        # which is where port collisions begin; osworld_error climbed 4% -> 54% within eleven
+        # steps while mean episode length fell 63 -> 19, i.e. rollouts dying at setup.
         agent_runners = [
-            AgentRunnerActor.remote(strategy.args.train.agent_path, router_url, model_path=pretrain)
+            AgentRunnerActor.options(scheduling_strategy="SPREAD").remote(
+                strategy.args.train.agent_path, router_url, model_path=pretrain
+            )
             for _ in range(num_runners)
         ]
         ray.get([r.ready.remote() for r in agent_runners])
