@@ -216,7 +216,7 @@ EP_SIZE="${EP_SIZE:-8}"
 CP_SIZE="${CP_SIZE:-8}"
 FSDP_ATTN_IMPLEMENTATION="${FSDP_ATTN_IMPLEMENTATION:-te}"
 FREEZE_VISUAL_ENCODER="${FREEZE_VISUAL_ENCODER:-1}"
-FREEZE_MOE_ROUTER="${FREEZE_MOE_ROUTER:-1}"
+FREEZE_MOE_ROUTER="${FREEZE_MOE_ROUTER:-0}"
 # Algo — defaults tuned for geo3k VLM math multi-turn.
 KL_COEF="${KL_COEF:-0.0}"
 MOE_AUX_LOSS_COEF="${MOE_AUX_LOSS_COEF:-0}"   # RL: no load-balancing aux (don't perturb the policy grad)
