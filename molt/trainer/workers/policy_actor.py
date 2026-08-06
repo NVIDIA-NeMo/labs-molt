@@ -766,6 +766,7 @@ class PolicyModelActor(BaseModelActor):
             moe_config=strategy.moe_config,
             activation_checkpointing=args.actor.gradient_checkpoint,
             packing_samples=strategy.args.fsdp.packing_samples,
+            use_liger_kernel=strategy.args.fsdp.use_liger_kernel,
             temperature=strategy.args.rollout.temperature,
             freeze_visual_encoder=getattr(strategy.args.actor, "freeze_visual_encoder", False),
             freeze_moe_router=getattr(strategy.args.actor, "freeze_moe_router", False),

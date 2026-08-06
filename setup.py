@@ -99,6 +99,9 @@ setup(
         "vllm": ["vllm==0.25.1"],
         "vllm_latest": ["vllm>=0.24.0"],
         "flash-attn-2": ["flash-attn==2.8.3"],
+        "liger": [
+            "liger-kernel @ git+https://github.com/linkedin/Liger-Kernel.git@1f1a4b8d6a6c3c1ddb3573a46480c41cef25bde6"
+        ],
     },
     python_requires=">=3.10",
     classifiers=[
