@@ -234,6 +234,32 @@ def _mtp_off_kwargs(pretrain_or_model) -> dict:
     return {"text_config": disabled} if text_config is not None else disabled
 
 
+def _lora_peft_config(rank: int, alpha: int, dropout: float, target_modules, *, is_moe: bool, tp_size: int):
+    """AutoModel's ``PeftConfig`` for ``from_pretrained``, or ``None`` when LoRA is off.
+
+    AutoModel injects the adapters before FSDP2 shards and freezes the base after, so the
+    optimizer's ``requires_grad`` filter already trains adapters only."""
+    if rank <= 0:
+        return None
+    from nemo_automodel.components._peft.lora import PeftConfig
+
+    # AutoModel's safe custom-MoE TP path rejects PEFT only after the slow weight load; fail
+    # here instead (adapters would diverge across the TP-replicated non-expert modules).
+    if is_moe and tp_size > 1:
+        raise ValueError(
+            f"LoRA on a custom-MoE model requires --fsdp.tp_size 1 (got {tp_size}): AutoModel's safe "
+            "MoE tensor-parallel path does not support PEFT. Scale MoE with --fsdp.ep_size instead."
+        )
+    return PeftConfig(
+        # Default `*_proj` (AutoModel's) matches dense linears but not grouped experts
+        # (`*_projs`); pass an explicit `*` to adapt those too.
+        target_modules=list(target_modules) if target_modules else ["*_proj"],
+        dim=rank,
+        alpha=alpha,
+        dropout=dropout,
+    )
+
+
 class BaseModel(nn.Module):
     """Shared base for the RL model wrappers (``Actor`` and ``Critic``).
 
@@ -261,6 +287,10 @@ class BaseModel(nn.Module):
         use_fp32_master_weights: bool = True,
         moe_aux_loss_coef: float = 0.0,
         routing_replay: bool = False,
+        lora_rank: int = 0,
+        lora_alpha: int = 32,
+        lora_dropout: float = 0.0,
+        lora_target_modules: Optional[list] = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -283,8 +313,15 @@ class BaseModel(nn.Module):
         mesh_dims = getattr(device_mesh, "mesh_dim_names", ()) or ()
         cp_mesh = device_mesh["cp"] if device_mesh is not None and "cp" in mesh_dims else None
         self.cp_size = cp_mesh.size() if cp_mesh is not None else 1
+        # Kept for the checkpointer: AutoModel needs it back at save time to emit adapter_config.json.
+        self.peft_config = None
 
         if not isinstance(pretrain_or_model, str):
+            if lora_rank > 0:
+                raise ValueError(
+                    "lora_rank applies only when building from a checkpoint path; apply LoRA yourself "
+                    "before handing an already-instantiated model to this wrapper."
+                )
             self.model = pretrain_or_model
             self.is_vlm = False
             self._packing_style = "automodel" if is_automodel_custom_model(self.model) else "hf"
@@ -429,6 +466,14 @@ class BaseModel(nn.Module):
             moe_parallel_config=moe_config,
             activation_checkpointing=ac_setting,
         )
+        self.peft_config = _lora_peft_config(
+            lora_rank,
+            lora_alpha,
+            lora_dropout,
+            lora_target_modules,
+            is_moe=is_moe,
+            tp_size=device_mesh["tp"].size() if device_mesh is not None and "tp" in mesh_dims else 1,
+        )
         self.model = ModelCls.from_pretrained(
             pretrain_or_model,
             trust_remote_code=True,
@@ -438,6 +483,7 @@ class BaseModel(nn.Module):
             use_liger_kernel=False,
             has_packed_sequence=packing_samples,
             force_hf=False,
+            peft_config=self.peft_config,
             # Disable the MTP head via AutoModel's config-override deep-merge (see
             # _mtp_off_kwargs); no-op without MTP.
             **_mtp_off_kwargs(pretrain_or_model),
@@ -521,6 +567,15 @@ class BaseModel(nn.Module):
                             n_frozen += 1
             if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
                 print(f"[MoE] freeze_moe_router=True: froze {n_frozen} router param tensors")
+
+        # Base is frozen under LoRA; a near-100% trainable share means target_modules matched nothing.
+        if lora_rank > 0 and (not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0):
+            n_train = sum(p.numel() for p in self.model.parameters() if p.requires_grad)
+            n_all = sum(p.numel() for p in self.model.parameters())
+            print(
+                f"[LoRA] rank={lora_rank} alpha={lora_alpha} dropout={lora_dropout}: trainable "
+                f"{n_train / 1e6:.1f}M / {n_all / 1e6:.1f}M params ({100 * n_train / max(n_all, 1):.2f}%)"
+            )
 
         # https://github.com/huggingface/transformers/issues/26877
         # Use `model.generate(use_cache=True)` instead.

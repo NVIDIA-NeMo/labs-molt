@@ -43,6 +43,10 @@ def train(args):
         packing_samples=args.fsdp.packing_samples,
         freeze_visual_encoder=args.model.freeze_visual_encoder,
         moe_aux_loss_coef=args.model.aux_loss_coef,
+        lora_rank=args.model.lora.rank,
+        lora_alpha=args.model.lora.alpha,
+        lora_dropout=args.model.lora.dropout,
+        lora_target_modules=args.model.lora.target_modules,
     )
     tokenizer = get_tokenizer(
         args.model.model_name_or_path, model.model, "right", use_fast=not args.data.disable_fast_tokenizer
@@ -151,6 +155,7 @@ if __name__ == "__main__":
         add_ckpt_args,
         add_fsdp_args,
         add_logger_args,
+        add_lora_args,
         add_optimizer_args,
         resolve_ckpt_retention,
     )
@@ -164,6 +169,8 @@ if __name__ == "__main__":
     add_ckpt_args(parser, default_ckpt_path="./ckpt/checkpoints_sft")
     # wandb + TensorBoard + logging cadence.
     add_logger_args(parser, default_wandb_project="molt_train_sft", run_name_prefix="sft")
+    # LoRA (off unless --model.lora.rank > 0).
+    add_lora_args(parser, prefix="model.")
 
     # ====================== SFT-specific arguments ======================
     # Model
