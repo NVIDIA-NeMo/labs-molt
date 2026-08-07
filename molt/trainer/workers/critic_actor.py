@@ -50,7 +50,7 @@ from molt.utils.logging_utils import init_logger
 from molt.utils.vlm_utils import merge_mm_train_inputs
 
 from ..algorithm import NaiveReplayBuffer
-from .actor_group import BaseModelActor
+from .actor_group import BaseModelActor, _make_forward_batch, _split_forward_batch
 
 logger = init_logger(__name__)
 
@@ -350,6 +350,24 @@ class CriticModelActor(BaseModelActor):
             )
         self.critic.train()  # reset model state
         return output["action_values"].to("cpu")
+
+    def forward_batch(self, experiences) -> list[torch.Tensor]:
+        batch = _make_forward_batch(experiences, self.dynamic_batch_pad_to_multiple)
+        device = torch.cuda.current_device()
+        mm_inputs = {}
+        if batch.mm_train_inputs and getattr(self.critic, "is_vlm", False):
+            mm_inputs = merge_mm_train_inputs(batch.mm_train_inputs, device)
+
+        self.critic.eval()
+        with torch.no_grad():
+            output = self.critic(
+                batch.sequences.to(device),
+                batch.action_mask.to(device),
+                batch.attention_mask.to(device),
+                **mm_inputs,
+            )
+        self.critic.train()
+        return _split_forward_batch(output["action_values"], experiences)
 
     def append(self, experience: Experience):
         # reload() fetches the sample's heavy tensors from the producing runner's shared-memory
