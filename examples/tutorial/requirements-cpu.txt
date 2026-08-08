@@ -1,0 +1,19 @@
+# Based on the CPU-usable subset of ../../requirements.txt, pinned to the
+# macOS arm64 / Python 3.12 environment used to verify this walkthrough.
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+# Ray, vLLM, vLLM-router, NeMo AutoModel, and other GPU runtimes are intentionally omitted.
+aiohttp==3.14.1
+datasets==5.0.0
+fastapi==0.139.0
+huggingface-hub==1.23.0
+numpy==2.5.1
+pillow==12.3.0
+pylatexenc==2.10
+socksio==1.0.0
+sympy==1.14.0
+torch==2.11.0
+torchdata==0.11.0
+tqdm==4.68.4
+transformers==5.13.1
+uvicorn==0.51.0
