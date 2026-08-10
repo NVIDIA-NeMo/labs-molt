@@ -382,18 +382,13 @@ class CheckpointManager:
 
         optim_dir = os.path.join(load_dir, "optim")
         if optimizer is not None and os.path.isdir(optim_dir):
-            import torch.distributed.checkpoint as dcp
-            from nemo_automodel.components.checkpoint.stateful_wrappers import OptimizerState
-            from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
-
-            optimizer_state = OptimizerState(model, optimizer, scheduler)
-            optim_state_dict = optimizer_state.state_dict()
-            dcp.load(
-                optim_state_dict,
-                checkpoint_id=optim_dir,
-                planner=DefaultLoadPlanner(allow_partial_load=True),
-            )
-            optimizer_state.load_state_dict(optim_state_dict)
+            # Symmetric with save_ckpt: route through Checkpointer.load_optimizer so
+            # both sides build OptimizerState with the same is_peft / has_expert_parallelism
+            # gates. The prior hand-rolled dcp.load ignored those flags and used the DCP
+            # (get_optimizer_state_dict) shape, while PEFT+EP saves use the NATIVE
+            # optimizer.state_dict() shape — under allow_partial_load the mismatched keys
+            # were silently skipped and the resumed AdamW ran with zero moments.
+            ckpt.load_optimizer(optimizer=optimizer, model=model, weights_path=load_dir, scheduler=scheduler)
             # With --fsdp.offload optimizer the Adam moments must live on CPU; DCP
             # restores them onto the model param's GPU device, so page them back.
             self.strategy.offload_moments_to_cpu(optimizer)
