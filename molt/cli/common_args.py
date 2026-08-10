@@ -179,8 +179,9 @@ def add_lora_args(parser, prefix: str = "") -> None:
         type=str,
         nargs="+",
         default=None,
-        help="Wildcard patterns of linear modules to adapt (anchored fullmatch), default '*_proj'. "
-        "Custom-MoE grouped experts are named '*_projs' and need an explicit pattern, e.g. '*' for every linear.",
+        help="Wildcard patterns of modules to adapt (anchored fullmatch on the full dotted "
+        "module path), default '*_proj'. Custom-MoE grouped experts are one module named "
+        "'experts' — pass '*.experts' alongside '*_proj' to adapt them too.",
     )
 
 

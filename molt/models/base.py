@@ -250,8 +250,10 @@ def _lora_peft_config(rank: int, alpha: int, dropout: float, target_modules, *, 
             "MoE tensor-parallel path does not support PEFT. Scale MoE with --fsdp.ep_size instead."
         )
     return PeftConfig(
-        # Default `*_proj` (AutoModel's) matches dense linears but not grouped experts
-        # (`*_projs`); pass an explicit `*` to adapt those too.
+        # Default `*_proj` matches dense linears by full module path (attention/MLP).
+        # Custom-MoE grouped experts live at `<...>.experts` (one module holding all
+        # experts as GroupedExperts/GroupedExpertsDeepEP): pattern is `*.experts`,
+        # not `*_projs` (that's the parameter name inside the module, not a module).
         target_modules=list(target_modules) if target_modules else ["*_proj"],
         dim=rank,
         alpha=alpha,

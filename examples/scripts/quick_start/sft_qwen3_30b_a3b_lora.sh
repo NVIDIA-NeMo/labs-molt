@@ -19,8 +19,10 @@
 # The stock HF MoE runs on the same custom MoE + expert-parallel path as the
 # Qwen3.5/3.6 recipes, so this mirrors sft_qwen3_5_35b_lora.sh minus the vision
 # columns (text-only model). Only the adapters train; adapters land on `*_proj`
-# -- add `--model.lora.target_modules '*'` to adapt the grouped experts too. MoE
-# + expert-parallel + full recompute needs `--data.pad_to_max_len` (PR #61 /
+# (dense attention/MLP linears) -- add `'*.experts'` to also adapt the grouped
+# experts (one module per MoE layer named `experts`; `*_projs` is a parameter
+# name inside that module, not a module path, so it matches nothing). MoE +
+# expert-parallel + full recompute needs `--data.pad_to_max_len` (PR #61 /
 # AutoModel#3325) to avoid a CheckpointError.
 #
 #   MODEL_PATH=/path/to/Qwen3-30B-A3B bash examples/scripts/quick_start/sft_qwen3_30b_a3b_lora.sh

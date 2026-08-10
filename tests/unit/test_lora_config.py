@@ -51,15 +51,18 @@ def test_cli_flags_map_onto_peft_config():
 
 def test_default_target_modules_are_the_dense_projections():
     cfg = _lora_peft_config(8, 32, 0.0, None, is_moe=False, tp_size=1)
-    # Patterns are anchored fullmatches, so '*_proj' adapts dense attention/MLP linears but
-    # not custom-MoE grouped experts, which are named '*_projs'.
+    # Patterns are anchored fullmatches on the full dotted module path, so '*_proj'
+    # adapts dense attention/MLP linears (e.g. layers.0.self_attn.q_proj). Custom-MoE
+    # grouped experts are one module per MoE layer named `experts`; pass '*.experts'
+    # alongside to adapt those (`*_projs` is a parameter name inside the module, not
+    # a module path, and matches nothing).
     assert cfg.target_modules == ["*_proj"]
 
 
 def test_explicit_target_modules_are_forwarded():
-    lora = _parse("--model.lora.rank", "8", "--model.lora.target_modules", "*", "*_projs")
+    lora = _parse("--model.lora.rank", "8", "--model.lora.target_modules", "*_proj", "*.experts")
     cfg = _lora_peft_config(lora.rank, lora.alpha, lora.dropout, lora.target_modules, is_moe=False, tp_size=1)
-    assert cfg.target_modules == ["*", "*_projs"]
+    assert cfg.target_modules == ["*_proj", "*.experts"]
 
 
 def test_moe_with_tensor_parallel_is_rejected_up_front():

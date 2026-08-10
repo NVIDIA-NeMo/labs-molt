@@ -17,10 +17,12 @@
 # Single-node quick-start: Qwen3.5-35B-A3B (custom MoE, VLM) LoRA SFT on geo3k.
 #
 # Same recipe as sft_qwen3_6_35b.sh with LoRA on top: only the adapters train,
-# the base stays frozen. Adapters land on `*_proj` (attention/dense linears;
-# grouped experts `*_projs` stay frozen) -- add `--model.lora.target_modules '*'`
-# to adapt the experts too. MoE + expert-parallel + full recompute needs
-# `--data.pad_to_max_len` (PR #61 / AutoModel#3325) to avoid a CheckpointError.
+# the base stays frozen. Adapters land on `*_proj` (dense attention/MLP linears);
+# to also adapt the grouped experts pass `--model.lora.target_modules '*_proj' '*.experts'`
+# (each MoE layer has one grouped module named `experts`; `*_projs` is a parameter
+# name inside that module, not a module path, so it matches nothing). MoE +
+# expert-parallel + full recompute needs `--data.pad_to_max_len` (PR #61 /
+# AutoModel#3325) to avoid a CheckpointError.
 #
 #   MODEL_PATH=/path/to/Qwen3.5-35B-A3B bash examples/scripts/quick_start/sft_qwen3_5_35b_lora.sh
 
