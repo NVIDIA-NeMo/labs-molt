@@ -438,6 +438,7 @@ class BaseModel(nn.Module):
             use_liger_kernel=False,
             has_packed_sequence=packing_samples,
             force_hf=False,
+            freeze_config={"freeze_vision_tower": True} if freeze_visual_encoder else None,
             # Disable the MTP head via AutoModel's config-override deep-merge (see
             # _mtp_off_kwargs); no-op without MTP.
             **_mtp_off_kwargs(pretrain_or_model),
@@ -485,23 +486,6 @@ class BaseModel(nn.Module):
             )
         if self.packing_samples:
             print("[Packing] Using AutoModel THD/TE packed path.")
-
-        # VLM: optionally freeze the vision encoder so only the language backbone
-        # trains (language params live under "language_model.*" / "lm_head.*").
-        #
-        # CP>1 forces freezing the vision tower: the established VLM+CP recipe trains
-        # only the language stack (the model now embeds + shards the sequence inside
-        # its own forward), and freezing keeps optimizer state off never-updated vision
-        # params. Matches the pre-migration behavior, so CP metrics stay comparable.
-        effective_freeze_visual = freeze_visual_encoder
-        if self.is_vlm and self.cp_size > 1 and not freeze_visual_encoder:
-            effective_freeze_visual = True
-            if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-                print("[VLM] cp_size>1 forces freeze_visual_encoder=True (CP trains the language stack only).")
-        if self.is_vlm and effective_freeze_visual:
-            for name, param in self.model.named_parameters():
-                if "language_model" not in name and "lm_head" not in name:
-                    param.requires_grad = False
 
         # Optionally freeze the MoE router/gate (keeps vLLM-vs-actor routing identical,
         # stabilizes training). Match by isinstance(Gate), NOT by name: the path varies by
