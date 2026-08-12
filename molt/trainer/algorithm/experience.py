@@ -19,6 +19,8 @@ from typing import Any, List, Union
 
 import ray
 import torch
+import torch.nn.functional as F
+from nemo_automodel.components.datasets.utils import pack_features_for_thd, packed_sequence_thd_collater
 
 from molt.utils.logging_utils import init_logger
 from molt.utils.seqlen_balancing import get_seqlen_balanced_partitions
@@ -264,6 +266,38 @@ def make_experience_batch(items: List[Experience]) -> Experience:
             kwargs[f.name] = list(itertools.chain.from_iterable(getattr(item, f.name) for item in items))
 
     return Experience(**kwargs)
+
+
+def make_packed_experience_batch(items: List[Experience]) -> dict:
+    """Pack unpadded single-sample Experiences into one flat THD microbatch.
+
+    The buffer already stores unpadded samples, so packing here replaces the
+    padded path's pad -> unpad -> pack -> re-pad round trip through the forward.
+    Token packing delegates to AutoModel's collater, keeping the packed schema
+    identical to the one its THD/CP pipeline consumes. Action-side fields are
+    [T-1]; one trailing masked slot puts them on the same [T] axis as the tokens.
+    """
+    seq_lens = [item.sequences.numel() for item in items]
+    features = [
+        {"input_ids": item.sequences.tolist(), "labels": torch.roll(item.sequences, -1, -1).tolist()} for item in items
+    ]
+    batch = packed_sequence_thd_collater([pack_features_for_thd(features)])
+
+    for f in fields(Experience):
+        value = getattr(items[0], f.name)
+        if f.name in ("sequences", "attention_mask") or not isinstance(value, torch.Tensor):
+            continue
+        if not Experience.is_step_tensor_field(f.name):
+            continue
+        if value.dim() != 1:
+            # routed_experts is [layers, topk, T]; R3 replay keeps the padded path.
+            raise ValueError(f"{f.name} is {value.dim()}-D; packing covers 1-D per-token fields only")
+        batch[f.name] = torch.cat([F.pad(getattr(item, f.name), (0, 1)) for item in items]).unsqueeze(0)
+
+    batch["cu_seqlens"] = torch.tensor([0, *itertools.accumulate(seq_lens)], dtype=torch.int32)
+    batch["max_seqlen"] = max(seq_lens)
+    batch["packed_seq_lens"] = seq_lens
+    return batch
 
 
 def remove_padding_in_sequences(items: List[Experience]) -> List[Experience]:
