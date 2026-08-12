@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Optional, Union
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
@@ -301,6 +302,16 @@ class BaseModel(nn.Module):
         self.temperature = temperature
         self.packing_samples = packing_samples
         self.device_mesh = device_mesh
+        # HybridEP all-gathers a [tokens, experts] routing map, so every rank in an EP
+        # group must pack the same token count. Other dispatchers don't shape-collect.
+        ep_dims = getattr(moe_mesh, "mesh_dim_names", ()) or ()
+        self._ep_pad_group = (
+            moe_mesh.get_group("ep")
+            if "ep" in ep_dims
+            and moe_mesh["ep"].size() > 1
+            and os.environ.get("MOLT_MOE_DISPATCHER", "hybridep").lower() == "hybridep"
+            else None
+        )
         mesh_dims = getattr(device_mesh, "mesh_dim_names", ()) or ()
         cp_mesh = device_mesh["cp"] if device_mesh is not None and "cp" in mesh_dims else None
         self.cp_size = cp_mesh.size() if cp_mesh is not None else 1
@@ -465,6 +476,16 @@ class BaseModel(nn.Module):
             is_moe=is_moe,
             tp_size=device_mesh["tp"].size() if device_mesh is not None and "tp" in mesh_dims else 1,
         )
+        # VLM + CP>1 forces freezing the vision tower: CP shards the language stack only
+        # (the model embeds + shards the sequence inside its own forward), so leaving
+        # vision trainable would waste optimizer state on never-updated params. Compute
+        # here so it flows into AutoModel's freeze_config below and keeps metrics
+        # comparable across the pre-`freeze_config` recipes.
+        effective_freeze_visual = freeze_visual_encoder
+        if self.is_vlm and self.cp_size > 1 and not freeze_visual_encoder:
+            effective_freeze_visual = True
+            if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+                print("[VLM] cp_size>1 forces freeze_visual_encoder=True (CP trains the language stack only).")
         self.model = ModelCls.from_pretrained(
             pretrain_or_model,
             trust_remote_code=True,
@@ -475,6 +496,7 @@ class BaseModel(nn.Module):
             has_packed_sequence=packing_samples,
             force_hf=False,
             peft_config=self.peft_config,
+            freeze_config={"freeze_vision_tower": True} if effective_freeze_visual else None,
             # Disable the MTP head via AutoModel's config-override deep-merge (see
             # _mtp_off_kwargs); no-op without MTP.
             **_mtp_off_kwargs(pretrain_or_model),
@@ -522,23 +544,6 @@ class BaseModel(nn.Module):
             )
         if self.packing_samples:
             print("[Packing] Using AutoModel THD/TE packed path.")
-
-        # VLM: optionally freeze the vision encoder so only the language backbone
-        # trains (language params live under "language_model.*" / "lm_head.*").
-        #
-        # CP>1 forces freezing the vision tower: the established VLM+CP recipe trains
-        # only the language stack (the model now embeds + shards the sequence inside
-        # its own forward), and freezing keeps optimizer state off never-updated vision
-        # params. Matches the pre-migration behavior, so CP metrics stay comparable.
-        effective_freeze_visual = freeze_visual_encoder
-        if self.is_vlm and self.cp_size > 1 and not freeze_visual_encoder:
-            effective_freeze_visual = True
-            if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-                print("[VLM] cp_size>1 forces freeze_visual_encoder=True (CP trains the language stack only).")
-        if self.is_vlm and effective_freeze_visual:
-            for name, param in self.model.named_parameters():
-                if "language_model" not in name and "lm_head" not in name:
-                    param.requires_grad = False
 
         # Optionally freeze the MoE router/gate (keeps vLLM-vs-actor routing identical,
         # stabilizes training). Match by isinstance(Gate), NOT by name: the path varies by
@@ -601,7 +606,7 @@ class BaseModel(nn.Module):
             return unpack_to_padded(t, indices, batch, seqlen)
         return t
 
-    def _build_routing_targets(self, routed_experts, indices, cp_forward):
+    def _build_routing_targets(self, routed_experts, indices, cp_forward, pad_to_tokens=None):
         """Shard the R3 routing ids to this rank's forward token order (RouterReplay).
 
         ``routed_experts`` is ``(B, vllm_layers, topk, S)`` (rollout top-k expert ids per
@@ -630,6 +635,10 @@ class BaseModel(nn.Module):
             per_token = routing.permute(0, 3, 1, 2).reshape(b * s, n_layers, topk).long()
             if self.packing_samples:
                 per_token = per_token.index_select(0, indices)  # drop pad tokens for the packed order
+                if pad_to_tokens is not None:
+                    # Match the EP-equalized pack. Expert 0, not the -1 sentinel: Gate
+                    # gathers routing weights before padding_mask drops these rows.
+                    per_token = F.pad(per_token, (0, 0, 0, 0, 0, pad_to_tokens - per_token.shape[0]))
         if per_token.shape[1] <= max(global_ids):
             raise ValueError(
                 f"rollout routing has {per_token.shape[1]} layers but a MoE gate maps to global "
@@ -661,6 +670,7 @@ class BaseModel(nn.Module):
         batch, seqlen = sequences.size()
         attn_kwargs: dict = {}
         indices = None
+        pad_to_tokens = None  # set under EP-equalized packing; also pads the routing rows
         cp_forward = False
         cp_ctx_factory = nullcontext
         cp_batch = None  # built in the packed or padded branch below; None => no CP sharding
@@ -669,8 +679,14 @@ class BaseModel(nn.Module):
             # cp1 real-token packing. CP is incompatible with packed sequences: cp>1
             # falls through to the padded branch, where the model-owned sharder
             # flattens the padded [B,S] batch to THD itself (from seq_lens).
+            if self._ep_pad_group is not None:
+                # Packed RL responses have rank-local token counts; grow them all to the
+                # EP-group max so HybridEP's routing-map all-gather agrees on the shape.
+                local_tokens = attention_mask.count_nonzero()
+                dist.all_reduce(local_tokens, op=dist.ReduceOp.MAX, group=self._ep_pad_group)
+                pad_to_tokens = int(local_tokens)
             sequences, position_ids, rolled_sequences, indices, attn_kwargs = pack_padded_batch(
-                sequences, attention_mask, style=self._packing_style
+                sequences, attention_mask, style=self._packing_style, pad_to_tokens=pad_to_tokens
             )
             forward_attention_mask = None
         else:
@@ -826,7 +842,8 @@ class BaseModel(nn.Module):
         if routed_experts is not None:
             from nemo_automodel.components.moe.router_replay import RouterReplay
 
-            replay_ctx = RouterReplay.replay(self._build_routing_targets(routed_experts, indices, cp_forward))
+            targets = self._build_routing_targets(routed_experts, indices, cp_forward, pad_to_tokens)
+            replay_ctx = RouterReplay.replay(targets)
             # Replay must stay active through the activation-checkpoint recompute in
             # backward, else the recompute reverts to the live router and disagrees with
             # the replayed forward (CheckpointError). Keep it on the caller's stack; the

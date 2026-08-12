@@ -96,7 +96,7 @@ setup(
     long_description_content_type="text/markdown",
     install_requires=_fetch_requirements("requirements.txt"),
     extras_require={
-        "vllm": ["vllm==0.25.1"],
+        "vllm": ["vllm==0.27.1"],
         "vllm_latest": ["vllm>=0.24.0"],
         "flash-attn-2": ["flash-attn==2.8.3"],
     },

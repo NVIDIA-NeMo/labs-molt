@@ -159,6 +159,9 @@ class SamplesGenerator:
     @torch.no_grad()
     def generate_eval_samples(self, **generate_kwargs) -> List[Experience]:
         """Generate evaluation samples for the entire eval dataloader."""
+        # Eval concurrency is decoupled from the rollout batch; unset falls back to it.
+        # The CLI rejects a non-positive --eval.batch_size, so this cannot be 0 here.
+        eval_batch_size = self.args.eval.batch_size or self.args.rollout.batch_size
         if getattr(self, "_eval_dataloader_iter", None) is None:
             self._eval_dataloader_iter = iter(self.eval_dataloader)
 
@@ -167,7 +170,7 @@ class SamplesGenerator:
             while True:
                 experiences, _, exhausted = self._generate_batch(
                     dataloader_iter=self._eval_dataloader_iter,
-                    num_prompts=self.args.rollout.batch_size,
+                    num_prompts=eval_batch_size,
                     dynamic_filtering=False,
                     **generate_kwargs,
                 )

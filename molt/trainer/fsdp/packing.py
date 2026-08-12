@@ -28,6 +28,7 @@ from typing import Any
 
 import torch
 import torch.distributed as dist
+import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 
 
@@ -66,7 +67,13 @@ def is_automodel_custom_model(model: Any) -> bool:
     return False
 
 
-def pack_padded_batch(sequences: torch.Tensor, attention_mask: torch.Tensor, *, style: str = "hf"):
+def pack_padded_batch(
+    sequences: torch.Tensor,
+    attention_mask: torch.Tensor,
+    *,
+    style: str = "hf",
+    pad_to_tokens: int | None = None,
+):
     """Convert a padded `(B, S)` batch to packed `(1, total_real_tokens)` format.
 
     Returns:
@@ -75,6 +82,10 @@ def pack_padded_batch(sequences: torch.Tensor, attention_mask: torch.Tensor, *, 
         rolled_input_ids: `(1, total_real_tokens)` from `torch.roll(input_ids, -1)` then unpadded
         indices:          flat indices into `(B*S,)` of real tokens (for `unpack_to_padded`)
         attn_kwargs:      HF FlashAttention kwargs or AutoModel THD kwargs
+
+    ``pad_to_tokens`` extends the last packed sequence with synthetic tokens so EP ranks
+    agree on the token count. They are causal-suffixed (real outputs unchanged), flagged
+    in ``padding_mask`` so experts skip them, and dropped by :func:`unpack_to_padded`.
     """
     if style not in {"hf", "automodel"}:
         raise ValueError(f"Unsupported packing style: {style}")
@@ -98,6 +109,20 @@ def pack_padded_batch(sequences: torch.Tensor, attention_mask: torch.Tensor, *, 
     position_ids_full = torch.clip(torch.cumsum(attention_mask, dim=-1) - 1, min=0)
     position_ids = position_ids_full.reshape(batch * seqlen).index_select(0, indices).unsqueeze(0)
 
+    real_tokens = int(indices.numel())
+    trailing_pad = 0 if pad_to_tokens is None else pad_to_tokens - real_tokens
+    if trailing_pad:
+        # Token ids are arbitrary (these rows are masked and then dropped); the
+        # positions continue the last sequence so real tokens never attend to them.
+        last_len = int(seq_lens[-1])
+        packed_ids = F.pad(packed_ids, (0, trailing_pad))
+        rolled_packed = F.pad(rolled_packed, (0, trailing_pad))
+        pad_positions = torch.arange(last_len, last_len + trailing_pad, device=position_ids.device)
+        position_ids = torch.cat((position_ids, pad_positions.to(position_ids.dtype).unsqueeze(0)), dim=1)
+        cu_seq_lens = cu_seq_lens.clone()
+        cu_seq_lens[-1] += trailing_pad
+        max_length = max(max_length, last_len + trailing_pad)
+
     if style == "automodel":
         attn_kwargs = {
             "qkv_format": "thd",
@@ -105,6 +130,9 @@ def pack_padded_batch(sequences: torch.Tensor, attention_mask: torch.Tensor, *, 
             "cu_seqlens_padded": cu_seq_lens,
             "max_seqlen": int(max_length),
         }
+        if trailing_pad:
+            is_pad = torch.arange(real_tokens + trailing_pad, device=sequences.device) >= real_tokens
+            attn_kwargs["padding_mask"] = is_pad.unsqueeze(0)
     else:
         attn_kwargs = {
             "cu_seq_lens_q": cu_seq_lens,
@@ -122,6 +150,8 @@ def unpack_to_padded(packed: torch.Tensor, indices: torch.Tensor, batch: int, se
     using the `indices` from the original pack.
     """
     packed_values = packed.squeeze(0) if packed.dim() > 1 and packed.shape[0] == 1 else packed
+    # An EP-equalized pack carries a synthetic suffix with no [B, S] destination.
+    packed_values = packed_values[: indices.numel()]
     output = packed_values.new_zeros((batch * seqlen, *packed_values.shape[1:]))
     output.index_copy_(0, indices, packed_values)
     return output.view(batch, seqlen, *packed_values.shape[1:])
