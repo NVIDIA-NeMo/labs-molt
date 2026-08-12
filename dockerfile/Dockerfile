@@ -15,11 +15,11 @@
 #
 # molt — the project image: CUDA-13 (native CUDA 13; A100 sm_80, H100/H200 sm_90, B200/GB200 sm_100).
 #
-# Base: OFFICIAL Docker Hub pytorch/pytorch:2.11.0-cuda13.0-cudnn9-devel
-#   (torch 2.11.0 *stable* + CUDA 13.0 + cuDNN 9.19, python 3.12, Ubuntu 24.04).
-#   Chosen because torch 2.11.0+cu130 already matches vLLM's cu130 wheel — NO torch
-#   swap, unlike NGC pytorch:26.04 (torch 2.12.0a0, vLLM-incompatible). No NGC tag
-#   pairs torch 2.11 with CUDA 13 (26.03 = torch 2.11/CUDA 12.9; 26.04 = torch 2.12/CUDA 13).
+# Base: OFFICIAL Docker Hub pytorch/pytorch:2.13.0-cuda13.0-cudnn9-devel
+#   (torch 2.13.0 + CUDA 13.0 + cuDNN 9.20, python 3.12, Ubuntu 24.04).
+#   Chosen because torch 2.13.0+cu130 matches vLLM 0.27.x's hard torch==2.13.0 pin — NO torch
+#   swap. The whole source stack (TE / flash-attn / mamba / DeepEP) is compiled against this
+#   torch, so the base torch version and vLLM must stay in lockstep.
 #
 # Runs BOTH SFT and RL (vLLM) for omni3 (Nemotron-H Mamba2+MoE) and qwen3.6 (Qwen3.5-MoE).
 # System stack baked in: TE + flash-attn + DeepEP + mamba + fla + vLLM.
@@ -32,7 +32,7 @@
 # Build (when docker is available):  docker build -f dockerfile/Dockerfile -t molt:cu13 .
 # (The bring-up was done via enroot on the cluster; see .tmp/cu13_build_steps.txt for the
 #  enroot-on-lustre import quirks, which are moot for a real docker build.)
-ARG BASE_IMAGE=pytorch/pytorch:2.11.0-cuda13.0-cudnn9-devel
+ARG BASE_IMAGE=pytorch/pytorch:2.13.0-cuda13.0-cudnn9-devel
 FROM ${BASE_IMAGE}
 
 # Ubuntu 24.04 system python is PEP-668 "externally-managed" -> allow pip into it.
@@ -167,7 +167,7 @@ RUN apt-get update && apt-get install -y --allow-change-held-packages rdma-core 
 # vision-only RL and the encoder is frozen — but the weights must load. Torch-pinned so the
 # [audio] extra (librosa/soundfile; torchaudio already in base) can't swap the torch trio.
 # Baking it here removes the per-run, per-node rl_omni3 MOLT_INSTALL_AUDIO install.
-RUN python -m pip install -c /opt/torch-pin.txt "vllm[audio]==0.26.0"
+RUN python -m pip install -c /opt/torch-pin.txt "vllm[audio]==0.27.1"
 
 # --- VLM modeling-code runtime deps + molt requirements + fla -----------
 # requirements.txt minus what's already pinned/built above (torch trio, TE, flash-attn,
