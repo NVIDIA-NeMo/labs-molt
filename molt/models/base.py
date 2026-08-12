@@ -30,8 +30,7 @@ import torch.nn.functional as F
 
 from molt.trainer.fsdp.packing import (
     is_automodel_custom_model,
-    pack_padded_batch,
-    unpack_to_padded,
+    packed_attn_kwargs,
 )
 
 from .utils import (
@@ -521,12 +520,13 @@ class BaseModel(nn.Module):
                 self._vlm_config, "video_token_id", "video_token_index", "video_context_token_id"
             )
 
-    def _restore_full_sequence(self, t, *, cp_forward, batch, seqlen, indices):
-        """Map a per-token tensor back onto the full ``[B, seqlen]`` axis.
+    def _restore_full_sequence(self, t, *, cp_forward, batch, seqlen):
+        """Map a per-token tensor back onto the caller's token axis.
 
-        Inverts whichever seq-axis transform the forward applied (they are mutually
-        exclusive): CP sharding under cp>1, or real-token packing under cp1. No-op
-        when neither is active.
+        Under cp>1 this gathers the CP shards back to ``[B, seqlen]``. A packed
+        batch needs no inverse: it keeps the flat ``[1, total]`` axis that its
+        per-token inputs already share, and ``packed_seq_lens`` splits it per
+        sample wherever a caller needs sequence boundaries.
         """
         if cp_forward:
             # Differentiable all-gather of this rank's CP shard back to the caller's
@@ -534,12 +534,9 @@ class BaseModel(nn.Module):
             # reshape for THD input_row_shape). The trailing slice drops the
             # cp-multiple pad the forward added.
             return self._cp_sharder.gather_token_tensor(t, seq_dim=1, trim=True, fill=0.0)[:, :seqlen]
-        if self.packing_samples:
-            # cp1 packing: scatter the packed [1, total] rows back to padded [B, seqlen].
-            return unpack_to_padded(t, indices, batch, seqlen)
         return t
 
-    def _build_routing_targets(self, routed_experts, indices, cp_forward, pad_to_tokens=None):
+    def _build_routing_targets(self, routed_experts, cp_forward, pad_to_tokens=None):
         """Shard the R3 routing ids to this rank's forward token order (RouterReplay).
 
         ``routed_experts`` is ``(B, vllm_layers, topk, S)`` (rollout top-k expert ids per
@@ -567,7 +564,7 @@ class BaseModel(nn.Module):
             # (B, layers, topk, S) seq-last -> (B*S, layers, topk) token-major, one row per token
             per_token = routing.permute(0, 3, 1, 2).reshape(b * s, n_layers, topk).long()
             if self.packing_samples:
-                per_token = per_token.index_select(0, indices)  # drop pad tokens for the packed order
+                # Already in packed token order (the collate packed routing too).
                 if pad_to_tokens is not None:
                     # Match the EP-equalized pack. Expert 0, not the -1 sentinel: Gate
                     # gathers routing weights before padding_mask drops these rows.
@@ -588,10 +585,11 @@ class BaseModel(nn.Module):
         mm_inputs: dict,
         output_hidden_states: bool = False,
         routed_experts: Optional[torch.Tensor] = None,
+        seq_lens: Optional[list] = None,
     ):
         """Input prep (packing / VLM token-type ids / CP sharding) + model call.
 
-        Returns ``(output, rolled_sequences, cp_forward, indices, batch, seqlen)``:
+        Returns ``(output, rolled_sequences, cp_forward, batch, seqlen)``:
         ``output`` is the normalized model output (``_AttrDict`` with ``logits`` and,
         for custom MoE, ``aux_loss``); the rest is the state ``_restore_full_sequence``
         needs to map a per-token tensor back onto the dense ``[B, seqlen]`` axis.
@@ -602,24 +600,32 @@ class BaseModel(nn.Module):
         """
         batch, seqlen = sequences.size()
         attn_kwargs: dict = {}
-        indices = None
         pad_to_tokens = None  # set under EP-equalized packing; also pads the routing rows
         cp_forward = False
         cp_ctx_factory = nullcontext
         cp_batch = None  # built in the packed or padded branch below; None => no CP sharding
         self._cp_sharder = None  # set below under CP; read by _restore_full_sequence / _build_routing_targets
-        if self.packing_samples and self.cp_size == 1:
-            # cp1 real-token packing. CP is incompatible with packed sequences: cp>1
-            # falls through to the padded branch, where the model-owned sharder
-            # flattens the padded [B,S] batch to THD itself (from seq_lens).
+        if seq_lens is not None:
+            # Already packed by the collate into one flat [1, total] row. Targets
+            # roll inside each sequence so none crosses a pack boundary.
+            rolled_sequences = torch.cat([torch.roll(s, -1) for s in sequences[0].split(seq_lens)]).unsqueeze(0)
+            trailing_pad = 0
             if self._ep_pad_group is not None:
-                # Packed RL responses have rank-local token counts; grow them all to the
-                # EP-group max so HybridEP's routing-map all-gather agrees on the shape.
-                local_tokens = attention_mask.count_nonzero()
+                # Rank-local token counts differ; grow them all to the EP-group max
+                # so HybridEP's routing-map all-gather agrees on the shape.
+                local_tokens = torch.tensor(sum(seq_lens), device=sequences.device)
                 dist.all_reduce(local_tokens, op=dist.ReduceOp.MAX, group=self._ep_pad_group)
                 pad_to_tokens = int(local_tokens)
-            sequences, position_ids, rolled_sequences, indices, attn_kwargs = pack_padded_batch(
-                sequences, attention_mask, style=self._packing_style, pad_to_tokens=pad_to_tokens
+                trailing_pad = pad_to_tokens - sum(seq_lens)
+                if trailing_pad:
+                    # Ids are arbitrary (masked, then dropped); positions continue the
+                    # last sequence so real tokens never attend to them.
+                    sequences = F.pad(sequences, (0, trailing_pad))
+                    rolled_sequences = F.pad(rolled_sequences, (0, trailing_pad))
+                    tail = torch.arange(seq_lens[-1], seq_lens[-1] + trailing_pad, device=position_ids.device)
+                    position_ids = torch.cat((position_ids, tail.to(position_ids.dtype).unsqueeze(0)), dim=1)
+            attn_kwargs = packed_attn_kwargs(
+                seq_lens, style=self._packing_style, device=sequences.device, trailing_pad=trailing_pad
             )
             forward_attention_mask = None
         else:
@@ -775,7 +781,7 @@ class BaseModel(nn.Module):
         if routed_experts is not None:
             from nemo_automodel.components.moe.router_replay import RouterReplay
 
-            targets = self._build_routing_targets(routed_experts, indices, cp_forward, pad_to_tokens)
+            targets = self._build_routing_targets(routed_experts, cp_forward, pad_to_tokens)
             replay_ctx = RouterReplay.replay(targets)
             # Replay must stay active through the activation-checkpoint recompute in
             # backward, else the recompute reverts to the live router and disagrees with
@@ -805,4 +811,4 @@ class BaseModel(nn.Module):
         # raw logits Tensor; HF returns a ModelOutput with `.logits`. Normalize.
         output = _normalize_output(output)
         output = attach_nemo_moe_aux_loss(output, self.model)
-        return output, rolled_sequences, cp_forward, indices, batch, seqlen
+        return output, rolled_sequences, cp_forward, batch, seqlen

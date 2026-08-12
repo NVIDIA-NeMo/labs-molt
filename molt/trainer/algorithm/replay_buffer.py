@@ -48,6 +48,7 @@ class NaiveReplayBuffer:
         limit: int = 0,
         cpu_offload: bool = True,
         dynamic_batch: bool = False,
+        packing: bool = False,
     ) -> None:
         super().__init__()
         self.sample_batch_size = sample_batch_size
@@ -56,6 +57,7 @@ class NaiveReplayBuffer:
         self.cpu_offload = cpu_offload
         self.items: List[Experience] = []
         self.dynamic_batch = dynamic_batch
+        self.packing = packing
         self.dynamic_indices: List[List[int]] = []
         self.dynamic_optimizer_step: List[int] = []
 
@@ -88,7 +90,7 @@ class NaiveReplayBuffer:
     def collate_fn(self, batch) -> Experience:
         if self.dynamic_batch:
             batch = batch[0]
-        return make_experience_batch(batch)
+        return make_experience_batch(batch, packed=self.packing)
 
     def setup_dynamic_batch(self, strategy):
         args = strategy.args

@@ -166,6 +166,8 @@ class ReferenceModelActor(BaseModelActor):
                 experience.sequences.to(device),
                 experience.action_mask.to(device),
                 experience.attention_mask.to(device),
+                position_ids=None if experience.position_ids is None else experience.position_ids.to(device),
+                seq_lens=experience.packed_seq_lens,
                 **mm_inputs,
             )
         return output["action_log_probs"].to("cpu")

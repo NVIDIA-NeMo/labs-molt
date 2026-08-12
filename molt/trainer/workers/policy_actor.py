@@ -119,6 +119,7 @@ class PolicyTrainer:
             buffer_limit,
             buffer_cpu_offload,
             dynamic_batch=self.args.train.dynamic_batch_enable,
+            packing=self.args.fsdp.packing_samples,
         )
 
         # Init torch group for weights sync (NCCL only — async-split topology
@@ -386,6 +387,8 @@ class PolicyTrainer:
             sequences,
             action_mask,
             attention_mask=attention_mask,
+            position_ids=experience.position_ids,
+            seq_lens=experience.packed_seq_lens,
             cp_context_stack=cp_context_stack,
             # entropy_coef=0.0 disables the entropy term in loss. Skip the
             # entropy forward path entirely in that case.
@@ -885,6 +888,8 @@ class PolicyModelActor(BaseModelActor):
                 experience.sequences.to(device),
                 experience.action_mask.to(device),
                 experience.attention_mask.to(device),
+                position_ids=None if experience.position_ids is None else experience.position_ids.to(device),
+                seq_lens=experience.packed_seq_lens,
                 # R3: replay rollout routing so old picks the same experts as training.
                 routed_experts=routed_experts.to(device) if routed_experts is not None else None,
                 **mm_inputs,

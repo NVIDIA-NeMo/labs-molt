@@ -21,7 +21,7 @@ model-owned ``ContextParallelSharder``. round_robin models (omni3/qwen3.6) pass
 and the sharder flattens ``[B,S] -> [B*S]`` itself. The gather inverts the layout back
 to ``[B,S]`` — no packing/unpacking on the CP path. Covered here without GPU/tilelang:
 
-1. ``_restore_full_sequence``: cp>1 just gathers to ``[B,S]``; cp1 packing scatters.
+1. ``_restore_full_sequence``: cp>1 gathers to ``[B,S]``; a packed batch stays flat.
 2. The molt<->AutoModel contract: the ``[B,S]`` cp_batch molt builds is a valid sharder
    input yielding the layout molt's gather inverts (GLM ``input_row_shape``, DSv4 repad).
 3. The real cross-rank gather roundtrip + cp_size sum-backward (gloo).
@@ -35,7 +35,7 @@ import pytest
 import torch
 
 from molt.models.base import BaseModel
-from molt.trainer.fsdp.packing import pack_padded_batch, unpack_to_padded
+from molt.trainer.fsdp.packing import packed_attn_kwargs
 
 
 def test_restore_cp_gathers_to_bs_and_drops_cp_pad():
@@ -51,43 +51,36 @@ def test_restore_cp_gathers_to_bs_and_drops_cp_pad():
     for packing in (True, False):  # THD DSA vs round_robin
         calls.clear()
         stub = SimpleNamespace(packing_samples=packing, _cp_sharder=SimpleNamespace(gather_token_tensor=_gather))
-        out = BaseModel._restore_full_sequence(
-            stub, torch.zeros(2, 3), cp_forward=True, batch=2, seqlen=3, indices=None
-        )
+        out = BaseModel._restore_full_sequence(stub, torch.zeros(2, 3), cp_forward=True, batch=2, seqlen=3)
         assert calls == {"seq_dim": 1, "trim": True, "fill": 0.0}
         assert torch.equal(out, restored[:, :3])  # [B,S] without the pad; no unpack under cp>1
 
 
-def test_restore_packing_cp1_scatters_to_bs():
-    # cp1 real-token packing (no CP): scatter the packed [1, total] back to [B, S].
-    B, S = 2, 3
-    indices = torch.tensor([0, 1, 3, 4, 5])
+def test_restore_leaves_a_packed_batch_flat():
+    # The collate packs, so per-token outputs already share the flat [1, total]
+    # axis with their inputs -- there is nothing to invert.
     packed = torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0]])
     stub = SimpleNamespace(packing_samples=True, _cp_sharder=None)
-    out = BaseModel._restore_full_sequence(stub, packed, cp_forward=False, batch=B, seqlen=S, indices=indices)
-    assert out.shape == (B, S)
-    assert out.reshape(-1).tolist() == [1.0, 2.0, 0.0, 3.0, 4.0, 5.0]
+    out = BaseModel._restore_full_sequence(stub, packed, cp_forward=False, batch=2, seqlen=3)
+    assert out is packed
 
 
-def test_ep_equalized_packing_masks_and_drops_synthetic_suffix():
-    sequences = torch.tensor([[10, 11, 0, 0], [20, 21, 22, 0]])
-    attention_mask = torch.tensor([[1, 1, 0, 0], [1, 1, 1, 0]])
+def test_ep_equalized_packing_extends_the_last_sequence():
+    # The EP suffix is a forward-time step (its length is a collective): it grows
+    # the last sequence and is flagged so experts skip it.
+    kwargs = packed_attn_kwargs([2, 3], style="automodel", device="cpu", trailing_pad=3)
 
-    packed, positions, _rolled, indices, kwargs = pack_padded_batch(
-        sequences, attention_mask, style="automodel", pad_to_tokens=8
-    )
-
-    assert packed.tolist() == [[10, 11, 20, 21, 22, 0, 0, 0]]
-    assert positions.tolist() == [[0, 1, 0, 1, 2, 3, 4, 5]]
     assert kwargs["cu_seqlens"].tolist() == [0, 2, 8]
     assert kwargs["cu_seqlens_padded"].tolist() == [0, 2, 8]
     assert kwargs["max_seqlen"] == 6
-    assert kwargs["padding_mask"].tolist() == [[False, False, False, False, False, True, True, True]]
+    assert kwargs["padding_mask"].tolist() == [[False] * 5 + [True] * 3]
 
-    # Model-side outputs include the synthetic suffix, but restore scatters only
-    # the five original real-token rows back into [B, S].
-    restored = unpack_to_padded(torch.arange(1, 9).view(1, 8), indices, batch=2, seqlen=4)
-    assert restored.tolist() == [[1, 2, 0, 0], [3, 4, 5, 0]]
+
+def test_packed_attn_kwargs_hf_style():
+    kwargs = packed_attn_kwargs([2, 3], style="hf", device="cpu")
+    assert kwargs["cu_seq_lens_q"].tolist() == [0, 2, 5]
+    assert kwargs["max_length_q"] == 3
+    assert "qkv_format" not in kwargs
 
 
 class _FakeMesh:  # single-process stand-in; make_* reads size() + get_group()

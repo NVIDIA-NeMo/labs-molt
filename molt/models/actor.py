@@ -44,6 +44,7 @@ class Actor(BaseModel):
         cp_context_stack=None,
         return_entropy=False,
         routed_experts: Optional[torch.Tensor] = None,
+        seq_lens: Optional[list] = None,
         **mm_inputs,
     ) -> _AttrDict:
         """Run the policy forward and return one named output dict.
@@ -57,8 +58,14 @@ class Actor(BaseModel):
         - ``entropy``:          ``[B, S-1]`` — only when ``return_entropy`` (RL).
         - ``aux_loss``:         MoE load-balancing loss — only for NeMo custom MoE.
         """
-        output, rolled_sequences, cp_forward, indices, batch, seqlen = self._forward_backbone(
-            sequences, attention_mask, position_ids, cp_context_stack, mm_inputs, routed_experts=routed_experts
+        output, rolled_sequences, cp_forward, batch, seqlen = self._forward_backbone(
+            sequences,
+            attention_mask,
+            position_ids,
+            cp_context_stack,
+            mm_inputs,
+            routed_experts=routed_experts,
+            seq_lens=seq_lens,
         )
         logits = output["logits"]
         full_logits = None
@@ -80,10 +87,8 @@ class Actor(BaseModel):
             # entropy is seq-local even under TP+CP (unshard_dtensor only
             # collapses the TP vocab dim), so restore the full sequence axis the
             # same way as log_probs below.
-            entropy = self._restore_full_sequence(
-                entropy, cp_forward=cp_forward, batch=batch, seqlen=seqlen, indices=indices
-            )
-            output["entropy"] = entropy[:, :-1]
+            entropy = self._restore_full_sequence(entropy, cp_forward=cp_forward, batch=batch, seqlen=seqlen)
+            output["entropy"] = entropy if seq_lens is not None else entropy[:, :-1]
 
         if isinstance(logits, DTensor):
             log_probs = log_probs_from_vocab_parallel_logits(
@@ -98,14 +103,12 @@ class Actor(BaseModel):
             log_probs_input = logits if (cp_forward or full_logits is None) else full_logits
             log_probs = log_probs_from_logits(log_probs_input, rolled_sequences, temperature=self.temperature)
 
-        log_probs = self._restore_full_sequence(
-            log_probs, cp_forward=cp_forward, batch=batch, seqlen=seqlen, indices=indices
-        )
+        log_probs = self._restore_full_sequence(log_probs, cp_forward=cp_forward, batch=batch, seqlen=seqlen)
 
         # Drop the final column: logits[t] predicts token[t+1], so the last
         # position has no target. log_probs / action_log_probs / entropy are all
         # shifted [:, :-1] and stay mutually aligned.
-        output["log_probs"] = log_probs[:, :-1]
+        output["log_probs"] = log_probs if seq_lens is not None else log_probs[:, :-1]
 
         # RL / reference (action_mask given) additionally expose the action-span
         # log-probs, zeroed outside the generated tokens.

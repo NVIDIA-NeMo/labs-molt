@@ -7,7 +7,6 @@ import pytest
 import torch
 
 from molt.trainer.algorithm.experience import Experience, make_experience_batch
-from molt.trainer.fsdp.packing import pack_padded_batch
 
 
 def _loose_items():
@@ -30,15 +29,12 @@ def _loose_items():
     ]
 
 
-def test_packs_tokens_like_the_forward_packer():
+def test_packs_tokens_into_one_flat_row():
     packed = make_experience_batch(_loose_items(), packed=True)
 
-    # The path it replaces: rebuild the padded batch, then pack inside the forward.
-    padded = make_experience_batch(_loose_items())
-    ref_ids, ref_pos, _, _, _ = pack_padded_batch(padded.sequences, padded.attention_mask, style="automodel")
-
-    assert torch.equal(packed.sequences, ref_ids)
-    assert torch.equal(packed.position_ids, ref_pos)
+    assert packed.sequences.tolist() == [[10, 11, 12, 20, 21]]
+    # Positions restart per sequence -- what makes varlen attention split the pack.
+    assert packed.position_ids.tolist() == [[0, 1, 2, 0, 1]]
     assert packed.packed_seq_lens == [3, 2]
 
 

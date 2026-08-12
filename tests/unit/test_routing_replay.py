@@ -154,7 +154,7 @@ def test_build_routing_targets_selects_sparse_hybrid_global_layer_ids():
                 routed[b, layer, 0, t] = 100 * b + 10 * layer + t
 
     stub = SimpleNamespace(packing_samples=False, _num_routing_gates=len(global_ids), _moe_layer_global_ids=global_ids)
-    targets = BaseModel._build_routing_targets(stub, routed, indices=None, cp_forward=False)
+    targets = BaseModel._build_routing_targets(stub, routed, cp_forward=False)
 
     assert len(targets) == len(global_ids)
     for i, gid in enumerate(global_ids):
@@ -187,7 +187,7 @@ def test_build_routing_targets_cp_delegates_to_sharder():
         _moe_layer_global_ids=list(range(L)),
         _cp_sharder=SimpleNamespace(shard_token_tensor=_shard),
     )
-    targets = BaseModel._build_routing_targets(stub, routed, indices=None, cp_forward=True)
+    targets = BaseModel._build_routing_targets(stub, routed, cp_forward=True)
 
     assert calls == {"seq_dim": 3, "fill": -1}  # -1 fill keeps CP pad tokens on live routing
     assert len(targets) == L
@@ -208,7 +208,7 @@ def test_build_routing_targets_preserves_minus_one_sentinel():
             routed[0, layer, 0, t] = 10 * layer + t
 
     stub = SimpleNamespace(packing_samples=False, _num_routing_gates=L, _moe_layer_global_ids=list(range(L)))
-    targets = BaseModel._build_routing_targets(stub, routed, indices=None, cp_forward=False)
+    targets = BaseModel._build_routing_targets(stub, routed, cp_forward=False)
 
     for layer in range(L):
         assert (targets[layer][0] == -1).all()  # prompt row stays sentinel -> live routing
@@ -221,10 +221,8 @@ def test_build_routing_targets_pads_hybridep_suffix_with_valid_masked_expert():
         routed[0, layer, 0] = torch.tensor([10 * layer, 10 * layer + 1, 10 * layer + 2])
 
     stub = SimpleNamespace(packing_samples=True, _num_routing_gates=L, _moe_layer_global_ids=list(range(L)))
-    # Only tokens 0 and 1 are real on this rank; HybridEP equalizes it to four.
-    targets = BaseModel._build_routing_targets(
-        stub, routed, indices=torch.tensor([0, 1]), cp_forward=False, pad_to_tokens=4
-    )
+    # Routing arrives in packed token order; HybridEP equalizes the count to four.
+    targets = BaseModel._build_routing_targets(stub, routed[:, :, :, :2], cp_forward=False, pad_to_tokens=4)
 
     for layer in range(L):
         assert targets[layer].shape == (4, K)

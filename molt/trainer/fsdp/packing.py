@@ -24,11 +24,11 @@ kwargs depend on the selected model path:
   (``qkv_format=thd`` / ``cu_seqlens`` / ``max_seqlen``).
 """
 
+import itertools
 from typing import Any
 
 import torch
 import torch.distributed as dist
-import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 
 
@@ -67,94 +67,44 @@ def is_automodel_custom_model(model: Any) -> bool:
     return False
 
 
-def pack_padded_batch(
-    sequences: torch.Tensor,
-    attention_mask: torch.Tensor,
-    *,
-    style: str = "hf",
-    pad_to_tokens: int | None = None,
-):
-    """Convert a padded `(B, S)` batch to packed `(1, total_real_tokens)` format.
+def packed_attn_kwargs(seq_lens: list[int], *, style: str, device, trailing_pad: int = 0) -> dict:
+    """Varlen attention kwargs for an already-packed `(1, total_tokens)` batch.
 
-    Returns:
-        packed_input_ids: `(1, total_real_tokens)` with pad tokens removed
-        position_ids:     `(1, total_real_tokens)` with resets at sequence boundaries
-        rolled_input_ids: `(1, total_real_tokens)` from `torch.roll(input_ids, -1)` then unpadded
-        indices:          flat indices into `(B*S,)` of real tokens (for `unpack_to_padded`)
-        attn_kwargs:      HF FlashAttention kwargs or AutoModel THD kwargs
+    The collate builds the pack (`make_experience_batch(packed=True)`); this only
+    describes its sequence boundaries to the attention kernel.
 
-    ``pad_to_tokens`` extends the last packed sequence with synthetic tokens so EP ranks
-    agree on the token count. They are causal-suffixed (real outputs unchanged), flagged
-    in ``padding_mask`` so experts skip them, and dropped by :func:`unpack_to_padded`.
+    ``trailing_pad`` covers the EP-equalized suffix, whose length is a collective
+    and so is known only at forward time: it extends the last sequence, is flagged
+    in ``padding_mask`` so experts skip it, and is causal-suffixed, leaving real
+    tokens' outputs unchanged.
     """
     if style not in {"hf", "automodel"}:
         raise ValueError(f"Unsupported packing style: {style}")
 
-    batch, seqlen = sequences.shape
-    mask = attention_mask.bool()
-    indices = mask.reshape(-1).nonzero(as_tuple=False).flatten()
-    seq_lens = mask.sum(dim=-1, dtype=torch.int32)
-    # torch.cumsum on int32 promotes to int64; varlen attention kernels require
-    # int32 sequence lengths. Cast back explicitly.
-    cu_seq_lens = torch.cat(
-        [torch.zeros(1, dtype=torch.int32, device=sequences.device), torch.cumsum(seq_lens, dim=0).to(torch.int32)]
-    )
-    max_length = seq_lens.max().item() if seq_lens.numel() > 0 else 0
-
-    packed_ids = sequences.reshape(batch * seqlen).index_select(0, indices).unsqueeze(0)
-    rolled = torch.roll(sequences, shifts=-1, dims=1)
-    rolled_packed = rolled.reshape(batch * seqlen).index_select(0, indices).unsqueeze(0)
-
-    # position_ids reset at seq boundaries (`[0,1,2, 0,1, 0,1,2,3]`).
-    position_ids_full = torch.clip(torch.cumsum(attention_mask, dim=-1) - 1, min=0)
-    position_ids = position_ids_full.reshape(batch * seqlen).index_select(0, indices).unsqueeze(0)
-
-    real_tokens = int(indices.numel())
-    trailing_pad = 0 if pad_to_tokens is None else pad_to_tokens - real_tokens
+    boundaries = list(itertools.accumulate(seq_lens, initial=0))
+    max_length = max(seq_lens)
     if trailing_pad:
-        # Token ids are arbitrary (these rows are masked and then dropped); the
-        # positions continue the last sequence so real tokens never attend to them.
-        last_len = int(seq_lens[-1])
-        packed_ids = F.pad(packed_ids, (0, trailing_pad))
-        rolled_packed = F.pad(rolled_packed, (0, trailing_pad))
-        pad_positions = torch.arange(last_len, last_len + trailing_pad, device=position_ids.device)
-        position_ids = torch.cat((position_ids, pad_positions.to(position_ids.dtype).unsqueeze(0)), dim=1)
-        cu_seq_lens = cu_seq_lens.clone()
-        cu_seq_lens[-1] += trailing_pad
-        max_length = max(max_length, last_len + trailing_pad)
+        boundaries[-1] += trailing_pad
+        max_length = max(max_length, seq_lens[-1] + trailing_pad)
+    cu_seq_lens = torch.tensor(boundaries, dtype=torch.int32, device=device)  # varlen kernels need int32
 
-    if style == "automodel":
-        attn_kwargs = {
-            "qkv_format": "thd",
-            "cu_seqlens": cu_seq_lens,
-            "cu_seqlens_padded": cu_seq_lens,
-            "max_seqlen": int(max_length),
-        }
-        if trailing_pad:
-            is_pad = torch.arange(real_tokens + trailing_pad, device=sequences.device) >= real_tokens
-            attn_kwargs["padding_mask"] = is_pad.unsqueeze(0)
-    else:
-        attn_kwargs = {
+    if style == "hf":
+        return {
             "cu_seq_lens_q": cu_seq_lens,
             "cu_seq_lens_k": cu_seq_lens,
-            "max_length_q": int(max_length),
-            "max_length_k": int(max_length),
+            "max_length_q": max_length,
+            "max_length_k": max_length,
         }
-    return packed_ids, position_ids, rolled_packed, indices, attn_kwargs
-
-
-def unpack_to_padded(packed: torch.Tensor, indices: torch.Tensor, batch: int, seqlen: int) -> torch.Tensor:
-    """Inverse of `pack_padded_batch` (logits / log-probs side).
-
-    Takes a `(1, total_real_tokens)` tensor and returns a `(B, S)` padded tensor
-    using the `indices` from the original pack.
-    """
-    packed_values = packed.squeeze(0) if packed.dim() > 1 and packed.shape[0] == 1 else packed
-    # An EP-equalized pack carries a synthetic suffix with no [B, S] destination.
-    packed_values = packed_values[: indices.numel()]
-    output = packed_values.new_zeros((batch * seqlen, *packed_values.shape[1:]))
-    output.index_copy_(0, indices, packed_values)
-    return output.view(batch, seqlen, *packed_values.shape[1:])
+    kwargs = {
+        "qkv_format": "thd",
+        "cu_seqlens": cu_seq_lens,
+        "cu_seqlens_padded": cu_seq_lens,
+        "max_seqlen": max_length,
+    }
+    if trailing_pad:
+        real_tokens = sum(seq_lens)
+        kwargs["padding_mask"] = (torch.arange(real_tokens + trailing_pad, device=device) >= real_tokens).unsqueeze(0)
+    return kwargs
 
 
 def _distributed_log_softmax(local_logits: torch.Tensor, group: dist.ProcessGroup) -> torch.Tensor:

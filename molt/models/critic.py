@@ -145,6 +145,7 @@ class Critic(BaseModel):
         attention_mask: Optional[torch.Tensor] = None,
         position_ids: Optional[torch.Tensor] = None,
         cp_context_stack=None,
+        seq_lens: Optional[list] = None,
         **mm_inputs,
     ) -> _AttrDict:
         """Return per-token values.
@@ -153,17 +154,15 @@ class Critic(BaseModel):
         - ``action_values``: ``[B, num_actions]`` masked to the generated span,
                              only when ``action_mask`` is given.
         """
-        output, _rolled, cp_forward, indices, batch, seqlen = self._forward_backbone(
-            sequences, attention_mask, position_ids, cp_context_stack, mm_inputs
+        output, _rolled, cp_forward, batch, seqlen = self._forward_backbone(
+            sequences, attention_mask, position_ids, cp_context_stack, mm_inputs, seq_lens=seq_lens
         )
         # Head is one-wide, so the model's "logits" are per-token values [B, S, 1].
         values = unshard_dtensor(output["logits"]).squeeze(-1).float()
-        values = self._restore_full_sequence(
-            values, cp_forward=cp_forward, batch=batch, seqlen=seqlen, indices=indices
-        )
+        values = self._restore_full_sequence(values, cp_forward=cp_forward, batch=batch, seqlen=seqlen)
         # logits[t] scores state s_t / predicts t+1; drop the final column to align
         # with action_log_probs (both live on the [:, :-1] next-token axis).
-        values = values[:, :-1]
+        values = values if seq_lens is not None else values[:, :-1]
         out = _AttrDict(values=values)
         if action_mask is not None:
             out["action_values"] = values[:, -action_mask.shape[1] :] * action_mask.float()
