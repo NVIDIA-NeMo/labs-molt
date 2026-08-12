@@ -85,6 +85,11 @@ class Experience:
     sequences: torch.Tensor = tensor_field("step", default=None)  # (B, T) token ids [prompt + response]
     attention_mask: torch.LongTensor = tensor_field("step", default=None)  # (B, T)
     action_mask: torch.BoolTensor = tensor_field("step", default=None)  # (B, T-1) generated-token steps
+    # Packed batches only: (1, T) positions restarting per sequence, and the
+    # sequence lengths that split flat model outputs back per sample. Both None
+    # for padded batches, where the forward derives positions from the mask.
+    position_ids: torch.Tensor = tensor_field("step", default=None)
+    packed_seq_lens: list[int] = None
 
     # Policy: log probs under current, reference, and rollout policies
     action_log_probs: torch.Tensor = tensor_field("step", default=None)  # (B, T-1) log pi_theta(a|s)
@@ -223,8 +228,15 @@ def split_experience_batch(experience: Experience) -> List[Experience]:
     return items
 
 
-def make_experience_batch(items: List[Experience]) -> Experience:
-    """Combine individual single-sample Experiences into a batched Experience."""
+def make_experience_batch(items: List[Experience], packed: bool = False) -> Experience:
+    """Combine individual single-sample Experiences into a batched Experience.
+
+    ``packed`` concatenates the per-token fields into one flat ``[1, total]`` THD
+    row instead of right-padding them to ``[B, T]``, so the model consumes the
+    pack directly. Action-side fields are ``[T-1]`` and gain one trailing slot --
+    no target there, and ``action_mask`` is zero -- keeping every per-token
+    tensor elementwise-aligned with the tokens.
+    """
     if not items:
         raise ValueError("Empty items list")
 
@@ -240,7 +252,11 @@ def make_experience_batch(items: List[Experience]) -> Experience:
             kwargs[f.name] = None
         elif isinstance(first, torch.Tensor):
             tensors = [getattr(item, f.name) for item in items]
-            if Experience.is_step_tensor_field(f.name):
+            if Experience.is_step_tensor_field(f.name) and packed:
+                if f.name not in ("sequences", "attention_mask", "routed_experts"):
+                    tensors = [F.pad(t, (0, 1)) for t in tensors]  # [T-1] -> [T]
+                kwargs[f.name] = torch.cat(tensors, dim=-1).unsqueeze(0)
+            elif Experience.is_step_tensor_field(f.name):
                 # routed_experts pads with the R3 -1 sentinel (keep live routing); 0 is a
                 # valid expert id and would force pad tokens to expert 0. Others pad with 0.
                 pad_value = -1 if f.name == "routed_experts" else 0
@@ -265,39 +281,24 @@ def make_experience_batch(items: List[Experience]) -> Experience:
         elif isinstance(first, list):
             kwargs[f.name] = list(itertools.chain.from_iterable(getattr(item, f.name) for item in items))
 
+    if packed:
+        # AutoModel's collater owns the token schema (flat ids + per-sequence
+        # position resets), so the pack matches what its THD pipeline consumes.
+        thd = packed_sequence_thd_collater(
+            [
+                pack_features_for_thd(
+                    [
+                        {"input_ids": i.sequences.tolist(), "labels": torch.roll(i.sequences, -1, -1).tolist()}
+                        for i in items
+                    ]
+                )
+            ]
+        )
+        kwargs["sequences"] = thd["input_ids"]
+        kwargs["position_ids"] = thd["position_ids"]
+        kwargs["packed_seq_lens"] = [i.sequences.numel() for i in items]
+
     return Experience(**kwargs)
-
-
-def make_packed_experience_batch(items: List[Experience]) -> dict:
-    """Pack unpadded single-sample Experiences into one flat THD microbatch.
-
-    The buffer already stores unpadded samples, so packing here replaces the
-    padded path's pad -> unpad -> pack -> re-pad round trip through the forward.
-    Token packing delegates to AutoModel's collater, keeping the packed schema
-    identical to the one its THD/CP pipeline consumes. Action-side fields are
-    [T-1]; one trailing masked slot puts them on the same [T] axis as the tokens.
-    """
-    seq_lens = [item.sequences.numel() for item in items]
-    features = [
-        {"input_ids": item.sequences.tolist(), "labels": torch.roll(item.sequences, -1, -1).tolist()} for item in items
-    ]
-    batch = packed_sequence_thd_collater([pack_features_for_thd(features)])
-
-    for f in fields(Experience):
-        value = getattr(items[0], f.name)
-        if f.name in ("sequences", "attention_mask") or not isinstance(value, torch.Tensor):
-            continue
-        if not Experience.is_step_tensor_field(f.name):
-            continue
-        if value.dim() != 1:
-            # routed_experts is [layers, topk, T]; R3 replay keeps the padded path.
-            raise ValueError(f"{f.name} is {value.dim()}-D; packing covers 1-D per-token fields only")
-        batch[f.name] = torch.cat([F.pad(getattr(item, f.name), (0, 1)) for item in items]).unsqueeze(0)
-
-    batch["cu_seqlens"] = torch.tensor([0, *itertools.accumulate(seq_lens)], dtype=torch.int32)
-    batch["max_seqlen"] = max(seq_lens)
-    batch["packed_seq_lens"] = seq_lens
-    return batch
 
 
 def remove_padding_in_sequences(items: List[Experience]) -> List[Experience]:
