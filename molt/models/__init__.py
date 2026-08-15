@@ -22,7 +22,6 @@ from .loss import (
     SFTLoss,
     ValueLoss,
     agg_loss,
-    datum_policy_loss,
 )
 
 __all__ = [
@@ -32,5 +31,4 @@ __all__ = [
     "PolicyLoss",
     "ValueLoss",
     "agg_loss",
-    "datum_policy_loss",
 ]

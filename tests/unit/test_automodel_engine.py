@@ -25,7 +25,8 @@ import torch.nn.functional as F
 from nemo_automodel.components.datasets.datum import Datum
 from nemo_automodel.components.training.engine import Engine
 
-from molt.models import PolicyLoss, datum_policy_loss
+from molt.models import PolicyLoss
+from molt.models.loss import datum_policy_loss
 
 
 class TinyLM(nn.Module):
@@ -61,25 +62,37 @@ def _datum_window():
     ]
 
 
-def _manual_window_loss(model, datum_window, policy_loss):
+def _manual_window(model, datum_window, policy_loss):
     numerator = torch.zeros(())
     denominator = 0.0
+    metric_sums = {
+        "policy_loss": torch.zeros(()),
+        "policy_clip_ratio": torch.zeros(()),
+        "policy_kl": torch.zeros(()),
+        "advantage_mean": torch.zeros(()),
+    }
     for microbatch in datum_window:
         for datum in microbatch:
             logits = model(datum.input_ids.unsqueeze(0)).logits.squeeze(0).float()
             targets = datum.loss_fn_inputs["target_tokens"]
             new_logprobs = F.log_softmax(logits, dim=-1).gather(-1, targets.unsqueeze(-1)).squeeze(-1)
             weights = datum.loss_fn_inputs["weights"]
-            per_token_loss, *_ = policy_loss(
+            advantages = datum.loss_fn_inputs["advantages"]
+            per_token_loss, reported_loss, clip_ratio, policy_kl, *_ = policy_loss(
                 new_logprobs,
                 datum.loss_fn_inputs["logprobs"],
-                datum.loss_fn_inputs["advantages"],
+                advantages,
                 action_mask=weights,
                 reduce=False,
             )
             numerator = numerator + (per_token_loss * weights).sum()
-            denominator += float(weights.sum())
-    return numerator / denominator
+            num_tokens = weights.sum()
+            denominator += float(num_tokens)
+            metric_sums["policy_loss"] += reported_loss * num_tokens
+            metric_sums["policy_clip_ratio"] += clip_ratio * num_tokens
+            metric_sums["policy_kl"] += policy_kl * num_tokens
+            metric_sums["advantage_mean"] += (advantages * weights).sum()
+    return numerator / denominator, {name: value / denominator for name, value in metric_sums.items()}
 
 
 @pytest.mark.parametrize("packed", [False, True])
@@ -93,19 +106,20 @@ def test_real_engine_matches_manual_policy_loss_and_gradients(packed):
         model_parts=[engine_model],
     )
     policy_loss = PolicyLoss()
-    metric_sink = []
-
     output = engine.forward_backward(
         _datum_window(),
         loss_fn=datum_policy_loss,
-        loss_kwargs={"policy_loss": policy_loss, "metric_sink": metric_sink},
+        loss_kwargs={"policy_loss": policy_loss},
     )
-    expected = _manual_window_loss(manual_model, _datum_window(), policy_loss)
+    expected, expected_metrics = _manual_window(manual_model, _datum_window(), policy_loss)
     expected.backward()
 
     torch.testing.assert_close(output.loss, expected.detach())
     assert [row.numel() for row in output.logprobs] == [5, 3, 4]
-    assert len(metric_sink) == 3
+    for name, expected_metric in expected_metrics.items():
+        assert output.metrics[name].ndim == 0
+        assert not output.metrics[name].requires_grad
+        torch.testing.assert_close(output.metrics[name], expected_metric)
     for engine_param, manual_param in zip(engine_model.parameters(), manual_model.parameters()):
         torch.testing.assert_close(engine_param.grad, manual_param.grad)
 
@@ -132,7 +146,7 @@ def test_unreduced_datum_loss_matches_legacy_window_reduction():
             rows.append(row)
             datum_rows.append(row)
             offset += 0.1
-        losses = datum_policy_loss(SimpleNamespace(logprobs=rows), microbatch, policy_loss=policy_loss)
+        losses, _ = datum_policy_loss(SimpleNamespace(logprobs=rows), microbatch, policy_loss=policy_loss)
         datum_objective = (
             datum_objective
             + sum((loss * datum.loss_fn_inputs["weights"]).sum() for loss, datum in zip(losses, microbatch))
@@ -325,6 +339,7 @@ def test_policy_trainer_submits_one_complete_window_and_steps_once(monkeypatch):
     class RecordingEngine:
         def __init__(self, model):
             self.calls = []
+            self.drop_metric = None
             self.engine = Engine(
                 Engine.Config(pack_datums=False, defer_fsdp_grad_sync=False),
                 model_parts=[model],
@@ -332,7 +347,10 @@ def test_policy_trainer_submits_one_complete_window_and_steps_once(monkeypatch):
 
         def forward_backward(self, datum_window, loss_fn, *, loss_kwargs):
             self.calls.append(datum_window)
-            return self.engine.forward_backward(datum_window, loss_fn=loss_fn, loss_kwargs=loss_kwargs)
+            output = self.engine.forward_backward(datum_window, loss_fn=loss_fn, loss_kwargs=loss_kwargs)
+            if self.drop_metric is not None:
+                output.metrics.pop(self.drop_metric)
+            return output
 
     trainer = object.__new__(PolicyTrainer)
     trainer.strategy = Strategy()
@@ -355,7 +373,7 @@ def test_policy_trainer_submits_one_complete_window_and_steps_once(monkeypatch):
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
     monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda *_: None)
 
-    trainer.policy_train(kl_ctl=0.0)
+    status = trainer.policy_train(kl_ctl=0.0)
 
     assert len(trainer._automodel_engine.calls) == 1
     assert [len(microbatch) for microbatch in trainer._automodel_engine.calls[0]] == [1, 1]
@@ -364,18 +382,34 @@ def test_policy_trainer_submits_one_complete_window_and_steps_once(monkeypatch):
     assert scheduler.steps == 1
     assert trainer.actor.train_calls == 1
     assert any(not torch.equal(before, after) for before, after in zip(parameters_before, trainer.actor.parameters()))
-    reference_loss = _manual_window_loss(reference_model, trainer._automodel_engine.calls[0], trainer.actor_loss_fn)
+    reference_loss, reference_metrics = _manual_window(
+        reference_model, trainer._automodel_engine.calls[0], trainer.actor_loss_fn
+    )
     reference_loss.backward()
     reference_optim.step()
     for actual, expected in zip(trainer.actor.model.parameters(), reference_model.parameters()):
         torch.testing.assert_close(actual, expected)
+    for name, expected in reference_metrics.items():
+        torch.testing.assert_close(torch.as_tensor(status[name]), expected)
+    torch.testing.assert_close(torch.as_tensor(status["reward"]), torch.tensor(0.75))
+    torch.testing.assert_close(torch.as_tensor(status["response_length"]), torch.tensor(1.5))
 
     parameters_after_step = [parameter.detach().clone() for parameter in trainer.actor.parameters()]
+    trainer._automodel_engine.drop_metric = "policy_kl"
+    with pytest.raises(RuntimeError, match="missing metrics: policy_kl"):
+        trainer.policy_train(kl_ctl=0.0)
+
+    assert trainer.strategy.optimizer_steps == 1
+    assert scheduler.steps == 1
+    for after_step, parameter in zip(parameters_after_step, trainer.actor.parameters()):
+        torch.testing.assert_close(after_step, parameter)
+
+    trainer._automodel_engine.drop_metric = None
     experiences[0].action_mask.zero_()
     with pytest.raises(ValueError, match="action tokens in every Experience"):
         trainer.policy_train(kl_ctl=0.0)
 
-    assert len(trainer._automodel_engine.calls) == 1
+    assert len(trainer._automodel_engine.calls) == 2
     assert trainer.strategy.optimizer_steps == 1
     assert scheduler.steps == 1
     for after_step, parameter in zip(parameters_after_step, trainer.actor.parameters()):

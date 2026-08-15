@@ -454,9 +454,8 @@ def datum_policy_loss(
     datums: Sequence,
     *,
     policy_loss: PolicyLoss,
-    metric_sink: Optional[list] = None,
 ):
-    """Return MOLT's unreduced policy surrogate for AutoModel Engine Datum reduction."""
+    """Return per-Datum policy losses and action-token metric sums for AutoModel Engine."""
     logprobs = getattr(model_output, "logprobs", None)
     if logprobs is None:
         raise ValueError("AutoModel Engine ModelOutput did not contain selected-token logprobs")
@@ -464,6 +463,12 @@ def datum_policy_loss(
         raise ValueError(f"ModelOutput has {len(logprobs)} logprob rows for {len(datums)} Datums")
 
     losses = []
+    metric_sums = {
+        "policy_loss": logprobs[0].new_zeros(()),
+        "policy_clip_ratio": logprobs[0].new_zeros(()),
+        "policy_kl": logprobs[0].new_zeros(()),
+        "advantage_mean": logprobs[0].new_zeros(()),
+    }
     for index, (new_logprobs, datum) in enumerate(zip(logprobs, datums)):
         loss_inputs = datum.loss_fn_inputs
         missing = {"weights", "logprobs", "advantages"} - set(loss_inputs)
@@ -492,14 +497,12 @@ def datum_policy_loss(
             reduce=False,
         )
         losses.append(per_token_loss)
-        if metric_sink is not None:
-            metric_sink.append(
-                {
-                    "num_action_tokens": weights.detach().sum(),
-                    "policy_loss": reported_loss.detach(),
-                    "policy_clip_ratio": clip_ratio.detach(),
-                    "policy_kl": policy_kl.detach(),
-                    "advantage_mean": masked_mean(advantages.detach(), weights, dim=None),
-                }
-            )
-    return losses
+        num_action_tokens = weights.detach().sum()
+        for name, value in (
+            ("policy_loss", reported_loss),
+            ("policy_clip_ratio", clip_ratio),
+            ("policy_kl", policy_kl),
+            ("advantage_mean", masked_mean(advantages.detach(), weights, dim=None)),
+        ):
+            metric_sums[name] = metric_sums[name] + value.detach() * num_action_tokens
+    return losses, metric_sums

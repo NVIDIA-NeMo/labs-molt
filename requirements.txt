@@ -7,7 +7,7 @@ grpcio>=1.74.0
 huggingface_hub>=1.0.0
 jsonlines
 # Datum/Engine feature commit; move this pin to AutoModel main once that API lands there.
-nemo-automodel @ git+https://github.com/NVIDIA-NeMo/Automodel.git@d038e5001d218c972ae9a4f0c4e645a60d011195
+nemo-automodel @ git+https://github.com/NVIDIA-NeMo/Automodel.git@d073591d625c14fd0c04c204902eac04cf727a2c
 optree>=0.15.0
 packaging
 peft
