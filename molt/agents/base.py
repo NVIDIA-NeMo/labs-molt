@@ -238,6 +238,12 @@ class Env(ABC):
         """
         raise NotImplementedError
 
+    async def close(self):
+        """Optional per-episode teardown. StepEnvRunner calls this on every exit
+        path (episode end, context exhaustion, exception) — override to release
+        OS resources such as subprocesses or VMs. Default: no-op."""
+        pass
+
 
 # ---------------------------------------------------------------------------
 # Runner — abstract base for "produce one Trajectory per execute() call".
@@ -308,120 +314,128 @@ class StepEnvRunner(Runner):
         # render features resolve where it generates. Per-rollout, like vime/slime.
         rollout_sid = uuid4().hex
 
-        reset = await env.reset({"observation": prompt, "label": label})
-        observation_text = reset["observation"]
+        try:
+            reset = await env.reset({"observation": prompt, "label": label})
+            observation_text = reset["observation"]
 
-        # process_prompt_with_images (inside _tokenize_observation) is a multi-second CPU op per image.
-        # run_group gathers n_samples rollouts on ONE actor event loop, so a synchronous tokenize
-        # blocks the loop and serializes the group (+ stalls the others' awaited generations). Run it
-        # in a thread so the loop stays free and rollouts overlap (mirrors the chat server).
-        obs_tokens, mm_train_inputs, pil_images = await asyncio.get_running_loop().run_in_executor(
-            _TOKENIZE_EXECUTOR, _tokenize_observation, hf_tokenizer, observation_text, images
-        )
-        image_budget = 0
-        if pil_images:
-            from molt.utils.vlm_utils import estimate_vllm_input_expansion_delta
-
-            image_budget = estimate_vllm_input_expansion_delta(hf_tokenizer, obs_tokens, mm_train_inputs, pil_images)
-
-        generation_reserve = sampling_params.max_tokens or 32
-        max_initial_length = max(1, max_length - generation_reserve - image_budget)
-        if len(obs_tokens) > max_initial_length:
+            # process_prompt_with_images (inside _tokenize_observation) is a multi-second CPU op per image.
+            # run_group gathers n_samples rollouts on ONE actor event loop, so a synchronous tokenize
+            # blocks the loop and serializes the group (+ stalls the others' awaited generations). Run it
+            # in a thread so the loop stays free and rollouts overlap (mirrors the chat server).
+            obs_tokens, mm_train_inputs, pil_images = await asyncio.get_running_loop().run_in_executor(
+                _TOKENIZE_EXECUTOR, _tokenize_observation, hf_tokenizer, observation_text, images
+            )
+            image_budget = 0
             if pil_images:
-                raise ValueError(
-                    f"VLM prompt length ({len(obs_tokens)}) exceeds max_initial_length ({max_initial_length}). "
-                    "Truncating VLM prompts would break image token alignment with pixel_values. "
-                    "Please increase --max_len or decrease --max_new_tokens."
+                from molt.utils.vlm_utils import estimate_vllm_input_expansion_delta
+
+                image_budget = estimate_vllm_input_expansion_delta(
+                    hf_tokenizer, obs_tokens, mm_train_inputs, pil_images
                 )
-            logger.warning(
-                f"Initial observation length ({len(obs_tokens)}) exceeds max_initial_length "
-                f"({max_initial_length}). Truncating to fit within max_length ({max_length})."
+
+            generation_reserve = sampling_params.max_tokens or 32
+            max_initial_length = max(1, max_length - generation_reserve - image_budget)
+            if len(obs_tokens) > max_initial_length:
+                if pil_images:
+                    raise ValueError(
+                        f"VLM prompt length ({len(obs_tokens)}) exceeds max_initial_length ({max_initial_length}). "
+                        "Truncating VLM prompts would break image token alignment with pixel_values. "
+                        "Please increase --max_len or decrease --max_new_tokens."
+                    )
+                logger.warning(
+                    f"Initial observation length ({len(obs_tokens)}) exceeds max_initial_length "
+                    f"({max_initial_length}). Truncating to fit within max_length ({max_length})."
+                )
+                obs_tokens = obs_tokens[-max_initial_length:]
+                observation_text = hf_tokenizer.decode(obs_tokens, skip_special_tokens=False)
+
+            trajectory = Trajectory(
+                prompt=prompt,
+                label=label,
+                images=images,
+                observation_text=observation_text,
+                observation_tokens=obs_tokens,
+                mm_train_inputs=mm_train_inputs,
+                pil_images=pil_images,
+                image_budget=image_budget,
+                rollout_log_probs=[0.0] * len(obs_tokens) if sampling_params.logprobs is not None else None,
             )
-            obs_tokens = obs_tokens[-max_initial_length:]
-            observation_text = hf_tokenizer.decode(obs_tokens, skip_special_tokens=False)
 
-        trajectory = Trajectory(
-            prompt=prompt,
-            label=label,
-            images=images,
-            observation_text=observation_text,
-            observation_tokens=obs_tokens,
-            mm_train_inputs=mm_train_inputs,
-            pil_images=pil_images,
-            image_budget=image_budget,
-            rollout_log_probs=[0.0] * len(obs_tokens) if sampling_params.logprobs is not None else None,
-        )
+            # Per-turn cap; remaining context dominates if smaller.
+            per_turn_cap = sampling_params.max_tokens
 
-        # Per-turn cap; remaining context dominates if smaller.
-        per_turn_cap = sampling_params.max_tokens
+            while True:
+                remaining = max_length - len(trajectory.observation_tokens) - trajectory.image_budget
+                turn_sp = deepcopy(sampling_params)
+                turn_sp.max_tokens = min(per_turn_cap, remaining) if per_turn_cap is not None else remaining
+                if turn_sp.max_tokens <= 0:
+                    trajectory.truncated = True
+                    break
+                # A late turn's remaining budget can drop below a configured min_tokens;
+                # vLLM only validates min<=max at construction, not on reassignment.
+                min_tokens = getattr(turn_sp, "min_tokens", None)
+                if min_tokens is not None and min_tokens > turn_sp.max_tokens:
+                    turn_sp.min_tokens = turn_sp.max_tokens
 
-        while True:
-            remaining = max_length - len(trajectory.observation_tokens) - trajectory.image_budget
-            turn_sp = deepcopy(sampling_params)
-            turn_sp.max_tokens = min(per_turn_cap, remaining) if per_turn_cap is not None else remaining
-            if turn_sp.max_tokens <= 0:
-                trajectory.truncated = True
-                break
-            # A late turn's remaining budget can drop below a configured min_tokens;
-            # vLLM only validates min<=max at construction, not on reassignment.
-            min_tokens = getattr(turn_sp, "min_tokens", None)
-            if min_tokens is not None and min_tokens > turn_sp.max_tokens:
-                turn_sp.min_tokens = turn_sp.max_tokens
+                mm_data = {"image": trajectory.pil_images} if trajectory.pil_images else None
+                request_output, off_policy_len = await llm_engine.generate(
+                    trajectory.observation_tokens, turn_sp, multi_modal_data=mm_data, session_id=rollout_sid
+                )
+                generation = request_output.outputs[0]
+                action_tokens = generation.token_ids
+                # /inference/v1/generate is token-only (generation.text == ""); decode from the ids so
+                # Env.step sees the action text. skip_special_tokens=False keeps answer markers (<answer>,
+                # \boxed, tool tags) — matches observation_text decoding above.
+                action_text = generation.text or (
+                    hf_tokenizer.decode(action_tokens, skip_special_tokens=False) if action_tokens else ""
+                )
+                trajectory.truncated = trajectory.truncated or generation.finish_reason == "length"
 
-            mm_data = {"image": trajectory.pil_images} if trajectory.pil_images else None
-            request_output, off_policy_len = await llm_engine.generate(
-                trajectory.observation_tokens, turn_sp, multi_modal_data=mm_data, session_id=rollout_sid
-            )
-            generation = request_output.outputs[0]
-            action_tokens = generation.token_ids
-            # /inference/v1/generate is token-only (generation.text == ""); decode from the ids so
-            # Env.step sees the action text. skip_special_tokens=False keeps answer markers (<answer>,
-            # \boxed, tool tags) — matches observation_text decoding above.
-            action_text = generation.text or (
-                hf_tokenizer.decode(action_tokens, skip_special_tokens=False) if action_tokens else ""
-            )
-            trajectory.truncated = trajectory.truncated or generation.finish_reason == "length"
+                result: Result = await env.step(
+                    {
+                        "observation_text": trajectory.observation_text,
+                        "action_text": action_text,
+                        "label": label,
+                        "sampling_params": deepcopy(turn_sp),
+                    }
+                )
+                if not isinstance(result, Result):
+                    raise TypeError(f"Env.step must return a Result, got {type(result).__name__}")
 
-            result: Result = await env.step(
-                {
-                    "observation_text": trajectory.observation_text,
-                    "action_text": action_text,
-                    "label": label,
-                    "sampling_params": deepcopy(turn_sp),
-                }
-            )
-            if not isinstance(result, Result):
-                raise TypeError(f"Env.step must return a Result, got {type(result).__name__}")
+                reward_val = _first_scalar(result.reward)
+                if reward_val is None:
+                    raise ValueError("Env.step must return a Result with a scalar reward.")
+                score_val = _first_scalar(result.score) if result.score is not None else reward_val
 
-            reward_val = _first_scalar(result.reward)
-            if reward_val is None:
-                raise ValueError("Env.step must return a Result with a scalar reward.")
-            score_val = _first_scalar(result.score) if result.score is not None else reward_val
+                trajectory.reward += reward_val
+                trajectory.scores = score_val
+                trajectory.extra_logs = result.info or {}
 
-            trajectory.reward += reward_val
-            trajectory.scores = score_val
-            trajectory.extra_logs = result.info or {}
+                action_logprobs = None
+                if trajectory.rollout_log_probs is not None:
+                    action_logprobs = _extract_generation_logprobs(action_tokens, generation.logprobs)
+                trajectory.append_action(action_tokens, action_logprobs, off_policy_len=off_policy_len)
+                trajectory.absorb_routing(request_output)  # fills routing by absolute position (R3)
 
-            action_logprobs = None
-            if trajectory.rollout_log_probs is not None:
-                action_logprobs = _extract_generation_logprobs(action_tokens, generation.logprobs)
-            trajectory.append_action(action_tokens, action_logprobs, off_policy_len=off_policy_len)
-            trajectory.absorb_routing(request_output)  # fills routing by absolute position (R3)
+                feedback_tokens = _tokenize_feedback(
+                    hf_tokenizer, result.observation, result.images, trajectory, max_length
+                )
+                trajectory.append_feedback(action_text, result.observation, feedback_tokens)
 
-            feedback_tokens = _tokenize_feedback(
-                hf_tokenizer, result.observation, result.images, trajectory, max_length
-            )
-            trajectory.append_feedback(action_text, result.observation, feedback_tokens)
+                if result.sampling_params is not None:
+                    sampling_params = deepcopy(result.sampling_params)
+                    per_turn_cap = sampling_params.max_tokens
 
-            if result.sampling_params is not None:
-                sampling_params = deepcopy(result.sampling_params)
-                per_turn_cap = sampling_params.max_tokens
+                if result.terminated or result.truncated:
+                    trajectory.truncated = trajectory.truncated or result.truncated
+                    break
 
-            if result.terminated or result.truncated:
-                trajectory.truncated = trajectory.truncated or result.truncated
-                break
-
-        return trajectory
+            return trajectory
+        finally:
+            # An env can own OS resources (alfworld runs one textworld subprocess per episode), and
+            # episodes routinely exit without step() ever returning terminated/truncated (context
+            # exhaustion, exceptions) — close here so teardown never depends on the env's own GC.
+            await env.close()
 
 
 def _tokenize_feedback(hf_tokenizer, feedback_text: str, new_images, trajectory: Trajectory, max_length: int):
