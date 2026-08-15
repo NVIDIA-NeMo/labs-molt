@@ -30,9 +30,9 @@ from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from molt.models import Actor, PolicyLoss, agg_loss
+from molt.models import Actor, PolicyLoss, agg_loss, datum_policy_loss
 from molt.models.utils import compute_approx_kl, masked_mean, split_moe_aux_loss
-from molt.trainer.algorithm.experience import Experience, get_model_parallel_size
+from molt.trainer.algorithm.experience import Experience, experience_to_datums, get_model_parallel_size
 from molt.trainer.fsdp import FsdpStrategy
 from molt.trainer.fsdp.refit import gather_full_param
 from molt.utils import get_tokenizer
@@ -110,6 +110,26 @@ class PolicyTrainer:
                 else None
             ),
         )
+
+        self._automodel_engine = None
+        if getattr(self.args.train, "use_automodel_engine", False):
+            from nemo_automodel.components.training.engine import Engine
+
+            if self.actor.is_vlm:
+                raise NotImplementedError("The initial AutoModel Engine policy slice is text-only, not a VLM path")
+            self._automodel_engine = Engine(
+                Engine.Config(
+                    defer_fsdp_grad_sync=self._defer_grad_sync,
+                    pack_datums=False,
+                ),
+                model_parts=[self.actor.model],
+                distributed_setup=self.actor.distributed_setup,
+            )
+            logger.warning(
+                "AutoModel Engine short-sequence smoke path enabled for policy Datum collation + "
+                "window forward/backward; MOLT retains optimizer and scheduler ownership. The current "
+                "Engine still materializes full-vocabulary log-probability and entropy tensors."
+            )
 
         # Add the MoE router load-balancing aux loss only when its coefficient is set.
         self.aux_loss = self.args.actor.aux_loss_coef > 1e-8
@@ -305,23 +325,129 @@ class PolicyTrainer:
                     window_end = len(window) == accum_steps
                 if not window_end:
                     continue
-                local_tokens = sum(exp.action_mask.sum() for exp in window)
-                batch_num_tokens = self.strategy.global_token_count(local_tokens)
-                for idx, exp in enumerate(window):
-                    exp.to_device(device)
-                    # Full per-sequence lengths drive the FLOP estimate (forward
-                    # processes the whole sequence, not just action tokens).
+                # Full per-sequence lengths drive the FLOP estimate (forward
+                # processes the whole sequence, not just action tokens).
+                for exp in window:
                     seqlens = exp.attention_mask.sum(dim=-1)
                     local_seq_count += float(seqlens.numel())
                     local_token_sum += float(seqlens.sum())
-                    is_optimizer_step = idx == len(window) - 1
-                    status = self.training_step(exp, kl_ctl, batch_num_tokens, len(window), is_optimizer_step)
-                    self._record_status(status, status_list, pbar)
-                    if force_on_policy and self.replay_buffer.cpu_offload:
-                        # The window spans the whole rollout; offload each
-                        # microbatch back to CPU after use so peak GPU holds one
-                        # microbatch, not the entire buffer (matters for VLM).
-                        exp.to_device(torch.device("cpu"))
+
+                if self._automodel_engine is not None:
+                    exp_token_counts = [float(exp.action_mask.sum().item()) for exp in window]
+                    if any(count <= 0 for count in exp_token_counts):
+                        raise ValueError("AutoModel Engine policy windows require action tokens in every Experience")
+                    num_action_tokens = sum(exp_token_counts)
+                    expected_records = sum(exp.action_mask.shape[0] for exp in window)
+                    metric_sink = []
+                    datum_window = [experience_to_datums(exp) for exp in window]
+                    self.actor.train()
+                    engine_output = self._automodel_engine.forward_backward(
+                        datum_window,
+                        loss_fn=datum_policy_loss,
+                        loss_kwargs={"policy_loss": self.actor_loss_fn, "metric_sink": metric_sink},
+                    )
+                    if len(metric_sink) != expected_records:
+                        raise RuntimeError(
+                            "AutoModel Engine policy metrics are misaligned with the optimizer window: "
+                            f"Datum rows={len(metric_sink)}, Experience rows={expected_records}"
+                        )
+                    sink_tokens = float(torch.stack([item["num_action_tokens"] for item in metric_sink]).sum().item())
+                    if abs(sink_tokens - num_action_tokens) > 1e-5:
+                        raise RuntimeError(
+                            "AutoModel Engine policy metrics are misaligned with the optimizer window: "
+                            f"Datum tokens={sink_tokens}, Experience tokens={num_action_tokens}"
+                        )
+
+                    dump_path = os.environ.get("MOLT_DUMP_ROLLOUT_LOGPROBS")
+                    first_datum = datum_window[0][0]
+                    rollout_logprobs = first_datum.loss_fn_inputs.get("rollout_logprobs")
+                    if (
+                        dump_path
+                        and rollout_logprobs is not None
+                        and not getattr(self, "_rollout_logprob_dumped", False)
+                    ):
+                        self._rollout_logprob_dumped = True
+                        if torch.distributed.get_rank() == 0:
+                            actor_logprobs = engine_output.logprobs[0][:-1]
+                            action_weights = first_datum.loss_fn_inputs["weights"][:-1].to(actor_logprobs)
+                            with open(dump_path, "w") as f:
+                                f.write("pos\ttoken_id\tvllm_logp\tactor_logp\tmask\n")
+                                rows = zip(
+                                    first_datum.input_ids[1:].tolist(),
+                                    rollout_logprobs[:-1].float().tolist(),
+                                    (actor_logprobs * action_weights).float().tolist(),
+                                    action_weights.long().tolist(),
+                                )
+                                for j, (token_id, vllm_logp, actor_logp, mask) in enumerate(rows):
+                                    f.write(f"{j}\t{token_id}\t{vllm_logp:.6f}\t{actor_logp:.6f}\t{mask}\n")
+                            logger.info(f"MOLT_DUMP_ROLLOUT_LOGPROBS: wrote token-level logprob dump to {dump_path}")
+                    self.strategy.optimizer_step(
+                        self.actor_optim,
+                        self.actor,
+                        self.actor_scheduler,
+                        name="actor",
+                        accumulate=False,
+                    )
+
+                    record_offset = 0
+                    for exp_index, exp in enumerate(window):
+                        num_samples = exp.action_mask.shape[0]
+                        records = metric_sink[record_offset : record_offset + num_samples]
+                        record_offset += num_samples
+                        exp_tokens = exp_token_counts[exp_index]
+                        metrics = {}
+                        weights = {}
+                        for key in ("policy_loss", "policy_clip_ratio", "policy_kl", "advantage_mean"):
+                            metrics[key] = sum(item[key] * item["num_action_tokens"] for item in records) / exp_tokens
+                            weights[key] = "token"
+
+                        metrics["actor_lr"] = self.actor_scheduler.get_last_lr()[0]
+                        weights["actor_lr"] = None
+                        if exp_index == len(window) - 1:
+                            metrics["actor_grad_norm"] = self.strategy.get_grad_norm(self.actor)
+                            weights["actor_grad_norm"] = None
+
+                        for key, value in exp.info.items():
+                            if key in metrics:
+                                continue
+                            if isinstance(value, torch.Tensor):
+                                metrics[key] = value
+                                weights[key] = "token" if value.dim() == 0 else "sample"
+                            elif isinstance(value, list):
+                                metrics[key] = torch.tensor(value, dtype=torch.float)
+                                weights[key] = "sample"
+                        for field_info in fields(Experience):
+                            if (
+                                field_info.name in {"rewards", "scores"}
+                                or field_info.name in metrics
+                                or not Experience.is_episode_tensor_field(field_info.name)
+                            ):
+                                continue
+                            value = getattr(exp, field_info.name)
+                            if isinstance(value, torch.Tensor):
+                                metrics[field_info.name] = value
+                                weights[field_info.name] = "sample"
+
+                        status = {
+                            "metrics": metrics,
+                            "weights": weights,
+                            "num_samples": float(num_samples),
+                            "num_action_tokens": exp_tokens,
+                        }
+                        self._record_status(status, status_list, pbar)
+                else:
+                    local_tokens = sum(exp.action_mask.sum() for exp in window)
+                    batch_num_tokens = self.strategy.global_token_count(local_tokens)
+                    for idx, exp in enumerate(window):
+                        exp.to_device(device)
+                        is_optimizer_step = idx == len(window) - 1
+                        status = self.training_step(exp, kl_ctl, batch_num_tokens, len(window), is_optimizer_step)
+                        self._record_status(status, status_list, pbar)
+                        if force_on_policy and self.replay_buffer.cpu_offload:
+                            # The window spans the whole rollout; offload each
+                            # microbatch back to CPU after use so peak GPU holds one
+                            # microbatch, not the entire buffer (matters for VLM).
+                            exp.to_device(torch.device("cpu"))
                 window = []
             assert not window, "actor train window not flushed at epoch end"
 

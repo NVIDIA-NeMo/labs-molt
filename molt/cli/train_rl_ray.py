@@ -760,6 +760,16 @@ if __name__ == "__main__":
         help="Group packed samples by token budget; reuses the loaded model's packed forward path.",
     )
     parser.add_argument(
+        "--train.use_automodel_engine",
+        action="store_true",
+        default=False,
+        help=(
+            "Experimental short-sequence pure-text policy path: hand each complete optimizer window "
+            "to AutoModel Engine for Datum collation, forward, and backward. Unsupported combinations "
+            "fail fast; the default keeps MOLT's existing training path."
+        ),
+    )
+    parser.add_argument(
         "--train.force_on_policy",
         action="store_true",
         default=False,
@@ -999,6 +1009,59 @@ if __name__ == "__main__":
         args.fsdp.packing_samples = False
 
     # --- Parallelism / FSDP ---
+    if args.train.use_automodel_engine:
+        unsupported = []
+        if args.actor.num_nodes * args.actor.num_gpus_per_node != 1:
+            unsupported.append("the first Engine slice is single actor-rank only")
+        if any(size != 1 for size in (args.fsdp.tp_size, args.fsdp.cp_size, args.fsdp.ep_size, args.fsdp.pp_size)):
+            unsupported.append("TP/CP/EP/PP must all be 1")
+        if args.fsdp.sequence_parallel:
+            unsupported.append("--fsdp.sequence_parallel must be disabled")
+        if args.data.max_images_per_prompt > 0:
+            unsupported.append("multimodal/VLM inputs are not represented by Datum yet")
+        if args.fsdp.packing_samples:
+            unsupported.append("--fsdp.packing_samples is not enabled for the first Engine slice")
+        if args.train.dynamic_batch_enable:
+            unsupported.append("--train.dynamic_batch_enable is not enabled for the first Engine slice")
+        if args.train.routing_replay:
+            unsupported.append("--train.routing_replay has no Datum model-input field yet")
+        if args.fsdp.offload != "none":
+            unsupported.append("--fsdp.offload must be none")
+        if args.rollout.temperature != 1.0:
+            unsupported.append("--rollout.temperature must be 1.0")
+        if args.actor.aux_loss_coef > 1e-8:
+            unsupported.append("--actor.aux_loss_coef must be 0")
+        if args.actor.entropy_coef:
+            unsupported.append("--actor.entropy_coef must be 0 or unset")
+        if args.algo.kl.use_loss:
+            unsupported.append("--algo.kl.use_loss is not in the Engine composite loss yet")
+        if args.train.force_on_policy:
+            unsupported.append("--train.force_on_policy omits the stored old policy logprobs")
+        if args.algo.advantage.is_correction_level != "off":
+            unsupported.append("policy/rollout importance correction is not enabled in the first Engine slice")
+        if args.actor.loss_mode != "ppo":
+            unsupported.append("--actor.loss_mode must be ppo")
+        if args.actor.optim != "adam":
+            unsupported.append("--actor.optim must be adam")
+        if unsupported:
+            raise NotImplementedError(
+                "--train.use_automodel_engine currently supports only the initial dense-text PPO slice:\n- "
+                + "\n- ".join(unsupported)
+            )
+        try:
+            from nemo_automodel.components.datasets.datum import Datum
+            from nemo_automodel.components.training.engine import Engine  # noqa: F401
+        except ImportError as exc:
+            raise RuntimeError(
+                "--train.use_automodel_engine needs AutoModel Datum and Engine support. "
+                "Install the nemo-automodel commit pinned in requirements.txt."
+            ) from exc
+        if "loss_fn_inputs" not in Datum.__dataclass_fields__:
+            raise RuntimeError(
+                "The installed AutoModel Datum uses an incompatible schema; the Engine integration needs "
+                "Datum.loss_fn_inputs from the requirements.txt pin."
+            )
+
     if args.fsdp.pp_size > 1:
         raise NotImplementedError("Molt trainers are not pipeline-parallel aware yet; set --fsdp.pp_size 1")
 

@@ -270,6 +270,7 @@ class BaseModel(nn.Module):
         self.temperature = temperature
         self.packing_samples = packing_samples
         self.device_mesh = device_mesh
+        self.distributed_setup = None
         # HybridEP all-gathers a [tokens, experts] routing map, so every rank in an EP
         # group must pack the same token count. Other dispatchers don't shape-collect.
         ep_dims = getattr(moe_mesh, "mesh_dim_names", ()) or ()
@@ -429,6 +430,7 @@ class BaseModel(nn.Module):
             moe_parallel_config=moe_config,
             activation_checkpointing=ac_setting,
         )
+        self.distributed_setup = dist_setup
         self.model = ModelCls.from_pretrained(
             pretrain_or_model,
             trust_remote_code=True,

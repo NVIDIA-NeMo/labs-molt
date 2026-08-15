@@ -49,6 +49,83 @@ def get_model_parallel_size(args) -> int:
     return int(fsdp.cp_size) * int(fsdp.tp_size)
 
 
+def experience_to_datums(experience: "Experience") -> list:
+    """Convert one padded policy microbatch into per-sample AutoModel Datums.
+
+    MOLT stores next-token policy fields on ``[B, T-1]`` while Datum fields are
+    aligned to ``input_ids`` on ``[T]``. The final token therefore receives a
+    zero loss weight and zero-valued policy side inputs.
+    """
+    try:
+        from nemo_automodel.components.datasets.datum import Datum
+    except ImportError as exc:
+        raise RuntimeError(
+            "The AutoModel Engine path needs nemo_automodel Datum support; install the requirements.txt pin."
+        ) from exc
+
+    if experience.sequences.dim() != 2 or experience.attention_mask.shape != experience.sequences.shape:
+        raise ValueError("experience_to_datums expects padded sequences and attention_mask shaped [B, T]")
+    if experience.action_log_probs is None:
+        raise ValueError("The initial AutoModel Engine path requires stored action_log_probs")
+    if experience.advantages is None or experience.action_mask is None:
+        raise ValueError("experience_to_datums requires advantages and action_mask")
+    if experience.routed_experts is not None:
+        raise ValueError("AutoModel Engine Datum conversion does not yet support routed_experts")
+    if experience.mm_train_inputs:
+        raise ValueError("AutoModel Engine Datum conversion does not yet support multimodal inputs")
+
+    expected_step_shape = (experience.sequences.shape[0], experience.sequences.shape[1] - 1)
+    step_fields = {
+        "action_mask": experience.action_mask,
+        "action_log_probs": experience.action_log_probs,
+        "advantages": experience.advantages,
+    }
+    if experience.rollout_log_probs is not None:
+        step_fields["rollout_log_probs"] = experience.rollout_log_probs
+    for name, value in step_fields.items():
+        if tuple(value.shape) != expected_step_shape:
+            raise ValueError(f"{name} must have shape {expected_step_shape}; got {tuple(value.shape)}")
+
+    datums = []
+    for index in range(experience.sequences.shape[0]):
+        attention_mask = experience.attention_mask[index].bool()
+        seq_len = int(attention_mask.sum().item())
+        if seq_len < 2:
+            raise ValueError(f"Datum {index} needs at least two real tokens; got {seq_len}")
+        if not attention_mask[:seq_len].all().item() or attention_mask[seq_len:].any().item():
+            raise ValueError(f"Datum {index} attention_mask must use contiguous right padding")
+
+        num_steps = seq_len - 1
+        input_ids = experience.sequences[index, :seq_len]
+        target_tokens = torch.roll(input_ids, shifts=-1)
+        weights = torch.cat(
+            (experience.action_mask[index, :num_steps].float(), experience.action_mask.new_zeros(1).float())
+        )
+        old_logprobs = torch.cat(
+            (
+                experience.action_log_probs[index, :num_steps],
+                experience.action_log_probs.new_zeros(1),
+            )
+        )
+        advantages = torch.cat((experience.advantages[index, :num_steps], experience.advantages.new_zeros(1)))
+        loss_fn_inputs = {
+            "target_tokens": target_tokens,
+            "weights": weights,
+            "logprobs": old_logprobs,
+            "advantages": advantages,
+        }
+        if experience.rollout_log_probs is not None:
+            loss_fn_inputs["rollout_logprobs"] = torch.cat(
+                (
+                    experience.rollout_log_probs[index, :num_steps],
+                    experience.rollout_log_probs.new_zeros(1),
+                )
+            )
+        datums.append(Datum(input_ids=input_ids, loss_fn_inputs=loss_fn_inputs))
+
+    return datums
+
+
 def _fill_missing_routed_experts(items: List["Experience"]) -> None:
     """Give un-routed samples (routed_experts=None) an all -1 (natural-routing) block sized to
     their own sequence, so a batch mixing captured routing with None neither drops the routing

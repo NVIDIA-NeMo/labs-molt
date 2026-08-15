@@ -20,7 +20,13 @@ from .advantage import (
     get_advantage_estimator,
     register_advantage_estimator,
 )
-from .experience import Experience, balance_experiences, make_experience_batch, split_experience_batch
+from .experience import (
+    Experience,
+    balance_experiences,
+    experience_to_datums,
+    make_experience_batch,
+    split_experience_batch,
+)
 from .kl_controller import AdaptiveKLController, FixedKLController
 from .replay_buffer import NaiveReplayBuffer
 
@@ -31,6 +37,7 @@ __all__ = [
     "FixedKLController",
     "NaiveReplayBuffer",
     "balance_experiences",
+    "experience_to_datums",
     "get_advantage_estimator",
     "make_experience_batch",
     "register_advantage_estimator",

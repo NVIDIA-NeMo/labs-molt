@@ -16,7 +16,7 @@
 # Adapted from OpenRLHF (https://github.com/OpenRLHF/OpenRLHF),
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
@@ -331,6 +331,7 @@ class PolicyLoss(nn.Module):
         dp_size: int = 1,
         batch_num_tokens: Optional[torch.Tensor] = None,
         global_batch_size: Optional[torch.Tensor] = None,
+        reduce: bool = True,
     ) -> torch.Tensor:
         log_ratio_limit = 30.0
         policy_log_ratio = torch.nan_to_num(
@@ -424,22 +425,81 @@ class PolicyLoss(nn.Module):
         # to keep logged values interpretable and comparable across configs.
         reported_loss = masked_mean(loss.detach(), action_mask, dim=None)
 
-        if self.token_level_loss:
-            loss = agg_loss(
-                loss,
-                action_mask,
-                self.loss_agg_mode,
-                dp_size=dp_size,
-                batch_num_tokens=batch_num_tokens,
-                global_batch_size=global_batch_size,
-            )
-        else:
-            loss = agg_loss(
-                loss,
-                action_mask,
-                "seq-mean-token-mean",
-                dp_size=dp_size,
-                global_batch_size=global_batch_size,
-            )
+        # AutoModel Engine owns weighting and the global denominator for Datum
+        # batches, so its LossFn asks for this raw per-token surrogate.
+        if reduce:
+            if self.token_level_loss:
+                loss = agg_loss(
+                    loss,
+                    action_mask,
+                    self.loss_agg_mode,
+                    dp_size=dp_size,
+                    batch_num_tokens=batch_num_tokens,
+                    global_batch_size=global_batch_size,
+                )
+            else:
+                loss = agg_loss(
+                    loss,
+                    action_mask,
+                    "seq-mean-token-mean",
+                    dp_size=dp_size,
+                    global_batch_size=global_batch_size,
+                )
         policy_kl = masked_mean(-policy_log_ratio.detach(), action_mask, dim=None)
         return loss, reported_loss, clip_ratio, policy_kl, vllm_kl, is_filter_ratio
+
+
+def datum_policy_loss(
+    model_output,
+    datums: Sequence,
+    *,
+    policy_loss: PolicyLoss,
+    metric_sink: Optional[list] = None,
+):
+    """Return MOLT's unreduced policy surrogate for AutoModel Engine Datum reduction."""
+    logprobs = getattr(model_output, "logprobs", None)
+    if logprobs is None:
+        raise ValueError("AutoModel Engine ModelOutput did not contain selected-token logprobs")
+    if len(logprobs) != len(datums):
+        raise ValueError(f"ModelOutput has {len(logprobs)} logprob rows for {len(datums)} Datums")
+
+    losses = []
+    for index, (new_logprobs, datum) in enumerate(zip(logprobs, datums)):
+        loss_inputs = datum.loss_fn_inputs
+        missing = {"weights", "logprobs", "advantages"} - set(loss_inputs)
+        if missing:
+            raise ValueError(f"Datum {index} is missing policy loss inputs: {sorted(missing)}")
+
+        weights = loss_inputs["weights"].to(new_logprobs)
+        old_logprobs = loss_inputs["logprobs"].to(new_logprobs)
+        advantages = loss_inputs["advantages"].to(new_logprobs)
+        if not (new_logprobs.shape == weights.shape == old_logprobs.shape == advantages.shape):
+            raise ValueError(
+                f"Datum {index} policy fields must match logprobs {tuple(new_logprobs.shape)}; "
+                f"got weights={tuple(weights.shape)}, old={tuple(old_logprobs.shape)}, "
+                f"advantages={tuple(advantages.shape)}"
+            )
+        rollout_logprobs = loss_inputs.get("rollout_logprobs")
+        if rollout_logprobs is not None:
+            rollout_logprobs = rollout_logprobs.to(new_logprobs)
+
+        per_token_loss, reported_loss, clip_ratio, policy_kl, _, _ = policy_loss(
+            new_logprobs,
+            old_logprobs,
+            advantages,
+            action_mask=weights,
+            rollout_log_probs=rollout_logprobs,
+            reduce=False,
+        )
+        losses.append(per_token_loss)
+        if metric_sink is not None:
+            metric_sink.append(
+                {
+                    "num_action_tokens": weights.detach().sum(),
+                    "policy_loss": reported_loss.detach(),
+                    "policy_clip_ratio": clip_ratio.detach(),
+                    "policy_kl": policy_kl.detach(),
+                    "advantage_mean": masked_mean(advantages.detach(), weights, dim=None),
+                }
+            )
+    return losses
