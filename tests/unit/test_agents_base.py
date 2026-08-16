@@ -74,3 +74,69 @@ def test_step_env_runner_isolates_sampling_params_per_trajectory():
 def test_generation_logprobs_fail_fast_when_vllm_omits_them():
     with pytest.raises(RuntimeError, match="did not return token logprobs"):
         _extract_generation_logprobs([1], None)
+
+
+class _ClosingEnv(Env):
+    closes = 0
+
+    async def close(self):
+        type(self).closes += 1
+
+
+class _TerminatesEnv(_ClosingEnv):
+    async def step(self, state, **kwargs):
+        return Result(reward=[1.0], observation="!", terminated=True)
+
+
+class _NeverEndsEnv(_ClosingEnv):
+    async def step(self, state, **kwargs):
+        return Result(reward=[0.0], observation="x" * 8, terminated=False)
+
+
+class _StepRaisesEnv(_ClosingEnv):
+    async def step(self, state, **kwargs):
+        raise RuntimeError("boom in step")
+
+
+class _ResetRaisesEnv(_ClosingEnv):
+    async def reset(self, state):
+        raise RuntimeError("boom in reset")
+
+    async def step(self, state, **kwargs):
+        return Result(reward=[0.0], observation="", terminated=True)
+
+
+class _CloseRaisesEnv(_TerminatesEnv):
+    async def close(self):
+        await super().close()
+        raise RuntimeError("boom in close")
+
+
+def _execute(env_cls, max_length=64):
+    params = SimpleNamespace(max_tokens=8, logprobs=None)
+    return asyncio.run(StepEnvRunner(env_cls).execute("p", "l", params, max_length, _Tokenizer(), _Engine()))
+
+
+def test_env_close_runs_once_on_every_exit_path():
+    """Teardown must not depend on step() returning terminated/truncated: context
+    exhaustion and reset/step exceptions are routine exits for OS-resource envs."""
+    for env_cls, raises in [
+        (_TerminatesEnv, None),
+        (_NeverEndsEnv, None),  # exits via remaining-context exhaustion
+        (_StepRaisesEnv, "boom in step"),
+        (_ResetRaisesEnv, "boom in reset"),
+    ]:
+        env_cls.closes = 0
+        if raises:
+            with pytest.raises(RuntimeError, match=raises):
+                _execute(env_cls, max_length=32)
+        else:
+            _execute(env_cls, max_length=32)
+        assert env_cls.closes == 1, env_cls.__name__
+
+
+def test_env_close_failure_keeps_the_trajectory():
+    _CloseRaisesEnv.closes = 0
+    trajectory = _execute(_CloseRaisesEnv)
+    assert trajectory.reward == 1.0
+    assert _CloseRaisesEnv.closes == 1

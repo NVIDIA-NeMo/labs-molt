@@ -241,8 +241,10 @@ class Env(ABC):
     async def close(self):
         """Optional per-episode teardown. StepEnvRunner calls this on every exit
         path (episode end, context exhaustion, exception) — override to release
-        OS resources such as subprocesses or VMs. Default: no-op."""
-        pass
+        OS resources such as subprocesses or VMs. Default: no-op.
+
+        Contract: close() may run before reset() has succeeded (an aborted episode),
+        so it must tolerate partially-initialized state."""
 
 
 # ---------------------------------------------------------------------------
@@ -432,10 +434,14 @@ class StepEnvRunner(Runner):
 
             return trajectory
         finally:
-            # An env can own OS resources (alfworld runs one textworld subprocess per episode), and
-            # episodes routinely exit without step() ever returning terminated/truncated (context
-            # exhaustion, exceptions) — close here so teardown never depends on the env's own GC.
-            await env.close()
+            # An env can own OS resources (a subprocess, a VM, a browser), and episodes routinely
+            # exit without step() ever returning terminated/truncated (context exhaustion,
+            # exceptions) — close here so teardown never depends on the env's own GC. A close()
+            # failure must not discard the completed trajectory or mask an in-flight error.
+            try:
+                await env.close()
+            except Exception:
+                logger.warning("Env.close() failed; resources may leak", exc_info=True)
 
 
 def _tokenize_feedback(hf_tokenizer, feedback_text: str, new_images, trajectory: Trajectory, max_length: int):
