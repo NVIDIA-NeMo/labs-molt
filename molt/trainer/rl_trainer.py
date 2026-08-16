@@ -190,6 +190,7 @@ def compute_eval_metrics(eval_dataloader, samples_list, n_samples_per_prompt):
     grouped: Dict[str, Dict[str, list]] = {}
     group_order = []
     group_prompt: Dict[str, str] = {}
+    seen_episodes = set()
     for s in samples_list:
         prompt = s.prompts[0]
         key = s.group_ids[0] if getattr(s, "group_ids", None) else prompt
@@ -197,7 +198,14 @@ def compute_eval_metrics(eval_dataloader, samples_list, n_samples_per_prompt):
             grouped[key] = {"rewards": [], "lengths": [], "truncated": []}
             group_order.append(key)
             group_prompt[key] = prompt
-        grouped[key]["rewards"].append(_first_scalar(s.rewards))
+        # Multi-turn flatten emits one sample per trajectory segment, each repeating the
+        # episode-level reward — count each episode (rollout_id) once, or pass@k becomes
+        # turn-weighted and long failing episodes dominate. Lengths/truncated stay
+        # per-segment on purpose (they measure generated text, not episodes).
+        episode = (key, s.rollout_ids[0] if getattr(s, "rollout_ids", None) else id(s))
+        if episode not in seen_episodes:
+            seen_episodes.add(episode)
+            grouped[key]["rewards"].append(_first_scalar(s.rewards))
         grouped[key]["lengths"].append(_first_scalar(s.response_length))
         grouped[key]["truncated"].append(_first_scalar(s.truncated))
 

@@ -147,3 +147,23 @@ def test_eval_metrics_maps_chat_list_prompts_to_datasource():
     )
     metrics = compute_eval_metrics(eval_dataloader, [sample], n_samples_per_prompt=1)
     assert metrics["eval_geo3k_pass1"] == 1.0  # datasource resolved via the last user turn text
+
+
+def test_eval_metrics_counts_each_episode_once_across_turn_segments():
+    # Multi-turn flatten emits one sample per trajectory segment, all repeating the
+    # episode reward. A failing episode runs to the step cap (many segments) while a
+    # successful one stops early, so segment-averaging would read (0+0+0+1)/4 = 0.25
+    # here. Deduping by rollout_id must read the true episode mean (0+1)/2 = 0.5.
+    eval_dataloader = [(["geo3k"], [ROW["prompt"]], ["42"], [None], [None])]
+    seg = lambda rid, reward: SimpleNamespace(  # noqa: E731
+        prompts=["<image>\nWhat is x?"],
+        group_ids=["g1"],
+        rollout_ids=[rid],
+        rewards=[reward],
+        response_length=[7],
+        truncated=[False],
+    )
+    samples = [seg("fail", 0.0), seg("fail", 0.0), seg("fail", 0.0), seg("ok", 1.0)]
+    metrics = compute_eval_metrics(eval_dataloader, samples, n_samples_per_prompt=2)
+    assert metrics["eval_geo3k_pass1"] == 0.5  # episode mean, not turn-weighted
+    assert metrics["eval_geo3k_pass2"] == 1.0
