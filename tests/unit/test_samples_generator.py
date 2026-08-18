@@ -202,6 +202,37 @@ def test_generate_samples_pool_persists_across_calls(monkeypatch):
     assert [handle.group_id for handle in generator._inflight_rollouts] == ["p6", "p7", "p8", "p9"]
 
 
+def test_generate_samples_terminates_when_dataset_not_divisible_by_batch(monkeypatch):
+    """A dataset size not divisible by rollout.batch_size must still end its epoch.
+
+    The dataloader drains mid-call while rollouts are still in flight; that exhausted
+    iterator (None) with a non-empty pool must NOT be mistaken for a fresh round, which
+    used to rebuild the iterator, drop the in-flight tail, and restart the epoch forever.
+    """
+    generator = object.__new__(SamplesGenerator)
+    generator.args = SimpleNamespace(
+        rollout=SimpleNamespace(batch_size=3, n_samples_per_prompt=1, vllm_generate_batch_size=5),
+        algo=SimpleNamespace(dynamic_filtering_enable=False),
+        ckpt=SimpleNamespace(warm_resume_rollouts=False),
+    )
+    generator.prompts_dataloader = _prompt_loader(7)  # 7 % 3 != 0
+    _wire_fake_vllm(generator, monkeypatch, _sample)
+
+    first, _, _, exhausted1 = generator.generate_samples()
+    second, _, _, exhausted2 = generator.generate_samples()
+    third, _, _, exhausted3 = generator.generate_samples()
+
+    # Three batches tile the 7 prompts exactly once: 3 + 3 + 1, and the last call
+    # (which serves the in-flight tail with the dataloader already exhausted) ends
+    # the epoch instead of restarting it from p0.
+    assert [s.group_ids[0] for s in first] == ["p0", "p1", "p2"]
+    assert [s.group_ids[0] for s in second] == ["p3", "p4", "p5"]
+    assert [s.group_ids[0] for s in third] == ["p6"]
+    assert exhausted1 is False and exhausted2 is False
+    assert exhausted3 is True
+    assert generator._inflight_rollouts == [] and generator._finished_samples == []
+
+
 def test_generator_keeps_no_checkpoint_state_and_resumes_from_dataloader(monkeypatch):
     """The in-flight pool is intentionally NOT persisted.
 

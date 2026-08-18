@@ -199,7 +199,14 @@ class SamplesGenerator:
         a weight refit pauses/resumes the engines (see broadcast_to_vllm), so the
         in-flight rollouts survive it.
         """
-        if getattr(self, "_dataloader_iter", None) is None:
+        # Rebuild only on a genuinely fresh round (first call, or a new episode after the
+        # previous round's exhausted=True emptied the pool). An EXHAUSTED iterator is also
+        # None; rebuilding it here would restart the epoch mid-stream and drop the in-flight tail.
+        if (
+            getattr(self, "_dataloader_iter", None) is None
+            and not getattr(self, "_inflight_rollouts", None)
+            and not getattr(self, "_finished_samples", None)
+        ):
             self._dataloader_iter = iter(self.prompts_dataloader)
             # Seed from a warm-resume buffer if load_state_dict restored one, so the first
             # post-resume batch ships without waiting for a full fresh generation. Consumed once.
