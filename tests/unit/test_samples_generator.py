@@ -99,6 +99,8 @@ def test_generate_samples_returns_batch_as_rollouts_finish_and_keeps_pool_satura
         rollout=SimpleNamespace(batch_size=3, n_samples_per_prompt=1, vllm_generate_batch_size=5),
         algo=SimpleNamespace(dynamic_filtering_enable=False),
         ckpt=SimpleNamespace(warm_resume_rollouts=False),
+        actor=SimpleNamespace(num_nodes=1, num_gpus_per_node=1),
+        fsdp=SimpleNamespace(cp_size=1, tp_size=1),
     )
     generator.prompts_dataloader = _prompt_loader(10)
     _wire_fake_vllm(generator, monkeypatch, _sample)
@@ -123,6 +125,8 @@ def test_generate_samples_emits_short_batch_when_dataloader_exhausted(monkeypatc
         rollout=SimpleNamespace(batch_size=4, n_samples_per_prompt=1, vllm_generate_batch_size=5),
         algo=SimpleNamespace(dynamic_filtering_enable=False),
         ckpt=SimpleNamespace(warm_resume_rollouts=False),
+        actor=SimpleNamespace(num_nodes=1, num_gpus_per_node=1),
+        fsdp=SimpleNamespace(cp_size=1, tp_size=1),
     )
     generator.prompts_dataloader = _prompt_loader(2)
     _wire_fake_vllm(generator, monkeypatch, _sample)
@@ -187,6 +191,8 @@ def test_generate_samples_pool_persists_across_calls(monkeypatch):
         rollout=SimpleNamespace(batch_size=3, n_samples_per_prompt=1, vllm_generate_batch_size=5),
         algo=SimpleNamespace(dynamic_filtering_enable=False),
         ckpt=SimpleNamespace(warm_resume_rollouts=False),
+        actor=SimpleNamespace(num_nodes=1, num_gpus_per_node=1),
+        fsdp=SimpleNamespace(cp_size=1, tp_size=1),
     )
     generator.prompts_dataloader = _prompt_loader(10)
     _wire_fake_vllm(generator, monkeypatch, _sample)
@@ -214,6 +220,8 @@ def test_generate_samples_terminates_when_dataset_not_divisible_by_batch(monkeyp
         rollout=SimpleNamespace(batch_size=3, n_samples_per_prompt=1, vllm_generate_batch_size=5),
         algo=SimpleNamespace(dynamic_filtering_enable=False),
         ckpt=SimpleNamespace(warm_resume_rollouts=False),
+        actor=SimpleNamespace(num_nodes=1, num_gpus_per_node=1),
+        fsdp=SimpleNamespace(cp_size=1, tp_size=1),
     )
     generator.prompts_dataloader = _prompt_loader(7)  # 7 % 3 != 0
     _wire_fake_vllm(generator, monkeypatch, _sample)
@@ -233,6 +241,31 @@ def test_generate_samples_terminates_when_dataset_not_divisible_by_batch(monkeyp
     assert generator._inflight_rollouts == [] and generator._finished_samples == []
 
 
+def test_generate_samples_drops_epoch_tail_smaller_than_dp_groups(monkeypatch):
+    """An epoch tail with fewer samples than DP groups is dropped, not enqueued.
+
+    balance_experiences raises when a batch cannot give every DP rank at least one
+    sample, so shipping such a tail would kill the run at the end of every epoch.
+    """
+    generator = object.__new__(SamplesGenerator)
+    generator.args = SimpleNamespace(
+        rollout=SimpleNamespace(batch_size=3, n_samples_per_prompt=1, vllm_generate_batch_size=5),
+        algo=SimpleNamespace(dynamic_filtering_enable=False),
+        ckpt=SimpleNamespace(warm_resume_rollouts=False),
+        actor=SimpleNamespace(num_nodes=1, num_gpus_per_node=2),
+        fsdp=SimpleNamespace(cp_size=1, tp_size=1),
+    )
+    generator.prompts_dataloader = _prompt_loader(7)  # tail = 1 sample < 2 DP groups
+    _wire_fake_vllm(generator, monkeypatch, _sample)
+
+    first, *_ = generator.generate_samples()
+    second, *_ = generator.generate_samples()
+    third, _, _, exhausted = generator.generate_samples()
+
+    assert len(first) == 3 and len(second) == 3
+    assert third == [] and exhausted is True
+
+
 def test_generator_keeps_no_checkpoint_state_and_resumes_from_dataloader(monkeypatch):
     """The in-flight pool is intentionally NOT persisted.
 
@@ -248,6 +281,8 @@ def test_generator_keeps_no_checkpoint_state_and_resumes_from_dataloader(monkeyp
         rollout=SimpleNamespace(batch_size=3, n_samples_per_prompt=1, vllm_generate_batch_size=5),
         algo=SimpleNamespace(dynamic_filtering_enable=False),
         ckpt=SimpleNamespace(warm_resume_rollouts=False),
+        actor=SimpleNamespace(num_nodes=1, num_gpus_per_node=1),
+        fsdp=SimpleNamespace(cp_size=1, tp_size=1),
     )
     generator.prompts_dataloader = _prompt_loader(10)
     _wire_fake_vllm(generator, monkeypatch, _sample)

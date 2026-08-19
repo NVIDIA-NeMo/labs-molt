@@ -28,7 +28,7 @@ from tqdm import tqdm
 from vllm import SamplingParams
 
 from molt.agents.base import _first_scalar as _to_scalar  # dedupe: same tensor/list/scalar normalizer
-from molt.trainer.algorithm.experience import Experience
+from molt.trainer.algorithm.experience import Experience, get_model_parallel_size
 from molt.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
@@ -294,6 +294,18 @@ class SamplesGenerator:
 
         # Exhausted only once the dataloader is done AND nothing is buffered or in flight.
         exhausted = self._dataloader_iter is None and not self._finished_samples and not self._inflight_rollouts
+        if exhausted and batch_samples:
+            # An epoch tail with fewer samples than DP groups cannot spread across the actor
+            # world (balance_experiences refuses it); drop it like balance drops its remainder.
+            # The fit loop releases the training slot when a round returns no samples.
+            dp_groups = (
+                self.args.actor.num_nodes * self.args.actor.num_gpus_per_node // get_model_parallel_size(self.args)
+            )
+            if len(batch_samples) < dp_groups:
+                logger.warning(
+                    f"dropping the {len(batch_samples)}-sample epoch tail: fewer than {dp_groups} DP groups"
+                )
+                batch_samples = []
         return batch_samples, rollout_metrics, prompts_dispatched, exhausted
 
     def _passes_dynamic_filter(self, rollout_samples) -> bool:
