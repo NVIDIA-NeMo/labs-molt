@@ -199,14 +199,10 @@ class SamplesGenerator:
         a weight refit pauses/resumes the engines (see broadcast_to_vllm), so the
         in-flight rollouts survive it.
         """
-        # Rebuild only on a genuinely fresh round (first call, or a new episode after the
-        # previous round's exhausted=True emptied the pool). An EXHAUSTED iterator is also
-        # None; rebuilding it here would restart the epoch mid-stream and drop the in-flight tail.
-        if (
-            getattr(self, "_dataloader_iter", None) is None
-            and not getattr(self, "_inflight_rollouts", None)
-            and not getattr(self, "_finished_samples", None)
-        ):
+        # Rebuild only on a genuinely fresh round: the first call, or a new episode after a
+        # round returned exhausted=True. Keying on live pool state instead would mistake a
+        # mid-stream exhausted iterator for a fresh round and drop the in-flight tail.
+        if getattr(self, "_round_exhausted", True):
             self._dataloader_iter = iter(self.prompts_dataloader)
             # Seed from a warm-resume buffer if load_state_dict restored one, so the first
             # post-resume batch ships without waiting for a full fresh generation. Consumed once.
@@ -294,6 +290,7 @@ class SamplesGenerator:
 
         # Exhausted only once the dataloader is done AND nothing is buffered or in flight.
         exhausted = self._dataloader_iter is None and not self._finished_samples and not self._inflight_rollouts
+        self._round_exhausted = exhausted
         if exhausted and batch_samples:
             # An epoch tail with fewer samples than DP groups cannot spread across the actor
             # world (balance_experiences refuses it); drop it like balance drops its remainder.
