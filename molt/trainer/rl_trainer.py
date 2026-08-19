@@ -110,17 +110,14 @@ def prepare_datasets(strategy, tokenizer):
     if args.train.force_on_policy:
         # On-policy: one optimizer step per rollout batch (per epoch), regardless
         # of how many samples multi-turn flatten produces. The generator consumes
-        # rollout.batch_size prompt-groups per round, so the LR scheduler decays
-        # over len(prompts) // rollout.batch_size, not samples // train.batch_size.
-        max_steps = len(prompts_dataset) // args.rollout.batch_size * args.train.num_episodes * args.train.max_epochs
+        # rollout.batch_size prompt-groups per round and emits the non-divisible
+        # tail as its own round, so ceil — flooring would run the LR scheduler
+        # past its horizon (HF cosine re-ascends beyond progress 1).
+        rounds = -(-len(prompts_dataset) // args.rollout.batch_size)
+        max_steps = rounds * args.train.num_episodes * args.train.max_epochs
     else:
-        max_steps = (
-            len(prompts_dataset)
-            * args.rollout.n_samples_per_prompt
-            // args.train.batch_size
-            * args.train.num_episodes
-            * args.train.max_epochs
-        )
+        steps = -(-len(prompts_dataset) * args.rollout.n_samples_per_prompt // args.train.batch_size)
+        max_steps = steps * args.train.num_episodes * args.train.max_epochs
     return prompts_dataloader, eval_dataloader, max_steps
 
 
