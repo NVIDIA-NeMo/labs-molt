@@ -45,7 +45,7 @@ for ENV_NAME in CUDA_VISIBLE_DEVICES FLASHINFER_WORKSPACE_BASE FLASHINFER_WORKSP
 done
 set -x
 
-docker run --runtime=nvidia --gpus "$DOCKER_GPUS" "${TTY_FLAGS[@]}" --rm --shm-size="$DOCKER_SHM_SIZE" --cap-add=SYS_ADMIN \
+docker run --gpus "$DOCKER_GPUS" "${TTY_FLAGS[@]}" --rm --shm-size="$DOCKER_SHM_SIZE" --cap-add=SYS_ADMIN \
 	"${ENV_FLAGS[@]}" \
 	-v $PROJECT_PATH:/molt -v  $HOME/.cache:/root/.cache -v  $HOME/.bash_history2:/root/.bash_history \
 	$IMAGE_NAME bash -lc "cd /molt && $CONTAINER_CMD"
