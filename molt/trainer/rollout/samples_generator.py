@@ -306,22 +306,18 @@ class SamplesGenerator:
         return batch_samples, rollout_metrics, prompts_dispatched, exhausted
 
     def _passes_dynamic_filter(self, rollout_samples) -> bool:
-        """Whether a scored group's mean rollout reward lands inside the dynamic-filtering range.
+        """DAPO dynamic sampling: drop a group whose rollouts all scored the same value.
 
-        A group with any unscored rollout always passes — filtering only applies once
-        every rollout in the group has a score.
+        A uniform group's group-baseline advantages are identically zero — it contributes
+        no gradient yet occupies batch slots and inflates the global token-mean denominator.
+        A group with any unscored rollout always passes.
         """
         if not all(s.scores is not None for s in rollout_samples):
             return True
         scores = [s.scores[0].item() for s in rollout_samples]
-        mean_score = sum(scores) / len(scores)
-        min_score, max_score = self.args.algo.dynamic_filtering_range
-        if min_score < mean_score < max_score:
+        if max(scores) - min(scores) > 1e-6:
             return True
-        logger.info(
-            f"Filtered out group: mean_score={mean_score:.2f}, range=({min_score:.2f}, {max_score:.2f}), "
-            f"scores={[f'{s:.2f}' for s in scores]}"
-        )
+        logger.info(f"Filtered out uniform group: score={scores[0]:.2f} x {len(scores)}")
         return False
 
     def _filter_group(
@@ -364,13 +360,12 @@ class SamplesGenerator:
             if score_stats is not None:
                 scored = [s.scores[0].item() for s in rollout_samples if s.scores is not None]
                 if scored:
-                    min_score, max_score = self.args.algo.dynamic_filtering_range
-                    gmean = sum(scored) / len(scored)
+                    uniform = max(scored) - min(scored) <= 1e-6
                     score_stats["score_sum"] += sum(scored)
                     score_stats["score_n"] += len(scored)
                     score_stats["groups"] += 1.0
-                    score_stats["all_pass"] += float(gmean >= max_score)
-                    score_stats["all_fail"] += float(gmean <= min_score)
+                    score_stats["all_pass"] += float(uniform and scored[0] >= 1.0 - 1e-6)
+                    score_stats["all_fail"] += float(uniform and scored[0] <= 1e-6)
             # Require COMPLETE groups: a group that lost a response to a per-response drop
             # (vlm_truncation / no_action_tokens / logprob_misalign / ...) has < n_samples
             # usable samples, which would pull the accepted count off train_batch_size and make

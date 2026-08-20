@@ -310,35 +310,39 @@ def test_generator_keeps_no_checkpoint_state_and_resumes_from_dataloader(monkeyp
 def test_generate_samples_drops_filtered_groups_and_refills_their_slots(monkeypatch):
     generator = object.__new__(SamplesGenerator)
     generator.args = SimpleNamespace(
-        rollout=SimpleNamespace(batch_size=2, n_samples_per_prompt=1, vllm_generate_batch_size=2),
-        algo=SimpleNamespace(dynamic_filtering_enable=True, dynamic_filtering_range=(0.0, 1.0)),
+        rollout=SimpleNamespace(batch_size=2, n_samples_per_prompt=2, vllm_generate_batch_size=2),
+        algo=SimpleNamespace(dynamic_filtering_enable=True),
     )
     generator.prompts_dataloader = _prompt_loader(10)
 
-    # p1's mean score (1.0) sits on the boundary of the open range (0, 1) → filtered out.
-    group_score = {"p0": 0.5, "p1": 1.0, "p2": 0.5, "p3": 0.5}
+    # p1's rollouts all score the same (zero spread) → filtered out; mixed groups pass.
+    group_scores = {"p0": (0.0, 1.0), "p1": (1.0, 1.0), "p2": (0.0, 1.0), "p3": (0.0, 1.0)}
 
-    def scored_sample(group_id):
-        return SimpleNamespace(group_ids=[group_id], scores=[torch.tensor(group_score[group_id])])
+    def scored_group(handle):
+        return [
+            (SimpleNamespace(group_ids=[handle.group_id], scores=[torch.tensor(v)]), None)
+            for v in group_scores[handle.group_id]
+        ]
 
-    _wire_fake_vllm(generator, monkeypatch, scored_sample)
+    _wire_fake_vllm(generator, monkeypatch, lambda gid: None)
+    monkeypatch.setattr(samples_generator.ray, "get", scored_group)
 
     samples, rollout_metrics, prompts_dispatched, _ = generator.generate_samples()
 
     # p1 is dropped; p2 (refilled into p1's freed slot) completes the batch.
-    assert [sample.group_ids[0] for sample in samples] == ["p0", "p2"]
+    assert [sample.group_ids[0] for sample in samples] == ["p0", "p0", "p2", "p2"]
     assert prompts_dispatched == 4  # p0,p1 up front; p2,p3 refilled one per completion
     assert rollout_metrics["dynamic_filtering_pass_rate"] == 2 / 3 * 100
-    # The filtered group is tallied by reason for observability.
-    assert rollout_metrics["rollout/dropped/dynamic_filter"] == 1.0
-    assert rollout_metrics["rollout/dropped/total"] == 1.0
+    # The filtered group is tallied by reason for observability (both its samples).
+    assert rollout_metrics["rollout/dropped/dynamic_filter"] == 2.0
+    assert rollout_metrics["rollout/dropped/total"] == 2.0
 
 
 def test_dynamic_filtering_counts_compaction_segments_once_per_rollout(monkeypatch):
     generator = object.__new__(SamplesGenerator)
     generator.args = SimpleNamespace(
         rollout=SimpleNamespace(n_samples_per_prompt=2),
-        algo=SimpleNamespace(dynamic_filtering_range=(0.4, 0.6)),
+        algo=SimpleNamespace(dynamic_filtering_enable=True),
     )
     samples = [
         SimpleNamespace(rollout_ids=[rollout_id], scores=torch.tensor([score]))
@@ -482,3 +486,20 @@ def test_warm_resume_state_dict_noop_when_disabled(tmp_path):
     gen.args = SimpleNamespace(ckpt=SimpleNamespace(warm_resume_rollouts=False, path=str(tmp_path / "ckpt")))
     gen._finished_samples = [SimpleNamespace(group_ids=["g0"], heavy_ref=None)]
     assert gen.state_dict() == {}
+
+
+def test_dynamic_filter_drops_exactly_the_uniform_groups():
+    """DAPO dynamic sampling keys on zero score spread, not a mean range: a uniform
+    group (all rollouts scored the same) has identically-zero group-baseline
+    advantages, whatever the value — including non-binary ones like all-0.5, which
+    the previous mean-in-(min,max) check wrongly kept."""
+    generator = object.__new__(SamplesGenerator)
+
+    def scored(value):
+        return SimpleNamespace(scores=[torch.tensor(value)])
+
+    assert generator._passes_dynamic_filter([scored(0.0), scored(1.0)])
+    assert generator._passes_dynamic_filter([scored(0.5), SimpleNamespace(scores=None)])
+    assert not generator._passes_dynamic_filter([scored(1.0), scored(1.0)])
+    assert not generator._passes_dynamic_filter([scored(0.0), scored(0.0)])
+    assert not generator._passes_dynamic_filter([scored(0.5), scored(0.5)])

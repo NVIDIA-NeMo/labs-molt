@@ -371,7 +371,7 @@ else
 fi
 
 if [ "${ENABLE_DYNAMIC_FILTERING:-1}" = "1" ]; then
-  RL_ARGS+=(--algo.dynamic_filtering_enable --algo.dynamic_filtering_range "${FILTER_MIN:-0.01}" "${FILTER_MAX:-0.99}")
+  RL_ARGS+=(--algo.dynamic_filtering_enable)
 fi
 
 if [ "$DISABLE_FINAL_SAVE" = "1" ]; then

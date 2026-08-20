@@ -519,10 +519,10 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument(
-        "--algo.dynamic_filtering_enable", action="store_true", default=False, help="Enable dynamic filtering"
-    )
-    parser.add_argument(
-        "--algo.dynamic_filtering_range", nargs=2, default=(0, 1), type=float, help="Dynamic filtering rewards range"
+        "--algo.dynamic_filtering_enable",
+        action="store_true",
+        default=False,
+        help="DAPO dynamic sampling: drop groups whose rollouts all scored the same value",
     )
     parser.add_argument(
         "--actor.eps_clip_low_high", type=float, nargs=2, default=None, help="policy clip low and high"
@@ -949,9 +949,6 @@ if __name__ == "__main__":
         print(f"Recommend setting {args.algo.kl.estimator} to 'k1' when not using KL as a loss.")
 
     if args.algo.dynamic_filtering_enable:
-        assert args.algo.dynamic_filtering_range[0] < args.algo.dynamic_filtering_range[1], (
-            "dynamic_filtering_range[0] must be less than dynamic_filtering_range[1]"
-        )
         assert args.train.agent_path, "--train.agent_path must be specified when using dynamic filtering"
         assert args.rollout.n_samples_per_prompt > 1, (
             "n_samples_per_prompt must be greater than 1 when using dynamic filtering"

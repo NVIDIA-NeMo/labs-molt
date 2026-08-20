@@ -263,7 +263,7 @@ Common RL switches:
 | Compare samples per prompt | `--rollout.n_samples_per_prompt 8` plus `reinforce_baseline`, `rloo`, `grpo`, or `dr_grpo` |
 | Decouple rollout and training | `--train.async_queue_size 2` |
 | Keep rollout alive during sync | `--train.partial_rollout_enable` |
-| Filter by agent scores | `--algo.dynamic_filtering_enable --algo.dynamic_filtering_range 0.0 1.0` |
+| Drop zero-gradient groups (DAPO dynamic sampling) | `--algo.dynamic_filtering_enable` |
 | Correct async rollout logprobs | `--algo.advantage.is_correction_level geo` (seq-mask-tis; token-level adds `--algo.advantage.is_correction_mode clip/trunc/mask`) |
 | Freeze MoE routing (stabilize MoE RL) | `--actor.freeze_moe_router` |
 | On-policy distillation | `--algo.advantage.estimator on_policy_distill --ref.model_name_or_path /path/to/teacher` |
