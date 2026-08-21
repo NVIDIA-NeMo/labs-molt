@@ -239,6 +239,14 @@ class FsdpStrategy:
             # sync, so grads stay materialized for clipping and logging.
             defer_fsdp_grad_sync=False,
         )
+        # The compiled MoE expert kernels (nemo_automodel moe/experts.py) see per-expert
+        # token counts that vary every microbatch, so dynamo holds static + dynamic graphs.
+        # Under full AC, LRU-cache reordering can make the backward recompute pick a
+        # different graph than forward → CheckpointError ('Recomputed values ... have
+        # different metadata'). https://github.com/pytorch/pytorch/issues/166926
+        _set_lru_cache = getattr(torch._C._dynamo.eval_frame, "_set_lru_cache", None)
+        if _set_lru_cache is not None:
+            _set_lru_cache(False)
         # MoE parallelization config, required when ep_size > 1.
         # ignore_router_for_ac=True → selective AC that saves the router projection so
         # the topk routing is NOT recomputed in backward; otherwise a near-tie token
