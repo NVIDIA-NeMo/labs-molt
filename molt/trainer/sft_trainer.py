@@ -17,15 +17,14 @@
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
 import os
-from contextlib import ExitStack
-from importlib import import_module
 
 import torch
+from nemo_automodel.components.distributed.mesh import MeshContext
+from nemo_automodel.components.loss.masked_ce import MaskedCrossEntropy
+from nemo_automodel.engine import Engine, collate_prebatched
 from torch.optim import Optimizer
 from tqdm import tqdm
 
-from molt.models import SFTLoss
-from molt.models.utils import log_probs_from_logits, masked_mean, split_moe_aux_loss
 from molt.utils.distributed_sampler import DistributedSampler
 
 
@@ -41,7 +40,6 @@ class SFTTrainer:
         eval_dataloader (DataLoader): The dataloader for the evaluation dataset.
         scheduler (Scheduler): The learning rate scheduler to adjust training rates.
         max_norm (float, defaults to 1): Maximum gradient norm for clipping to prevent exploding gradients.
-        batch_size (int, defaults to 1): Batch size for training.
         max_epochs (int, defaults to 2): The maximum number of training epochs.
         tokenizer (Tokenizer, optional): The tokenizer for processing input data.
         save_hf_ckpt (bool): Whether to save huggingface-format model weight.
@@ -56,7 +54,6 @@ class SFTTrainer:
         eval_dataloader,
         scheduler,
         max_norm: float = 1,
-        batch_size: int = 1,
         max_epochs: int = 2,
         tokenizer=None,
         save_hf_ckpt: bool = False,
@@ -64,87 +61,27 @@ class SFTTrainer:
         super().__init__()
         self.strategy = strategy
         self.epochs = max_epochs
-        self.batch_size = batch_size
-        self.max_norm = max_norm
         self.train_dataloader = train_dataloader
         self.eval_dataloader = eval_dataloader
-        self.scheduler = scheduler
         self.model = model
+        self.scheduler = scheduler
         self.tokenizer = tokenizer
-        self.optimizer = optim
-        self.args = strategy.args
         self.save_hf_ckpt = save_hf_ckpt
-
-        self.loss_fn = SFTLoss()
-
-        # MoE balancing loss.
-        self.aux_loss = self.args.model.aux_loss_coef > 1e-8
-        # Defer the FSDP grad reduce-scatter to the last microbatch of the accum
-        # window (AutoModel get_sync_ctx / defer_fsdp_grad_sync default). Default ON
-        # to align with AutoModel; set MOLT_DEFER_GRAD_SYNC=0 for memory-bound runs.
-        self._defer_grad_sync = os.environ.get("MOLT_DEFER_GRAD_SYNC", "1") == "1"
-
-        self.cp_enabled = getattr(strategy, "cp_size", 1) > 1
-
-        # Keep the existing trainer for configurations whose model-input or
-        # update contract Engine does not yet own. This first integration slice
-        # covers the dense text SFT quick-start without changing those knobs.
-        engine_fallbacks = []
-        if not hasattr(model, "model"):
-            engine_fallbacks.append("model wrapper has no raw backbone")
-        if getattr(model, "is_vlm", False):
-            engine_fallbacks.append("VLM input preparation")
-        if getattr(model, "packing_samples", False):
-            engine_fallbacks.append("packed input preparation")
-        if getattr(strategy, "cpu_offload", False) or getattr(strategy, "offload_optimizer", False):
-            engine_fallbacks.append("CPU offload")
-        if any(getattr(strategy, name, 1) > 1 for name in ("tp_size", "cp_size", "ep_size", "pp_size")):
-            engine_fallbacks.append("model parallelism")
-        if getattr(strategy, "sequence_parallel", False):
-            engine_fallbacks.append("sequence parallelism")
-        if getattr(self.args, "optim", None) != "adam":
-            engine_fallbacks.append("non-Adam optimizer")
-        if not self._defer_grad_sync:
-            engine_fallbacks.append("per-microbatch gradient sync")
-        if self.aux_loss:
-            engine_fallbacks.append("explicit auxiliary-loss logging")
-
-        self.engine = None
-        if not engine_fallbacks:
-            try:
-                engine_module = import_module("nemo_automodel.engine")
-                mesh_module = import_module("nemo_automodel.components.distributed.mesh")
-            except ModuleNotFoundError as error:
-                if error.name not in {
-                    "nemo_automodel.engine",
-                    "nemo_automodel.components.distributed.mesh",
-                }:
-                    raise
-                engine_fallbacks.append(f"Engine API unavailable: {error}")
-            else:
-                Engine = getattr(engine_module, "Engine", None)
-                collate_prebatched = getattr(engine_module, "collate_prebatched", None)
-                MeshContext = getattr(mesh_module, "MeshContext", None)
-                if any(symbol is None for symbol in (Engine, collate_prebatched, MeshContext)):
-                    engine_fallbacks.append("Engine API unavailable: required symbols are missing")
-
-            if not engine_fallbacks:
-                raw_model = model.model
-                clip_norm = max_norm if max_norm and max_norm > 0 else None
-                self.engine = Engine(
-                    raw_model,
-                    device=next(raw_model.parameters()).device,
-                    mesh_context=MeshContext.from_meshes(strategy.device_mesh, strategy.moe_mesh),
-                    microbatch_size=1,
-                    collate_fn=collate_prebatched,
-                    padding_token_id=getattr(getattr(raw_model, "config", None), "pad_token_id", None) or 0,
-                    defer_fsdp_grad_sync=True,
-                    optimizers=optim,
-                    max_grad_norm=clip_norm,
-                )
-
-        backend = "engine" if self.engine is not None else f"legacy ({'; '.join(engine_fallbacks)})"
-        self.strategy.print(f"[SFT] backend={backend}")
+        clip_norm = max_norm if max_norm and max_norm > 0 else None
+        raw_model = model.model
+        self.engine = Engine(
+            raw_model,
+            device=next(raw_model.parameters()).device,
+            mesh_context=MeshContext.from_meshes(strategy.device_mesh, strategy.moe_mesh),
+            microbatch_size=1,
+            collate_fn=collate_prebatched,
+            padding_token_id=getattr(getattr(raw_model, "config", None), "pad_token_id", None) or 0,
+            defer_fsdp_grad_sync=os.environ.get("MOLT_DEFER_GRAD_SYNC", "1") == "1",
+            optimizers=optim,
+            max_grad_norm=clip_norm,
+        )
+        self.loss_fn = MaskedCrossEntropy(reduction="sum")
+        self.strategy.print("[SFT] backend=engine")
 
         # wandb/tensorboard setting
         self._wandb = None
@@ -177,102 +114,15 @@ class SFTTrainer:
             log_dir = os.path.join(self.strategy.args.logger.tensorboard_dir, strategy.args.logger.wandb.run_name)
             self._tensorboard = SummaryWriter(log_dir=log_dir)
 
-    def _prepare_accum_window(self, accum_window, device):
-        prepared = []
-        local_num_tokens = torch.zeros((), dtype=torch.float32, device=device)
-
-        for inputs, attention_masks, loss_masks, mm_inputs in accum_window:
-            # mm_inputs is {} for text-only batches, populated for VLM batches
-            # (pixel_values, image_grid_thw, ...). Always passed through as
-            # **kwargs to Actor.forward.
-            mm_inputs = {k: v.to(device) if torch.is_tensor(v) else v for k, v in mm_inputs.items()}
-            inputs = inputs.to(device).squeeze(1)
-            attention_mask = attention_masks.to(device).squeeze(1)
-            loss_mask = loss_masks.to(device).squeeze(1)
-
-            # Next-token shift: position t predicts token t+1, so drop the last
-            # (no-next-token) column. The dataset mask is already 1 on a token
-            # iff the *next* token is an assistant reply, so this just trims the
-            # guaranteed-0 tail. Identical for CP and non-CP: under CP the Actor
-            # owns sharding and returns log-probs gathered back to this dense
-            # sequence length, so the loss mask stays on the full sequence here.
-            shifted_loss_mask = loss_mask[:, :-1]
-            # Count tokens on the full (unsharded) sequence. Reduced over DP only
-            # — CP ranks share the sample, so global_token_count (the loss
-            # denominator) must not double count them. The loss-value scale below
-            # is dp_size (correct for the reported/logged mean). The CP gradient
-            # needs no compensation here: Actor.forward gathers log-probs with the
-            # sharder, whose all-gather backward sums grads ×cp_size and cancels
-            # FSDP's mean over dp_cp — see FsdpStrategy.backward.
-            local_num_tokens += shifted_loss_mask.sum()
-            prepared.append((inputs, attention_mask, shifted_loss_mask, mm_inputs))
-
-        batch_num_tokens = self.strategy.global_token_count(local_num_tokens)
-        return prepared, batch_num_tokens
-
-    def _run_microbatch(
-        self, prepared_batch, batch_num_tokens, accum_steps, backward: bool = True, is_last_microbatch: bool = True
-    ):
-        inputs, attention_mask, shifted_loss_mask, mm_inputs = prepared_batch
-        # CP is an Actor-internal detail (same contract as the RL policy actor):
-        # pass the full sequence and let Actor.forward shard it, run the forward,
-        # and gather per-token log-probs back to the dense axis. The CP train
-        # context installs backward hooks, so it must stay alive until
-        # loss.backward() completes — the Actor parks it on this ExitStack and we
-        # close it right after backward below.
-        cp_context_stack = ExitStack() if self.cp_enabled else None
-        output = self.model(
-            inputs,
-            attention_mask=attention_mask,
-            cp_context_stack=cp_context_stack,
-            **mm_inputs,
-        )
-        per_token_log_probs = output["log_probs"]
-
-        aux_loss, aux_loss_log = split_moe_aux_loss(output, self.aux_loss)
-        sft_loss = self.loss_fn(
-            per_token_log_probs,
-            shifted_loss_mask,
-            dp_size=self.strategy.dp_size,
-            batch_num_tokens=batch_num_tokens,
-        )
-        aux_term = aux_loss * self.args.model.aux_loss_coef / accum_steps
-        loss = sft_loss + aux_term
-        try:
-            if backward:
-                self.strategy.backward(
-                    loss,
-                    self.model,
-                    self.optimizer,
-                    scale_loss_by_accumulation=False,
-                    # Defer the grad reduce-scatter to the last microbatch (= the
-                    # optimizer-step boundary) when enabled; else sync every microbatch.
-                    sync_gradients=(is_last_microbatch if self._defer_grad_sync else True),
-                )
-        finally:
-            # The CP train context must cover the whole forward+backward; close it
-            # only now (eval has no backward but still entered the context).
-            if cp_context_stack is not None:
-                cp_context_stack.close()
-        if backward:
-            self.strategy.optimizer_step(self.optimizer, self.model, self.scheduler)
-
-        # Reported loss is a plain per-token mean, decoupled from the gradient
-        # normalization: `sft_loss` is divided by the WHOLE window's token count, so on
-        # its own it is a 1/accum_steps fraction, not a loss. Same reporting contract as
-        # PolicyLoss on the RL side; the window aggregate is returned separately below.
-        logs_dict = {"sft_loss": masked_mean(-per_token_log_probs.detach(), shifted_loss_mask, dim=None).item()}
-        if backward:
-            logs_dict["lr"] = self.scheduler.get_last_lr()[0]
-            logs_dict["grad_norm"] = self.strategy.get_grad_norm(self.model)
-        if self.aux_loss:
-            logs_dict["aux_loss"] = aux_loss_log.item() if torch.is_tensor(aux_loss_log) else float(aux_loss_log)
-        return logs_dict, sft_loss.detach().item()
+    def _engine_loss(self, output, loss_inputs):
+        if not torch.is_tensor(output):
+            output = output["logits"] if isinstance(output, dict) else output.logits
+        return self.loss_fn(output, loss_inputs["labels"])
 
     def fit(self, args, consumed_samples=0, num_update_steps_per_epoch=None):
         # Infer num_update_steps_per_epoch from dataloader if not provided
         if num_update_steps_per_epoch is None:
-            num_update_steps_per_epoch = len(self.train_dataloader)
+            num_update_steps_per_epoch = len(self.train_dataloader) // self.strategy.accumulated_gradient
         if num_update_steps_per_epoch <= 0:
             raise ValueError(
                 f"num_update_steps_per_epoch must be positive, got {num_update_steps_per_epoch}. "
@@ -285,11 +135,9 @@ class SFTTrainer:
         if args.ckpt.save_steps == -1:
             args.ckpt.save_steps = float("inf")  # do not save ckpt
 
-        # Restore step and start_epoch
-        # step is 1-indexed: the logging check (step % accum_grad == 0) fires at multiples of accum_grad,
-        # so +1 ensures we don't re-log the last completed global_step on resume.
-        step = consumed_samples // args.train.batch_size * self.strategy.accumulated_gradient + 1
-        start_epoch = consumed_samples // args.train.batch_size // num_update_steps_per_epoch
+        # Restore the completed optimizer-step count and epoch boundary.
+        completed_steps = consumed_samples // args.train.batch_size
+        start_epoch = completed_steps // num_update_steps_per_epoch
         consumed_samples = consumed_samples % (num_update_steps_per_epoch * args.train.batch_size)
 
         epoch_bar = tqdm(
@@ -297,24 +145,6 @@ class SFTTrainer:
             desc="Train epoch",
             disable=not self.strategy.is_rank_0(),
         )
-        loss_sum = 0
-        if self.engine is not None:
-            from nemo_automodel.components.datasets.datum import Datum, LossInputLayout
-
-            def engine_loss(model_output, loss_inputs):
-                """Return masked token NLL in the Engine's local token layout.
-
-                ``model_output`` logits have shape ``[batch, local_sequence,
-                vocab]``.
-                ``target_tokens`` and ``weights`` have matching
-                ``[batch, local_sequence]`` leading dimensions. The returned
-                tensor has that same token layout.
-                """
-                logits = model_output if torch.is_tensor(model_output) else model_output["logits"]
-                targets = loss_inputs["target_tokens"]
-                log_probs = log_probs_from_logits(logits, targets)
-                return torch.where(loss_inputs["weights"].bool(), -log_probs, 0.0)
-
         for epoch in range(start_epoch, self.epochs):
             if isinstance(self.train_dataloader.sampler, DistributedSampler):
                 self.train_dataloader.sampler.set_epoch(
@@ -329,7 +159,6 @@ class SFTTrainer:
 
             # train
             self.model.train()
-            device = next(self.model.parameters()).device
             accum_window = []
             accum_steps = self.strategy.accumulated_gradient
             for batch in self.train_dataloader:
@@ -337,91 +166,27 @@ class SFTTrainer:
                 if len(accum_window) < accum_steps:
                     continue
 
-                if self.engine is not None:
-                    datums = []
-                    for inputs, attention_masks, loss_masks, mm_inputs in accum_window:
-                        if mm_inputs:
-                            raise RuntimeError("SFT Engine text path received multimodal inputs")
-                        inputs = inputs.to(device).squeeze(1)
-                        attention_mask = attention_masks.to(device).squeeze(1)
-                        position_ids = attention_mask.long().cumsum(-1) - 1
-                        position_ids.masked_fill_(attention_mask == 0, 1)
-                        weights = loss_masks.to(device).squeeze(1).clone()
-                        weights[:, -1] = 0
-                        datums.append(
-                            Datum(
-                                model_inputs={
-                                    "input_ids": inputs,
-                                    "attention_mask": attention_mask,
-                                    "position_ids": position_ids,
-                                },
-                                loss_fn_inputs={
-                                    "target_tokens": torch.roll(inputs, shifts=-1, dims=-1),
-                                    "weights": weights,
-                                },
-                                loss_fn_input_layouts={
-                                    "target_tokens": LossInputLayout.PER_TOKEN,
-                                    "weights": LossInputLayout.PER_TOKEN,
-                                },
-                            )
-                        )
-                    accum_window = []
+                window_size = len(accum_window)
+                result = self.engine.forward_backward(accum_window, self._engine_loss)
+                self.strategy._maybe_debug_grad_stats(self.model, "model")
+                optim_result = self.engine.optim_step()
+                self.scheduler.step()
 
-                    result = self.engine.forward_backward(datums, engine_loss)
-                    self.strategy._maybe_debug_grad_stats(self.model, "model")
-                    optim_result = self.engine.optim_step()
-                    # Transformers schedulers interpret step(1) as an absolute
-                    # epoch, unlike AutoModel's increment-based scheduler.
-                    self.scheduler.step()
-
-                    logs_dict = {
-                        "sft_loss": result.loss.item(),
-                        "lr": self.scheduler.get_last_lr()[0],
-                        "grad_norm": float(optim_result.grad_norm),
-                    }
-                    step_bar.set_postfix(logs_dict)
-                    step_bar.update(len(datums))
-
-                    step += len(datums) - 1
-                    global_step = step // self.strategy.accumulated_gradient
-                    client_states = {"consumed_samples": global_step * args.train.batch_size}
-                    self.save_logs_and_checkpoints(args, global_step, step_bar, logs_dict, client_states)
-                    step += 1
-                    continue
-
-                prepared, batch_num_tokens = self._prepare_accum_window(accum_window, device)
+                logs_dict = {
+                    "sft_loss": result.loss.item(),
+                    "lr": self.engine.optimizers[0].param_groups[0]["lr"],
+                    "grad_norm": float(optim_result.grad_norm),
+                }
+                step_bar.set_postfix(logs_dict)
+                step_bar.update(window_size)
                 accum_window = []
 
-                for mb_idx, prepared_batch in enumerate(prepared):
-                    # Last microbatch of the window = the optimizer-step boundary, so it
-                    # carries the deferred grad reduce-scatter (when MOLT_DEFER_GRAD_SYNC=1).
-                    is_last_microbatch = mb_idx == len(prepared) - 1
-                    logs_dict, window_frac = self._run_microbatch(
-                        prepared_batch, batch_num_tokens, accum_steps, is_last_microbatch=is_last_microbatch
-                    )
-                    # logs_dict["sft_loss"] is this microbatch's own per-token mean (live in the
-                    # bar); window_frac carries the whole window's token denominator, so only the
-                    # sum over the window is a per-token mean — that sum is the step metric, the
-                    # same quantity AutoModel's train_ft reports as "loss". Reduce it once here.
-                    loss_sum += window_frac
-                    logs_dict = self.strategy.all_reduce(logs_dict)
-                    step_bar.set_postfix(logs_dict)
-                    step_bar.update()
+                completed_steps += 1
+                global_step = completed_steps
+                client_states = {"consumed_samples": global_step * args.train.batch_size}
+                self.save_logs_and_checkpoints(args, global_step, step_bar, logs_dict, client_states)
 
-                    # logs/checkpoints/evaluation
-                    if step % self.strategy.accumulated_gradient == 0:
-                        logs_dict["sft_loss"] = self.strategy.all_reduce(loss_sum)
-                        loss_sum = 0
-                        global_step = step // self.strategy.accumulated_gradient
-                        client_states = {"consumed_samples": global_step * args.train.batch_size}
-                        self.save_logs_and_checkpoints(args, global_step, step_bar, logs_dict, client_states)
-
-                    step += 1
-
-            # Drop the trailing partial window: running its microbatches would
-            # accumulate grads without reaching optimizer_step (step never hits
-            # the modulus), then leak those grads into the next epoch's
-            # first window — permanently misaligning the accum counter.
+            # Preserve the configured optimizer-window boundary across epochs.
             if accum_window:
                 self.strategy.print(
                     f"[SFT] dropping {len(accum_window)} trailing microbatches "
@@ -464,7 +229,7 @@ class SFTTrainer:
                 args.ckpt.dcp_max_num,
                 args.ckpt.max_mem,
                 client_states,
-                optimizer=self.optimizer,
+                optimizer=self.engine.optimizers[0],
                 scheduler=self.scheduler,
             )
             if self.save_hf_ckpt:
@@ -474,36 +239,32 @@ class SFTTrainer:
 
     def evaluate(self, eval_dataloader, steps=0):
         self.model.eval()
-        with torch.no_grad():
-            loss_sum = 0
-            token_sum = 0
-            last_logs = {}
+        try:
+            loss_sum = None
+            token_sum = None
             step_bar = tqdm(
                 range(eval_dataloader.__len__()),
                 desc="Eval stage of steps %d" % steps,
                 disable=not self.strategy.is_rank_0(),
             )
 
-            device = next(self.model.parameters()).device
-            for batch in eval_dataloader:
-                prepared, batch_num_tokens = self._prepare_accum_window([batch], device)
-                _, batch_frac = self._run_microbatch(
-                    prepared[0],
-                    batch_num_tokens,
-                    accum_steps=1,
-                    backward=False,
-                )
-                # Token-weighted accumulation (NeMo-RL's val_loss convention): a
-                # per-batch mean weighs a 5-token batch like a 5000-token one, so
-                # eval would drift from the train loss on heterogeneous reply
-                # lengths. Weighting by the batch token count makes the final
-                # value the exact global token mean after the DP all-reduce.
-                loss_sum += batch_frac * batch_num_tokens
-                token_sum += batch_num_tokens
-                bar_dict = {"eval sft_loss": loss_sum / token_sum}
-                step_bar.update()
-                last_logs = self.strategy.all_reduce(bar_dict)
-                step_bar.set_postfix(last_logs)
+            with torch.no_grad():
+                for batch in eval_dataloader:
+                    result = self.engine.forward([batch], self._engine_loss)
+                    batch_loss_sum = result.loss_sum
+                    batch_token_sum = result.weight_sum
+                    loss_sum = batch_loss_sum if loss_sum is None else loss_sum + batch_loss_sum
+                    token_sum = batch_token_sum if token_sum is None else token_sum + batch_token_sum
+                    step_bar.update()
+                    step_bar.set_postfix({"eval sft_loss": (batch_loss_sum / batch_token_sum.clamp_min(1)).item()})
+
+            if loss_sum is None or token_sum is None:
+                raise ValueError("evaluation dataloader produced no batches")
+            loss_sum, token_sum = self.strategy.all_reduce(torch.stack((loss_sum, token_sum)), op="sum")
+            if token_sum.item() <= 0:
+                raise ValueError("evaluation produced no supervised tokens")
+            last_logs = {"eval sft_loss": (loss_sum / token_sum).item()}
+            step_bar.set_postfix(last_logs)
 
             if self.strategy.is_rank_0():
                 if self._wandb is not None:
@@ -512,4 +273,5 @@ class SFTTrainer:
                 elif self._tensorboard is not None:
                     for k, v in last_logs.items():
                         self._tensorboard.add_scalar(f"eval/{k}", v, steps)
-        self.model.train()  # reset model state
+        finally:
+            self.model.train()

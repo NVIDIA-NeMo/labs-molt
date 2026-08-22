@@ -21,6 +21,7 @@ import os
 from typing import Callable, Dict, List, Optional
 
 import torch
+from nemo_automodel.components.datasets.datum import Datum, LossInputLayout
 from torch.utils.data import Dataset
 
 from molt.utils.logging_utils import init_logger
@@ -28,6 +29,17 @@ from molt.utils.utils import zero_pad_sequences
 from molt.utils.vlm_utils import should_expand_image_placeholder, split_image_placeholder
 
 logger = init_logger(__name__)
+
+
+class _SFTDatum(Datum):
+    """Keep DataLoader pinning after SFT collation moves into a Datum."""
+
+    def pin_memory(self):
+        for values in (self.model_inputs, self.loss_fn_inputs):
+            for name, value in values.items():
+                if torch.is_tensor(value):
+                    values[name] = value.pin_memory()
+        return self
 
 
 def _find_all(ids: List[int], pattern: List[int]) -> List[int]:
@@ -329,11 +341,30 @@ class SFTDataset(Dataset):
     # ------------------------------------------------------------------
     def collate_fn(self, items):
         input_ids, attention_mask, loss_mask, mm_inputs = zip(*items)
-        return (
-            zero_pad_sequences(list(input_ids), "right", self.pad_token_id),
-            zero_pad_sequences(list(attention_mask), "right"),
-            zero_pad_sequences(list(loss_mask), "right"),
-            self._stack_mm_inputs(mm_inputs),
+        input_ids = zero_pad_sequences(list(input_ids), "right", self.pad_token_id).squeeze(1)
+        attention_mask = zero_pad_sequences(list(attention_mask), "right").squeeze(1)
+        loss_mask = zero_pad_sequences(list(loss_mask), "right").squeeze(1)
+
+        labels = input_ids[:, 1:].clone()
+        labels.masked_fill_(loss_mask[:, :-1] == 0, -100)
+        input_ids = input_ids[:, :-1]
+        attention_mask = attention_mask[:, :-1]
+        position_ids = attention_mask.long().cumsum(-1) - 1
+        position_ids.masked_fill_(attention_mask == 0, 1)
+
+        model_inputs = {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+            "position_ids": position_ids,
+        }
+        model_inputs.update(self._stack_mm_inputs(mm_inputs))
+        return _SFTDatum(
+            model_inputs=model_inputs,
+            loss_fn_inputs={"labels": labels, "weights": labels.ne(-100)},
+            loss_fn_input_layouts={
+                "labels": LossInputLayout.PER_TOKEN,
+                "weights": LossInputLayout.PER_TOKEN,
+            },
         )
 
     @staticmethod

@@ -134,7 +134,6 @@ def train(args):
         eval_dataloader=eval_dataloader,
         scheduler=scheduler,
         max_norm=args.max_norm,
-        batch_size=args.train.batch_size,
         max_epochs=args.train.max_epochs,
         tokenizer=tokenizer,
         save_hf_ckpt=args.ckpt.save_hf,
@@ -258,19 +257,23 @@ if __name__ == "__main__":
     if not args.data.dataset:
         raise ValueError("--data.dataset is required")
 
-    # --- Parallelism / FSDP ---
-    if args.fsdp.pp_size > 1:
-        raise NotImplementedError("Molt trainers are not pipeline-parallel aware yet; set --fsdp.pp_size 1")
-
-    if args.data.image_key and args.fsdp.packing_samples:
-        raise ValueError(
-            "VLM SFT does not support --fsdp.packing_samples (packing is text-only here); "
-            "use --fsdp.cp_size with AutoModel TE native CP for long VLM sequences instead."
-        )
-
-    if args.fsdp.packing_samples and args.fsdp.attn_implementation not in {"te", "flash_attention_2", "tilelang"}:
-        raise ValueError(
-            "--fsdp.packing_samples requires --fsdp.attn_implementation te, flash_attention_2, or tilelang."
+    # --- Engine-only SFT boundary ---
+    unsupported = []
+    if args.data.image_key or args.model.freeze_visual_encoder:
+        unsupported.append("VLM input preparation")
+    if args.fsdp.packing_samples:
+        unsupported.append("packed input preparation")
+    if args.fsdp.offload != "none":
+        unsupported.append("CPU optimizer mutation")
+    if any(getattr(args.fsdp, name) != 1 for name in ("tp_size", "cp_size", "ep_size", "pp_size")):
+        unsupported.append("model parallelism")
+    if args.fsdp.sequence_parallel:
+        unsupported.append("sequence parallelism")
+    if abs(args.model.aux_loss_coef) > 1e-8:
+        unsupported.append("auxiliary-loss reporting")
+    if unsupported:
+        raise NotImplementedError(
+            "Engine-only SFT does not yet support " + ", ".join(unsupported) + ". No legacy fallback remains."
         )
 
     # --- Runtime ---

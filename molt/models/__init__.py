@@ -19,7 +19,6 @@ from .actor import Actor
 from .critic import Critic
 from .loss import (
     PolicyLoss,
-    SFTLoss,
     ValueLoss,
     agg_loss,
 )
@@ -27,7 +26,6 @@ from .loss import (
 __all__ = [
     "Actor",
     "Critic",
-    "SFTLoss",
     "PolicyLoss",
     "ValueLoss",
     "agg_loss",

@@ -1,77 +1,80 @@
-{/*
+<!--
 SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
-*/}
+-->
 
 # AutoModel Engine integration
 
-This branch exercises AutoModel's Datum Engine on the dense text SFT path. It
-is deliberately a vertical slice: unsupported configurations continue through
-Molt's existing trainer and print the reason at startup.
+SFT execution is Engine-only on this branch. Molt no longer has a second SFT
+implementation for global token normalization, backward, FSDP synchronization,
+gradient clipping, optimizer updates, or gradient clearing.
 
 ## Execution boundary
 
-Molt passes the distributed backbone (`Actor.model`) to `Engine`, not the
-outer `Actor`. The outer wrapper already owns packing and context-parallel
-sharding; passing it to Engine would repeat those transformations and would
-hide model post-step capabilities such as MoE gate updates.
-
-Each existing dataloader microbatch becomes one prebatched Datum:
+`SFTDataset.collate_fn` emits one prebatched AutoModel `Datum` per dataloader
+batch. No trainer-side batch conversion remains.
 
 | Field | Layout |
 | --- | --- |
-| `input_ids`, `attention_mask`, `position_ids` | model input `[batch, sequence]` |
-| `target_tokens` | `PER_TOKEN [batch, sequence]` |
-| `weights` | `PER_TOKEN [batch, sequence]` |
+| `input_ids`, `attention_mask`, `position_ids` | shifted model inputs `[batch, sequence - 1]` |
+| `labels` | `PER_TOKEN` next-token targets; unsupervised positions are `-100` |
+| `weights` | `PER_TOKEN` boolean supervision mask |
 
-`target_tokens` is `input_ids` rolled by one position. `weights` is the SFT
-reply mask with the final position forced to zero, so the rolled wraparound
-never contributes. The loss callback returns masked per-token negative
-log-probabilities; Engine alone owns the DP denominator, backward scaling,
-FSDP synchronization, clipping, optimizer step, and gradient clearing.
+Engine uses `collate_prebatched` and calls Molt's thin
+`MaskedCrossEntropy(reduction="sum")` callback. The complete accumulation
+window maps to one `forward_backward([datum0, datum1, ...])` call and one
+`optim_step()`. Engine owns the global weight denominator, model-parallel loss
+reductions, gradient synchronization, clipping, optimizer update, and
+`zero_grad` lifecycle.
 
-An SFT accumulation window maps directly to one
-`forward_backward([datum0, datum1, ...])` call and one `optim_step`.
+Molt advances its existing Transformers scheduler immediately after a
+successful Engine optimizer step. It is intentionally not passed as an Engine
+scheduler: AutoModel's scheduler uses `step(1)` as an increment, while a
+Transformers scheduler interprets that argument as an absolute epoch.
 
-This keeps Molt's microbatch memory behavior while removing its duplicate
-global-token and gradient-lifecycle math from the integrated path.
-Evaluation continues through the existing Actor path in this prototype.
+Evaluation uses `Engine.forward`, accumulates its loss and weight sums over the
+whole validation dataset, then performs one final data-parallel reduction. It
+does not average batch means or communicate once per validation batch.
 
-The CPU test uses the real Engine and checks unequal/fractional token weights,
-the reported loss, gradient ownership, and the updated parameters against a
-single-window reference. Distributed GPU and checkpoint-resume parity have not
-yet been run for this prototype; model-parallel configurations stay on the
-legacy path until they have that coverage.
+Molt still constructs and distributes `Actor.model` and retains its checkpoint
+cadence, format, retention policy, and consumed-sample counter. Moving model
+construction and checkpoint policy into another backend would also replace
+Molt's generic model fallback and RL-shared strategy setup, so it is outside
+this SFT execution integration.
 
-## Current eligibility
+## Current fail-fast boundary
 
-The Engine path is selected for dense text, non-packed Adam SFT with no CPU
-offload, no model/sequence parallelism, deferred FSDP gradient sync, and no
-explicit auxiliary-loss metric. Other configurations retain the existing
-trainer. This conservative gate keeps shipped VLM, packed, Muon, offload, and
-model-parallel behavior unchanged until each has parity coverage.
+There is no legacy SFT fallback. The CLI rejects these configurations before
+model construction:
 
-## Gaps found during integration
+- VLM/media preparation and visual-encoder configuration;
+- packed samples;
+- optimizer or full CPU offload;
+- TP, CP, EP, PP, or sequence parallelism;
+- explicit auxiliary-loss reporting.
 
-- Molt uses a Transformers scheduler whose `step()` advances once. AutoModel's
-  scheduler contract uses `step(1)` as an increment. Passing the Molt scheduler
-  into Engine would repeatedly select epoch 1, so this slice advances it once
-  immediately after a successful `optim_step`.
-- Source installs are pinned to an AutoModel revision containing Datum Engine.
-  Molt's PyPI build replaces git pins with `nemo-automodel>=0.5.0`, which does
-  not prove that API is present. The lazy import therefore falls back to the
-  legacy trainer until an AutoModel release provides an appropriate version
-  floor.
-- Packed text needs one collater that transforms model inputs, targets, and
-  weights to the same THD layout. `collate_prebatched` cannot silently fulfill
-  the existing packing knob.
-- VLM integration must retain processor media routing and model-specific token
-  type preparation; a text Datum is not a valid substitute.
-- Policy training is not a mechanical SFT replacement. GSPO/geo objectives
-  need full-sequence statistics under CP, while routing replay must cover the
-  CP-prepared forward and activation-checkpoint backward.
-- The critic value head is added after FSDP wrapping and requires Molt's
-  explicit replicated-gradient reduction. Engine must not step it until that
-  head is moved inside the distributed model boundary.
-- Optimizer CPU offload uses `CpuOptimizerOffloader.step`, which Engine does
-  not currently expose as an optimizer mutation hook.
+Muon and `MOLT_DEFER_GRAD_SYNC=0` use the same Engine path: Engine steps the
+already-built optimizer generically and accepts the FSDP synchronization toggle
+directly.
+
+The shared `FsdpStrategy` execution methods remain because policy and critic
+training still call them, the critic still synchronizes a replicated value
+head, and Molt still owns model construction and checkpoints. Removing those
+methods as SFT cleanup would break RL rather than simplify this integration.
+
+## Dependency and validation status
+
+Source and Docker installs pin AutoModel revision `f864aadbe`, which contains
+the current Datum Engine, `forward` evaluation, complete-window accumulation,
+optimizer ownership, prepared-batch contexts, and the latest main-line
+context-parallel implementation.
+Molt's PyPI build still replaces source pins with `nemo-automodel>=0.5.0`; no
+released version floor currently guarantees this API.
+
+CPU tests use the real Engine and cover unequal binary masks, variable right
+padding, shifted labels and position IDs, tensor and model-output logits,
+pre-step gradients, parameter updates, scheduler ordering, validation
+aggregation, and zero-supervision validation. A two-GPU FSDP2 parity smoke with
+rank-asymmetric data and two accumulated microbatches matched the single-model
+reference loss, full gradients, and updated parameters. Checkpoint-resume smoke
+remains required before production adoption.
