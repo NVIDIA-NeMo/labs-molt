@@ -36,18 +36,9 @@ class _Strategy:
     def print(self, *args, **kwargs):
         self.messages.append(" ".join(str(arg) for arg in args))
 
-    def global_token_count(self, mask):
-        raise AssertionError("Engine owns the global loss denominator")
-
     def all_reduce(self, data, op="mean"):
         self.reductions.append((data.detach().clone(), op))
         return data
-
-    def backward(self, *args, **kwargs):
-        raise AssertionError("Engine owns backward")
-
-    def optimizer_step(self, *args, **kwargs):
-        raise AssertionError("Engine owns the optimizer step")
 
     def _maybe_debug_grad_stats(self, model, name):
         self.events.append("debug")
@@ -442,31 +433,3 @@ def test_scheduler_does_not_advance_when_engine_optim_step_fails():
         trainer.fit(_args(batch_size=1), num_update_steps_per_epoch=1)
 
     assert scheduler.step_calls == 0
-
-
-def _bare_strategy(cp_size, accumulated_gradient=1):
-    from molt.trainer.fsdp.strategy import FsdpStrategy
-
-    strategy = FsdpStrategy.__new__(FsdpStrategy)
-    strategy.cp_size = cp_size
-    strategy.accumulated_gradient = accumulated_gradient
-    strategy.dp_size = 1
-    strategy.dp_cp_size = cp_size
-    strategy.moe_mesh = None
-    return strategy
-
-
-def test_rl_strategy_backward_keeps_cp_gradient_scale():
-    model = torch.nn.Linear(1, 1)
-    for cp_size in (1, 2, 4):
-        strategy = _bare_strategy(cp_size)
-        weight = torch.tensor([1.0], requires_grad=True)
-        strategy.backward((weight * 3.0).sum(), model, optimizer=None)
-        assert weight.grad.item() == 3.0
-
-
-def test_rl_strategy_backward_divides_by_accumulated_gradient():
-    strategy = _bare_strategy(cp_size=2, accumulated_gradient=4)
-    weight = torch.tensor([1.0], requires_grad=True)
-    strategy.backward((weight * 3.0).sum(), torch.nn.Linear(1, 1), optimizer=None)
-    assert weight.grad.item() == 3.0 / 4

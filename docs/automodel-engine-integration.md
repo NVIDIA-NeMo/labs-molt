@@ -122,6 +122,12 @@ The legacy `Actor.forward` input-layout code remains only for collection-time
 old/reference log-probability inference. It no longer owns policy backward,
 gradient synchronization, clipping, or optimizer mutation.
 
+With SFT, critic, and policy updates all on Engine, `FsdpStrategy` no longer
+contains its duplicate `backward`, accumulation/sync, clipping,
+`optimizer_step`, or grad-norm cache. It retains topology, optimizer/scheduler
+construction, collectives, checkpointing, refit support, and optional gradient
+debugging.
+
 ## Remaining blockers and retained boundaries
 
 | Boundary | Current behavior | Missing contract |

@@ -328,8 +328,8 @@ class PolicyTrainer:
                 # generated. max_epochs is asserted == 1, so this is one step.
                 accum_steps = max(max_steps, 1)
             elif not dynamic:
-                # Only run complete accumulation windows; partial windows leave
-                # gradients live because optimizer_step() has not stepped yet.
+                # Only run complete accumulation windows; a partial window is not
+                # a valid Engine optimizer transaction.
                 remainder = max_steps % accum_steps
                 if remainder:
                     max_steps -= remainder
