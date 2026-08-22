@@ -52,7 +52,11 @@ def add_fsdp_args(parser) -> None:
         "but breaks Qwen3.6 MoE and slows the forward).",
     )
     parser.add_argument(
-        "--fsdp.param_dtype", type=str, default="bf16", choices=["bf16", "fp16"], help="Model data type"
+        "--fsdp.param_dtype",
+        type=str,
+        default="bf16",
+        choices=["bf16"],
+        help="Training data type. AutoModel Engine supports bf16 only; fp16 loss scaling is not implemented.",
     )
     parser.add_argument(
         "--fsdp.attn_implementation",
