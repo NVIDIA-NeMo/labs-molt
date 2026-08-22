@@ -25,6 +25,9 @@ from types import SimpleNamespace
 
 import numpy as np
 import torch
+from torch import nn
+
+from nemo_automodel.components.moe.router_replay import replay_selection
 
 from molt.agents.base import Trajectory
 from molt.models.base import BaseModel
@@ -138,36 +141,83 @@ def test_make_experience_batch_pads_routed_experts_with_sentinel():
     assert batch.sequences[1, 2].item() == 0  # sequences still pad with 0
 
 
-def test_build_routing_targets_selects_sparse_hybrid_global_layer_ids():
-    # routed_experts is (B, vllm_layers, K, S) seq-last; gate sees B*S tokens row-major.
-    # vLLM sizes the layer dim to num_hidden_layers and indexes it by the GLOBAL
-    # decoder-layer id; a hybrid model's MoE gates sit at sparse ids (e.g. 1, 3, 6)
-    # with non-MoE rows in between. _build_routing_targets must pick each gate's own
-    # global-id row — NOT the first n_gates rows (which would grab Mamba/attention).
+def test_base_model_replays_routes_through_automodel_adapter():
+    class ReplayGate(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.topk = K
+            self.n_experts = 8
+            self.router_replay = None
+
+        def forward(self, live_indices):
+            return replay_selection(self.router_replay, live_indices)
+
+    class ReplayBlock(nn.Module):
+        def __init__(self, layer_idx, routed):
+            super().__init__()
+            self.layer_idx = layer_idx
+            if routed:
+                self.gate = ReplayGate()
+            else:
+                self.mlp = nn.Identity()
+
+    class ReplayDecoder(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.layers = nn.ModuleDict({str(i): ReplayBlock(i, routed=i == 1) for i in range(L)})
+
+    class ReplayModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.model = ReplayDecoder()
+            self.selected = None
+
+        def forward(self, input_ids, **_kwargs):
+            live = torch.tensor([[0, 1]], device=input_ids.device).expand(input_ids.numel(), -1)
+            self.selected = self.model.layers["1"].gate(live)
+            return input_ids.float()
+
+    model = ReplayModel()
+    wrapped = BaseModel(model, routing_replay=True)
+    routed = torch.full((1, L, K, 3), -1, dtype=torch.int16)
+    routed[0, 1] = torch.tensor([[2, 4, 6], [3, 5, 7]], dtype=torch.int16)
+
+    wrapped._forward_backbone(
+        torch.tensor([[10, 11, 12]]),
+        torch.ones(1, 3, dtype=torch.long),
+        position_ids=None,
+        cp_context_stack=None,
+        mm_inputs={},
+        routed_experts=routed,
+    )
+
+    assert wrapped._routing_replay_adapter.layer_ids == (1,)
+    assert torch.equal(model.selected, torch.tensor([[2, 3], [4, 5], [6, 7]]))
+
+
+def test_prepare_routed_experts_keeps_global_layer_axis_for_adapter():
+    # AutoModel's adapter, not Molt, owns sparse global-layer selection. Molt keeps
+    # all vLLM layer rows while converting sequence-last to token-aligned layout.
     B, S = 2, 3
-    vllm_layers = 8  # hybrid backbone: more layers than MoE gates
-    global_ids = [1, 3, 6]  # the MoE gates' global decoder-layer ids
+    vllm_layers = 8
     routed = torch.zeros(B, vllm_layers, K, S, dtype=torch.int16)
     for b in range(B):
         for layer in range(vllm_layers):
             for t in range(S):
                 routed[b, layer, 0, t] = 100 * b + 10 * layer + t
 
-    stub = SimpleNamespace(packing_samples=False, _num_routing_gates=len(global_ids), _moe_layer_global_ids=global_ids)
-    targets = BaseModel._build_routing_targets(stub, routed, indices=None, cp_forward=False)
+    adapter = SimpleNamespace(prepare_routed_experts=lambda value: value.permute(0, 3, 1, 2).contiguous())
+    stub = SimpleNamespace(packing_samples=False, _routing_replay_adapter=adapter)
+    prepared = BaseModel._prepare_routed_experts(stub, routed, indices=None, cp_forward=False)
 
-    assert len(targets) == len(global_ids)
-    for i, gid in enumerate(global_ids):
-        assert targets[i].shape == (B * S, K)
-        # gate i replays its global-layer gid row (not row i); token order row-major B*S
-        expected = [100 * (tok // S) + 10 * gid + (tok % S) for tok in range(B * S)]
-        assert targets[i][:, 0].tolist() == expected
+    assert prepared.shape == (B, S, vllm_layers, K)
+    for b in range(B):
+        for layer in range(vllm_layers):
+            assert prepared[b, :, layer, 0].tolist() == [100 * b + 10 * layer + t for t in range(S)]
 
 
-def test_build_routing_targets_cp_delegates_to_sharder():
-    # Under CP the head-tail shard is owned by the AutoModel sharder; _build_routing_targets
-    # just hands it the routing (seq_dim=3, -1 fill so CP pad tokens keep live routing) and
-    # gate-selects on the returned local shard exactly like the non-CP path. The stub sharder
+def test_prepare_routed_experts_cp_delegates_to_sharder():
+    # Under CP the head-tail shard is owned by the AutoModel sharder. The stub sharder
     # emulates rank 0 of cp=2 (head chunk [0] + mirrored tail chunk [3] of a length-4 seq).
     S = 4
     routed = torch.zeros(1, L, K, S, dtype=torch.int16)
@@ -183,20 +233,20 @@ def test_build_routing_targets_cp_delegates_to_sharder():
 
     stub = SimpleNamespace(
         packing_samples=False,
-        _num_routing_gates=L,
-        _moe_layer_global_ids=list(range(L)),
+        _routing_replay_adapter=SimpleNamespace(
+            prepare_routed_experts=lambda value: value.permute(0, 3, 1, 2).contiguous()
+        ),
         _cp_sharder=SimpleNamespace(shard_token_tensor=_shard),
     )
-    targets = BaseModel._build_routing_targets(stub, routed, indices=None, cp_forward=True)
+    prepared = BaseModel._prepare_routed_experts(stub, routed, indices=None, cp_forward=True)
 
-    assert calls == {"seq_dim": 3, "fill": -1}  # -1 fill keeps CP pad tokens on live routing
-    assert len(targets) == L
+    assert calls == {"seq_dim": 1, "fill": -1}
+    assert prepared.shape == (1, 2, L, K)
     for layer in range(L):
-        assert targets[layer].shape == (2, K)  # this rank's local tokens
-        assert targets[layer][:, 0].tolist() == [10 * layer + 0, 10 * layer + 3]  # head[0] + tail[3]
+        assert prepared[0, :, layer, 0].tolist() == [10 * layer + 0, 10 * layer + 3]
 
 
-def test_build_routing_targets_preserves_minus_one_sentinel():
+def test_prepare_routed_experts_preserves_minus_one_sentinel():
     # vLLM returns routing only for generated tokens, so prompt / feedback positions
     # carry a -1 sentinel; the reshape must preserve it (RouterReplay keeps the live
     # selection there and replays only the captured response rows). Token 0 = prompt.
@@ -207,29 +257,31 @@ def test_build_routing_targets_preserves_minus_one_sentinel():
         for t in range(1, S):
             routed[0, layer, 0, t] = 10 * layer + t
 
-    stub = SimpleNamespace(packing_samples=False, _num_routing_gates=L, _moe_layer_global_ids=list(range(L)))
-    targets = BaseModel._build_routing_targets(stub, routed, indices=None, cp_forward=False)
+    adapter = SimpleNamespace(prepare_routed_experts=lambda value: value.permute(0, 3, 1, 2).contiguous())
+    stub = SimpleNamespace(packing_samples=False, _routing_replay_adapter=adapter)
+    prepared = BaseModel._prepare_routed_experts(stub, routed, indices=None, cp_forward=False)
 
     for layer in range(L):
-        assert (targets[layer][0] == -1).all()  # prompt row stays sentinel -> live routing
-        assert targets[layer][1:, 0].tolist() == [10 * layer + 1, 10 * layer + 2]
+        assert (prepared[0, 0, layer] == -1).all()
+        assert prepared[0, 1:, layer, 0].tolist() == [10 * layer + 1, 10 * layer + 2]
 
 
-def test_build_routing_targets_pads_hybridep_suffix_with_valid_masked_expert():
+def test_prepare_routed_experts_pads_hybridep_suffix_with_valid_masked_expert():
     routed = torch.zeros(1, L, K, 3, dtype=torch.int16)
     for layer in range(L):
         routed[0, layer, 0] = torch.tensor([10 * layer, 10 * layer + 1, 10 * layer + 2])
 
-    stub = SimpleNamespace(packing_samples=True, _num_routing_gates=L, _moe_layer_global_ids=list(range(L)))
+    adapter = SimpleNamespace(prepare_routed_experts=lambda value: value.permute(0, 3, 1, 2).contiguous())
+    stub = SimpleNamespace(packing_samples=True, _routing_replay_adapter=adapter)
     # Only tokens 0 and 1 are real on this rank; HybridEP equalizes it to four.
-    targets = BaseModel._build_routing_targets(
+    prepared = BaseModel._prepare_routed_experts(
         stub, routed, indices=torch.tensor([0, 1]), cp_forward=False, pad_to_tokens=4
     )
 
     for layer in range(L):
-        assert targets[layer].shape == (4, K)
-        assert targets[layer][:2, 0].tolist() == [10 * layer, 10 * layer + 1]
-        assert (targets[layer][2:] == 0).all()
+        assert prepared.shape == (1, 4, L, K)
+        assert prepared[0, :2, layer, 0].tolist() == [10 * layer, 10 * layer + 1]
+        assert (prepared[0, 2:, layer] == 0).all()
 
 
 def test_make_experience_batch_mixed_none_routed_experts():
