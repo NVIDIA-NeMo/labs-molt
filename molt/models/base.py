@@ -261,6 +261,8 @@ class BaseModel(nn.Module):
         use_fp32_master_weights: bool = True,
         moe_aux_loss_coef: float = 0.0,
         routing_replay: bool = False,
+        pre_fsdp_hook=None,
+        skip_task_head_prefixes_for_base_model=None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -286,6 +288,11 @@ class BaseModel(nn.Module):
         self.cp_size = cp_mesh.size() if cp_mesh is not None else 1
 
         if not isinstance(pretrain_or_model, str):
+            if pre_fsdp_hook is not None or skip_task_head_prefixes_for_base_model is not None:
+                raise ValueError(
+                    "pre_fsdp_hook and skip_task_head_prefixes_for_base_model require loading the model "
+                    "through NeMoAutoModel"
+                )
             self.model = pretrain_or_model
             self.is_vlm = False
             self._packing_style = "automodel" if is_automodel_custom_model(self.model) else "hf"
@@ -441,6 +448,8 @@ class BaseModel(nn.Module):
             use_liger_kernel=False,
             has_packed_sequence=packing_samples,
             force_hf=False,
+            pre_fsdp_hook=pre_fsdp_hook,
+            skip_task_head_prefixes_for_base_model=skip_task_head_prefixes_for_base_model,
             freeze_config={"freeze_vision_tower": True} if freeze_visual_encoder else None,
             # Disable the MTP head via AutoModel's config-override deep-merge (see
             # _mtp_off_kwargs); no-op without MTP.

@@ -487,30 +487,6 @@ class FsdpStrategy:
         if self._optimizer_offloader is not None:
             self._optimizer_offloader.moments_to_cpu(optimizer)
 
-    def sync_replicated_grads(self, params) -> None:
-        """Mean-all-reduce gradients of replicated (non-FSDP-wrapped) params over the
-        data-parallel(+CP) group.
-
-        FSDP2 only reduces grads of params inside its wrapped modules; a module added
-        after wrapping (e.g. the critic's scalar value head) is replicated with a local
-        grad per rank, so it must be averaged over the same ``dp_cp`` group FSDP uses.
-        Call right before ``optimizer_step``. Assumes a flat DP mesh (no HSDP/
-        ``dp_replicate``); if HSDP is added, ``dp_cp`` must still span the full
-        replicate × shard × cp set.
-        """
-        group = self._get_dp_group(include_cp=True)
-        if group is None:
-            return
-        world = dist.get_world_size(group=group)
-        if world == 1:
-            return
-        for p in params:
-            if p.grad is None:
-                continue
-            grad = local_shard(p.grad)
-            dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=group)
-            grad.div_(world)
-
     def get_grad_norm(self, model: nn.Module) -> float:
         return self._last_grad_norm
 

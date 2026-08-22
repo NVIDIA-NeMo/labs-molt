@@ -73,10 +73,26 @@ Muon and `MOLT_DEFER_GRAD_SYNC=0` use the same Engine path: Engine steps the
 already-built optimizer generically and accepts the FSDP synchronization toggle
 directly.
 
-The shared `FsdpStrategy` execution methods remain because policy and critic
-training still call them, the critic still synchronizes a replicated value
-head, and Molt still owns model construction and checkpoints. Removing those
-methods as SFT cleanup would break RL rather than simplify this integration.
+## PPO critic
+
+Critic optimization is also Engine-only. Molt converts each replay-buffer
+microbatch into one prebatched Datum and provides only the clipped value-loss
+callback. Engine returns the detached token values in their original CP/THD
+coordinates for Molt's epoch-level metrics. The value projection is installed
+through AutoModel's `pre_fsdp_hook`, before parameter discovery and FSDP wrap;
+the old replicated-head broadcast and manual DP gradient all-reduce have been
+deleted.
+
+The current AutoModel structure-hook contract limits critic construction to
+unquantized, non-PEFT `tp=cp=ep=pp=1` models. Molt reports the active unsupported
+axis before loading the critic instead of silently restoring the external-head
+path. Critic CPU optimizer/full offload, Hugging Face fallback THD packing, and
+RL VLM packing also fail explicitly. The existing Transformers scheduler remains
+Molt-owned for the same `step()` versus `step(1)` protocol reason as SFT.
+
+The shared `FsdpStrategy` execution methods remain while policy optimization is
+still being migrated and because Molt continues to own model construction and
+checkpoints.
 
 ## Dependency and validation status
 

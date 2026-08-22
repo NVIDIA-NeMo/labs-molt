@@ -26,7 +26,6 @@ one-wide is what turns that tensor into the per-token value directly.
 from typing import Optional
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 
 from molt.trainer.fsdp.packing import unshard_dtensor
@@ -48,10 +47,10 @@ class _ValueHead(nn.Module):
       ``to_local()`` would have silently used only this rank's shard.
 
     This mirrors the actor's ``unshard_dtensor(logits)`` (it collapses only the TP
-    dim; CP sequence sharding is restored later by ``_restore_full_sequence``). The
-    head stays a plain replicated module, so its weight gradient is a plain tensor the
-    critic trainer DP-all-reduces — not a DTensor grad on a plain param the
-    optimizer / grad-clip would mishandle. No-op at TP=1 (input already plain).
+    dim; CP sequence sharding is restored later by ``_restore_full_sequence``).
+    AutoModel installs this head before FSDP, so its parameters participate in the
+    same reduction, clipping, optimizer, and checkpoint lifecycle as the backbone.
+    ``unshard_dtensor`` is a no-op at TP=1 (input already plain).
     """
 
     def __init__(self, hidden_size: int):
@@ -87,56 +86,62 @@ def _resolve_hidden_size(model) -> int:
     return int(getattr(emb, "embedding_dim", None) or emb.weight.shape[-1])
 
 
+def _install_value_head(model) -> None:
+    """Replace ``model``'s task head in place before AutoModel applies FSDP."""
+
+    value_head = _ValueHead(_resolve_hidden_size(model))
+    # A load-before-shard model is already materialized, so initialize its fresh
+    # head explicitly. Meta heads are initialized by AutoModel after sharding.
+    if value_head.proj.weight.device.type != "meta":
+        # HF's standard fresh-head initialization keeps |V| ~ O(1), so the
+        # backbone learns immediately and --critic.max_norm bounds its gradient.
+        nn.init.normal_(value_head.proj.weight, mean=0.0, std=getattr(model.config, "initializer_range", 0.02))
+    # The value head is NOT tied to the vocabulary embeddings. Keeping this flag
+    # set would make checkpoint export deduplicate or later re-tie incompatible
+    # [1,H] and [vocab,H] tensors.
+    for cfg in (model.config, getattr(model.config, "text_config", None)):
+        if cfg is not None:
+            cfg.tie_word_embeddings = False
+    if hasattr(model, "set_output_embeddings"):
+        model.set_output_embeddings(value_head)
+    else:
+        model.lm_head = value_head
+
+
 class Critic(BaseModel):
     """``BaseModel`` with the vocab head swapped for a scalar value head.
 
-    ``__init__`` builds the model exactly like ``Actor`` (same parallelism), then
-    replaces the vocab projection with ``Linear(hidden, 1)``. ``forward`` reuses the
-    shared ``_forward_backbone`` and reads the one-wide head output as V(s).
-
-    The value head is a plain (replicated) module added *after* ``from_pretrained``'s
-    FSDP wrap — a head defined inside the model would be initialized and sharded
-    uniformly, but ours is initialized independently on each rank. We therefore
-    broadcast rank 0's weights to all ranks so the replica is identical, and the
-    critic trainer all-reduces its gradient across the DP group each step (see
-    ``value_head_parameters`` + ``FsdpStrategy.sync_replicated_grads``). Under TP/EP
-    the head sees the (replicated) post-norm hidden state and ``_ValueHead`` localizes
-    it, so the head stays plain and its grad needs no TP/EP reduction (identical on
-    those ranks); only the DP(+CP) reduction matters and is done by the trainer.
+    For checkpoint-backed construction the vocabulary projection is replaced in
+    AutoModel's ``pre_fsdp_hook``. The scalar head is consequently part of the model
+    before FSDP discovers parameters, so normal FSDP gradient reduction, clipping,
+    checkpointing, and optimizer handling all include it.
     """
 
     def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        value_head = _ValueHead(_resolve_hidden_size(self.model))
-        # Value-head init at the model's initializer_range (HF's standard fresh-head init), so
-        # |V| ~ O(1) and the backbone learns from step 1; the pre-clip grad is bounded by --critic.max_norm.
-        nn.init.normal_(value_head.proj.weight, mean=0.0, std=getattr(self.model.config, "initializer_range", 0.02))
-        device = next((p.device for p in self.model.parameters() if p.device.type != "meta"), None)
-        if device is not None:
-            value_head = value_head.to(device)
-        # Unified init: make every rank's replica identical (rank 0 wins). A head
-        # defined inside the model would get this for free (init before FSDP wrap).
-        if dist.is_initialized() and value_head.proj.weight.is_cuda:
-            dist.broadcast(value_head.proj.weight.data, src=0)
-        # The value head is NOT a tied vocab head. Clear tie_word_embeddings so the
-        # checkpointer saves lm_head as its own tensor (a tied head is deduplicated
-        # against the embeddings and would be dropped from the critic checkpoint),
-        # and so nothing later re-ties the [1, hidden] head to the [vocab, hidden]
-        # embeddings. Set it on the text sub-config too for nested VLM models.
-        for cfg in (self.model.config, getattr(self.model.config, "text_config", None)):
-            if cfg is not None and getattr(cfg, "tie_word_embeddings", False):
-                cfg.tie_word_embeddings = False
-        # set_output_embeddings routes to the real head even for nested VLM models
-        # (e.g. language_model.lm_head); fall back to a direct attribute otherwise.
-        if hasattr(self.model, "set_output_embeddings"):
-            self.model.set_output_embeddings(value_head)
+        pretrain_or_model = args[0] if args else kwargs.get("pretrain_or_model")
+        if isinstance(pretrain_or_model, str):
+            if kwargs.get("pre_fsdp_hook") is not None:
+                raise TypeError("Critic owns pre_fsdp_hook; callers must not override it")
+            kwargs["pre_fsdp_hook"] = _install_value_head
+            # These are native runtime FQNs, not checkpoint-export names. The
+            # base-model loader drops whichever path the architecture exposes so
+            # a vocab-shaped checkpoint tensor is never loaded into the new [1,H]
+            # projection. Full DCP critic restores do not apply this filter.
+            kwargs["skip_task_head_prefixes_for_base_model"] = (
+                "lm_head.",
+                "model.lm_head.",
+                "language_model.lm_head.",
+                "thinker.lm_head.",
+                "thinker.model.lm_head.",
+            )
+            super().__init__(*args, **kwargs)
         else:
-            self.model.lm_head = value_head
-        self.value_head = value_head
-
-    def value_head_parameters(self):
-        """Params the critic trainer must DP-all-reduce (FSDP does not cover them)."""
-        return list(self.value_head.parameters())
+            # Preserve the lightweight pre-instantiated-model path used by unit
+            # tests and inference utilities. Such a model has not been built by
+            # this wrapper, so installing the head here does not move a parameter
+            # across an existing AutoModel FSDP boundary.
+            super().__init__(*args, **kwargs)
+            _install_value_head(self.model)
 
     def forward(
         self,

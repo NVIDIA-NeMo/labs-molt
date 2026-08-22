@@ -23,16 +23,14 @@ actor holding the value model, its own optimizer, and its own value-only trainin
 loop. It is colocated on the actor's GPUs by default (shared placement group) but,
 being a separate group, can be disaggregated onto its own GPUs.
 
-The training loop mirrors ``PolicyTrainer``'s window / grad-accumulation /
-global-token-mean contract so the value update is DP-invariant and aligned with the
-actor's batching — the only loss is the clipped value loss (no vLLM sync, entropy,
-or KL). The scalar value head is replicated (not FSDP-wrapped), so its accumulated
-gradient is mean-all-reduced over the DP(+CP) group once, right before the step.
+The training loop converts each replay-buffer microbatch into an AutoModel Datum.
+Engine owns the complete accumulation window, global-token normalization, backward,
+FSDP finalization, clipping, and optimizer update. The scalar value head is installed
+before FSDP and follows the same lifecycle as the backbone.
 """
 
 import os
 import time
-from contextlib import ExitStack
 from typing import Dict
 
 import ray
@@ -41,9 +39,13 @@ from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+from nemo_automodel.components.distributed.mesh import MeshContext
+from nemo_automodel.engine import Engine, LossFnOutputBatch, PerTokenOutput, collate_prebatched
+
 from molt.models import Critic, ValueLoss
 from molt.trainer.algorithm.experience import Experience, get_model_parallel_size
 from molt.trainer.fsdp import FsdpStrategy
+from molt.trainer.fsdp.packing import unshard_dtensor
 from molt.utils import get_tokenizer
 from molt.utils.distributed_util import torch_dist_barrier_and_cuda_sync
 from molt.utils.logging_utils import init_logger
@@ -51,6 +53,7 @@ from molt.utils.vlm_utils import merge_mm_train_inputs
 
 from ..algorithm import NaiveReplayBuffer
 from .actor_group import BaseModelActor
+from .engine_utils import extract_model_logits, prepare_rl_engine_datum
 
 logger = init_logger(__name__)
 
@@ -84,6 +87,33 @@ class CriticTrainer:
             0,
             buffer_cpu_offload,
             dynamic_batch=self.args.train.dynamic_batch_enable,
+        )
+        if strategy.cpu_offload or strategy.offload_optimizer:
+            raise NotImplementedError(
+                "Critic Engine training does not support --fsdp.offload: Engine owns optimizer.step(), "
+                "but Molt's CPU optimizer offloader is not a standard Optimizer mutation"
+            )
+        if self.critic.packing_samples and getattr(self.critic, "is_vlm", False):
+            raise NotImplementedError(
+                "Critic Engine does not support RL VLM packing; disable --fsdp.packing_samples for VLM PPO"
+            )
+        if self.critic.packing_samples and getattr(self.critic, "_packing_style", "automodel") != "automodel":
+            raise NotImplementedError(
+                "Critic Engine THD packing requires an AutoModel-native THD model; disable packing for HF fallback"
+            )
+        raw_model = self.critic.model
+        padding_token_id = getattr(getattr(raw_model, "config", None), "pad_token_id", None) or 0
+        max_grad_norm = self.args.critic.max_norm
+        self.engine = Engine(
+            raw_model,
+            device=next(raw_model.parameters()).device,
+            mesh_context=MeshContext.from_meshes(strategy.device_mesh, strategy.moe_mesh),
+            microbatch_size=1,
+            collate_fn=collate_prebatched,
+            padding_token_id=padding_token_id,
+            defer_fsdp_grad_sync=self._defer_grad_sync,
+            optimizers=self.critic_optim,
+            max_grad_norm=max_grad_norm if max_grad_norm and max_grad_norm > 0 else None,
         )
         # AutoModel's MFU calculator over the value model (same backbone as the
         # actor -> ~same FLOP/token); None if AutoModel/arch unsupported, then we
@@ -151,24 +181,50 @@ class CriticTrainer:
                 )
                 if not window_end:
                     continue
-                local_tokens = sum(exp.action_mask.sum() for exp in window)
-                batch_num_tokens = self.strategy.global_token_count(local_tokens)
-                for idx, exp in enumerate(window):
-                    exp.to_device(device)
+                prepared_window = []
+                for exp in window:
                     # Full per-sequence lengths drive the FLOP estimate (the forward
                     # processes the whole sequence, not just action tokens).
                     seqlens = exp.attention_mask.sum(dim=-1)
                     local_seq_count += float(seqlens.numel())
                     local_token_sum += float(seqlens.sum())
-                    is_optimizer_step = idx == len(window) - 1
-                    value_loss, clip_frac, grad_norm = self.training_step(exp, batch_num_tokens, is_optimizer_step)
+                    prepared_window.append(
+                        prepare_rl_engine_datum(
+                            exp,
+                            self.critic,
+                            loss_fields={"old_values": exp.values, "returns": exp.returns},
+                            packing_samples=self.critic.packing_samples,
+                        )
+                    )
+
+                result = self.engine.forward_backward(
+                    [prepared.datum for prepared in prepared_window], self._engine_loss
+                )
+                self.strategy._maybe_debug_grad_stats(self.critic, "critic")
+                optim_result = self.engine.optim_step()
+                # Transformers LambdaLR.step() takes an absolute epoch when passed
+                # an argument; AutoModel schedulers use step(1) as an increment.
+                self.critic_scheduler.step()
+                last_grad_norm = float(optim_result.grad_norm)
+                last_lr = self.critic_scheduler.get_last_lr()[0]
+
+                if len(result.loss_fn_outputs) != len(window):
+                    raise RuntimeError(
+                        f"Critic Engine returned {len(result.loss_fn_outputs)} outputs for {len(window)} Datums"
+                    )
+                for exp, prepared, output_record in zip(window, prepared_window, result.loss_fn_outputs):
+                    exp.to_device(device)
+                    action_values = prepared.restore_token_output(output_record["action_values"])
+                    _, reported_value_loss, value_clip_frac = self.value_loss_fn(
+                        action_values,
+                        exp.values,
+                        exp.returns,
+                        action_mask=exp.action_mask,
+                    )
                     n_tok = float(exp.action_mask.sum().item())
-                    loss_sum += value_loss * n_tok
-                    clip_sum += clip_frac * n_tok
+                    loss_sum += float(reported_value_loss) * n_tok
+                    clip_sum += (float(value_clip_frac) if value_clip_frac is not None else 0.0) * n_tok
                     token_total += n_tok
-                    last_lr = self.critic_scheduler.get_last_lr()[0]
-                    if grad_norm is not None:
-                        last_grad_norm = grad_norm
                     if self.args.train.force_on_policy and self.replay_buffer.cpu_offload:
                         exp.to_device(torch.device("cpu"))
                 window = []
@@ -192,54 +248,24 @@ class CriticTrainer:
         )
         return status
 
-    def training_step(self, experience: Experience, batch_num_tokens, is_optimizer_step: bool):
-        self.critic.train()
-
-        multimodal_inputs = {}
-        if experience.mm_train_inputs and getattr(self.critic, "is_vlm", False):
-            multimodal_inputs = merge_mm_train_inputs(experience.mm_train_inputs, experience.sequences.device)
-
-        cp_context_stack = ExitStack()
-        try:
-            output = self.critic(
-                experience.sequences,
-                experience.action_mask,
-                attention_mask=experience.attention_mask,
-                cp_context_stack=cp_context_stack,
-                **multimodal_inputs,
-            )
-            value_loss, reported_value_loss, value_clip_frac = self.value_loss_fn(
-                output["action_values"],
-                experience.values,
-                experience.returns,
-                action_mask=experience.action_mask,
-                dp_size=self.strategy.dp_size,
-                batch_num_tokens=batch_num_tokens,
-            )
-            self.strategy.backward(
-                value_loss,
-                self.critic,
-                self.critic_optim,
-                name="critic",
-                accumulate=not self.args.train.dynamic_batch_enable,
-                scale_loss_by_accumulation=False,
-                sync_gradients=(is_optimizer_step if self._defer_grad_sync else True),
-            )
-        finally:
-            cp_context_stack.close()
-
-        grad_norm = None
-        if is_optimizer_step:
-            # The replicated value head is not covered by FSDP's reduce — sync it
-            # over the DP(+CP) group before stepping (mean commutes with accum).
-            self.strategy.sync_replicated_grads(self.critic.value_head_parameters())
-            self.strategy.optimizer_step(
-                self.critic_optim, self.critic, self.critic_scheduler, name="critic", accumulate=False
-            )
-            grad_norm = self.strategy.get_grad_norm(self.critic)
-
-        clip = value_clip_frac.item() if value_clip_frac is not None else 0.0
-        return reported_value_loss.item(), clip, grad_norm
+    def _engine_loss(self, output, loss_inputs):
+        values = unshard_dtensor(extract_model_logits(output)).squeeze(-1).float()
+        weights = loss_inputs["weights"]
+        local_tokens = weights.sum()
+        value_loss, _, _ = self.value_loss_fn(
+            values,
+            loss_inputs["old_values"],
+            loss_inputs["returns"],
+            action_mask=weights.bool(),
+            dp_size=1,
+            batch_num_tokens=local_tokens,
+        )
+        # ValueLoss returns a local token mean. Engine expects a scalar local
+        # weighted numerator and applies the one global window denominator.
+        numerator = value_loss * local_tokens
+        return numerator, LossFnOutputBatch(
+            per_token={"action_values": PerTokenOutput(values * weights, fill_value=0.0)}
+        )
 
 
 @ray.remote(num_gpus=1)
@@ -247,13 +273,30 @@ class CriticModelActor(BaseModelActor):
     def init_model_from_pretrained(self, strategy: FsdpStrategy, pretrain, max_steps=None):
         args = strategy.args
         self._setup_distributed(strategy)
-        # The scalar value head reads its (replicated) input via _ValueHead.to_local();
-        # under sequence parallelism the post-norm hidden is seq-sharded, so to_local()
-        # would silently read only the local shard -> wrong V(s). Fail fast until handled.
-        assert not getattr(strategy, "sequence_parallel", False), (
-            "PPO critic value head is not sequence-parallel-safe (critic.py _ValueHead); "
-            "run without --fsdp.sequence_parallel or extend the head to gather the seq dim."
-        )
+        # AutoModel's new structure hook solves the replicated-head correctness
+        # problem, but currently gates model parallel transforms. Reject before
+        # loading a large checkpoint instead of falling back to an external head.
+        unsupported_axes = [
+            name
+            for name, size in (
+                ("TP", strategy.tp_size),
+                ("CP", strategy.cp_size),
+                ("EP", strategy.ep_size),
+                ("PP", strategy.pp_size),
+            )
+            if size != 1
+        ]
+        if unsupported_axes or getattr(strategy, "sequence_parallel", False):
+            if getattr(strategy, "sequence_parallel", False):
+                unsupported_axes.append("sequence parallelism")
+            raise NotImplementedError(
+                "AutoModel pre_fsdp_hook currently requires tp_size=cp_size=ep_size=pp_size=1; "
+                "critic value-head construction cannot use " + ", ".join(unsupported_axes)
+            )
+        if strategy.cpu_offload or strategy.offload_optimizer:
+            raise NotImplementedError(
+                "Critic Engine training does not support --fsdp.offload; use --fsdp.offload none"
+            )
 
         # Init from the critic checkpoint (a reward model / value model) when given,
         # else from the actor checkpoint. `pretrain` is already the actor path.
