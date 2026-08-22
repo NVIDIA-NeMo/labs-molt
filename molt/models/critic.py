@@ -23,15 +23,13 @@ raw ``head(hidden)`` tensor and do not surface hidden states, so making the head
 one-wide is what turns that tensor into the per-token value directly.
 """
 
-from typing import Optional
-
 import torch
 import torch.nn as nn
 from nemo_automodel import PreFSDPHookResult
 
 from molt.trainer.fsdp.packing import unshard_dtensor
 
-from .base import BaseModel, _AttrDict
+from .base import BaseModel
 
 
 class _ValueHead(nn.Linear):
@@ -47,8 +45,8 @@ class _ValueHead(nn.Linear):
       head still sees the full hidden_size and computes correct values — a bare
       ``to_local()`` would have silently used only this rank's shard.
 
-    This mirrors the actor's ``unshard_dtensor(logits)`` (it collapses only the TP
-    dim; CP sequence sharding is restored later by ``_restore_full_sequence``).
+    This mirrors the policy loss callback's ``unshard_dtensor(logits)`` and
+    collapses only the TP dimension; Engine owns CP output restoration.
     AutoModel installs this head before FSDP, so its parameters participate in the
     same reduction, clipping, optimizer, and checkpoint lifecycle as the backbone.
     ``unshard_dtensor`` is a no-op at TP=1 (input already plain).
@@ -137,34 +135,3 @@ class Critic(BaseModel):
             # across an existing AutoModel FSDP boundary.
             super().__init__(*args, **kwargs)
             _install_value_head(self.model)
-
-    def forward(
-        self,
-        sequences: torch.LongTensor,
-        action_mask: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        position_ids: Optional[torch.Tensor] = None,
-        cp_context_stack=None,
-        **mm_inputs,
-    ) -> _AttrDict:
-        """Return per-token values.
-
-        - ``values``:        ``[B, S-1]`` V(s) on the dense next-token step axis.
-        - ``action_values``: ``[B, num_actions]`` masked to the generated span,
-                             only when ``action_mask`` is given.
-        """
-        output, _rolled, cp_forward, indices, batch, seqlen = self._forward_backbone(
-            sequences, attention_mask, position_ids, cp_context_stack, mm_inputs
-        )
-        # Head is one-wide, so the model's "logits" are per-token values [B, S, 1].
-        values = unshard_dtensor(output["logits"]).squeeze(-1).float()
-        values = self._restore_full_sequence(
-            values, cp_forward=cp_forward, batch=batch, seqlen=seqlen, indices=indices
-        )
-        # logits[t] scores state s_t / predicts t+1; drop the final column to align
-        # with action_log_probs (both live on the [:, :-1] next-token axis).
-        values = values[:, :-1]
-        out = _AttrDict(values=values)
-        if action_mask is not None:
-            out["action_values"] = values[:, -action_mask.shape[1] :] * action_mask.float()
-        return out

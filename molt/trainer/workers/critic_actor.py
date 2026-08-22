@@ -35,12 +35,11 @@ from typing import Dict
 
 import ray
 import torch
+from nemo_automodel.components.distributed.mesh import MeshContext
+from nemo_automodel.engine import Engine, LossFnOutputBatch, PerTokenOutput
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-
-from nemo_automodel.components.distributed.mesh import MeshContext
-from nemo_automodel.engine import Engine, LossFnOutputBatch, PerTokenOutput
 
 from molt.models import Critic, ValueLoss
 from molt.trainer.algorithm.experience import Experience, get_model_parallel_size
@@ -49,11 +48,15 @@ from molt.trainer.fsdp.packing import unshard_dtensor
 from molt.utils import get_tokenizer
 from molt.utils.distributed_util import torch_dist_barrier_and_cuda_sync
 from molt.utils.logging_utils import init_logger
-from molt.utils.vlm_utils import merge_mm_train_inputs
 
 from ..algorithm import NaiveReplayBuffer
 from .actor_group import BaseModelActor
-from .engine_utils import extract_model_logits, prepare_rl_engine_datum, resolve_rl_engine_collation
+from .engine_utils import (
+    extract_model_logits,
+    prepare_rl_engine_datum,
+    resolve_rl_engine_collation,
+    run_rl_engine_forward,
+)
 
 logger = init_logger(__name__)
 
@@ -360,22 +363,25 @@ class CriticModelActor(BaseModelActor):
         Experience. reload() first fetches the sample's heavy tensors from the producing runner's
         shared-memory store. Called per sample by execute_batch; the controller attaches values."""
         experience = experience.reload()
-        device = torch.cuda.current_device()
-
-        mm_inputs = {}
-        if experience.mm_train_inputs and getattr(self.critic, "is_vlm", False):
-            mm_inputs = merge_mm_train_inputs(experience.mm_train_inputs, device)
-
+        prepared = prepare_rl_engine_datum(
+            experience,
+            self.critic,
+            loss_fields={},
+            packing_samples=self.critic.packing_samples,
+        )
         self.critic.eval()
-        with torch.no_grad():
-            output = self.critic(
-                experience.sequences.to(device),
-                experience.action_mask.to(device),
-                experience.attention_mask.to(device),
-                **mm_inputs,
+        try:
+            output = run_rl_engine_forward(
+                self.trainer.engine,
+                prepared,
+                "action_values",
+                lambda model_output, _loss_inputs: (
+                    unshard_dtensor(extract_model_logits(model_output)).squeeze(-1).float()
+                ),
             )
-        self.critic.train()  # reset model state
-        return output["action_values"].to("cpu")
+        finally:
+            self.critic.train()
+        return output.to("cpu")
 
     def append(self, experience: Experience):
         # reload() fetches the sample's heavy tensors from the producing runner's shared-memory

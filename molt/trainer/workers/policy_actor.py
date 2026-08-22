@@ -26,29 +26,33 @@ from typing import Dict, List
 import ray
 import torch
 import torch.distributed
+from nemo_automodel.components.distributed.mesh import MeshContext
+from nemo_automodel.engine import Engine, LossFnOutputBatch, PerTokenOutput
 from torch.distributed.tensor import DTensor
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from nemo_automodel.components.distributed.mesh import MeshContext
-from nemo_automodel.engine import Engine, LossFnOutputBatch, PerTokenOutput
-
 from molt.models import Actor, PolicyLoss
 from molt.models.loss import masked_sum
-from molt.models.utils import compute_approx_kl, compute_entropy, log_probs_from_logits, masked_mean
+from molt.models.utils import compute_approx_kl, compute_entropy, masked_mean
 from molt.trainer.algorithm.experience import Experience, get_model_parallel_size
 from molt.trainer.fsdp import FsdpStrategy
-from molt.trainer.fsdp.packing import log_probs_from_vocab_parallel_logits, unshard_dtensor
+from molt.trainer.fsdp.packing import unshard_dtensor
 from molt.trainer.fsdp.refit import gather_full_param
 from molt.utils import get_tokenizer
 from molt.utils.distributed_util import stateless_init_process_group, torch_dist_barrier_and_cuda_sync
 from molt.utils.logging_utils import init_logger
-from molt.utils.vlm_utils import merge_mm_train_inputs
 
 from ..algorithm import NaiveReplayBuffer
 from .actor_group import BaseModelActor
-from .engine_utils import extract_model_logits, prepare_rl_engine_datum, resolve_rl_engine_collation
+from .engine_utils import (
+    action_log_probs_from_output,
+    extract_model_logits,
+    prepare_rl_engine_datum,
+    resolve_rl_engine_collation,
+    run_rl_engine_forward,
+)
 
 logger = init_logger(__name__)
 
@@ -425,19 +429,7 @@ class PolicyTrainer:
 
     def _engine_loss(self, output, loss_inputs, *, kl_ctl: float):
         logits = extract_model_logits(output)
-        target_tokens = loss_inputs["target_tokens"]
-        if isinstance(logits, DTensor):
-            action_log_probs = log_probs_from_vocab_parallel_logits(
-                logits,
-                target_tokens,
-                temperature=self.actor.temperature,
-            )
-        else:
-            action_log_probs = log_probs_from_logits(
-                logits,
-                target_tokens,
-                temperature=self.actor.temperature,
-            )
+        action_log_probs = action_log_probs_from_output(output, loss_inputs, self.actor.temperature)
 
         weights = loss_inputs["weights"]
         local_tokens = weights.sum()
@@ -877,26 +869,26 @@ class PolicyModelActor(BaseModelActor):
         the controller. Called per sample by execute_batch; the controller attaches the result as
         action_log_probs."""
         experience = experience.reload()
-        device = torch.cuda.current_device()
-
-        # VLM: merge pre-processed multimodal inputs.
-        mm_inputs = {}
-        if experience.mm_train_inputs and getattr(self.actor, "is_vlm", False):
-            mm_inputs = merge_mm_train_inputs(experience.mm_train_inputs, device)
-
-        routed_experts = experience.routed_experts
+        prepared = prepare_rl_engine_datum(
+            experience,
+            self.actor,
+            loss_fields={},
+            packing_samples=self.actor.packing_samples,
+            routed_experts=experience.routed_experts,
+        )
         self.actor.eval()
-        with torch.no_grad():
-            output = self.actor(
-                experience.sequences.to(device),
-                experience.action_mask.to(device),
-                experience.attention_mask.to(device),
-                # R3: replay rollout routing so old picks the same experts as training.
-                routed_experts=routed_experts.to(device) if routed_experts is not None else None,
-                **mm_inputs,
+        try:
+            output = run_rl_engine_forward(
+                self.trainer.engine,
+                prepared,
+                "action_log_probs",
+                lambda model_output, loss_inputs: action_log_probs_from_output(
+                    model_output, loss_inputs, self.actor.temperature
+                ),
             )
-        self.actor.train()  # reset model state
-        return output["action_log_probs"].to("cpu")
+        finally:
+            self.actor.train()
+        return output.to("cpu")
 
     def broadcast_to_vllm(self):
         self.trainer.broadcast_to_vllm()

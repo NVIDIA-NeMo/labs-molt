@@ -3,18 +3,19 @@
 
 """Thin adapters from Molt's collated RL ``Experience`` to AutoModel ``Datum``."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
 
 import torch
-
 from nemo_automodel._transformers.utils import resolve_get_rope_index
 from nemo_automodel.components.datasets.datum import Datum, LossInputLayout, collate_vlm_datums
 from nemo_automodel.components.datasets.utils import pack_features_for_thd, packed_sequence_thd_collater
-from nemo_automodel.engine import collate_prebatched
+from nemo_automodel.engine import Engine, LossFnOutputBatch, PerTokenOutput, collate_prebatched
+from torch.distributed.tensor import DTensor
 
-from molt.trainer.fsdp.packing import unpack_to_padded
+from molt.models.utils import log_probs_from_logits
+from molt.trainer.fsdp.packing import log_probs_from_vocab_parallel_logits
 from molt.utils.vlm_utils import merge_mm_train_inputs
 
 
@@ -45,7 +46,11 @@ class PreparedRLEngineDatum:
         if self.packed_indices is None:
             return tensor
         batch, sequence = self.dense_shape
-        return unpack_to_padded(tensor, self.packed_indices.to(tensor.device), batch, sequence)
+        values = tensor.squeeze(0) if tensor.ndim > 1 and tensor.shape[0] == 1 else tensor
+        indices = self.packed_indices.to(tensor.device)
+        restored = values.new_zeros((batch * sequence, *values.shape[1:]))
+        restored.index_copy_(0, indices, values[: indices.numel()])
+        return restored.view(batch, sequence, *values.shape[1:])
 
     def restore_token_outputs(self, tensors: Sequence[torch.Tensor]) -> torch.Tensor:
         """Restore per-Datum Engine outputs to the Experience's dense token axis."""
@@ -123,6 +128,44 @@ def extract_model_logits(output):
     if isinstance(output, Mapping):
         return output["logits"]
     return output.logits
+
+
+def action_log_probs_from_output(output, loss_inputs, temperature: float) -> torch.Tensor:
+    """Compute realized next-token log-probabilities from an Engine callback."""
+
+    logits = extract_model_logits(output)
+    target_tokens = loss_inputs["target_tokens"]
+    if isinstance(logits, DTensor):
+        return log_probs_from_vocab_parallel_logits(logits, target_tokens, temperature=temperature)
+    return log_probs_from_logits(logits, target_tokens, temperature=temperature)
+
+
+def run_rl_engine_forward(
+    engine: Engine,
+    prepared: PreparedRLEngineDatum,
+    output_key: str,
+    token_output_fn: Callable[[object, Mapping[str, torch.Tensor]], torch.Tensor],
+) -> torch.Tensor:
+    """Run collection-time inference and restore one token output to replay coordinates."""
+
+    def loss_fn(output, loss_inputs):
+        token_output = token_output_fn(output, loss_inputs)
+        weights = loss_inputs["weights"]
+        if token_output.shape != weights.shape:
+            raise ValueError(
+                f"collection output {output_key!r} has shape {tuple(token_output.shape)}, "
+                f"expected token shape {tuple(weights.shape)}"
+            )
+        return token_output.new_zeros(()), LossFnOutputBatch(
+            per_token={output_key: PerTokenOutput(token_output * weights, fill_value=0.0)}
+        )
+
+    result = engine.forward(prepared.datums, loss_fn)
+    if len(result.loss_fn_outputs) != prepared.num_datums:
+        raise RuntimeError(
+            f"Engine returned {len(result.loss_fn_outputs)} collection outputs for {prepared.num_datums} Datums"
+        )
+    return prepared.restore_token_outputs([record[output_key] for record in result.loss_fn_outputs])
 
 
 def _prepare_vlm_rl_engine_datums(

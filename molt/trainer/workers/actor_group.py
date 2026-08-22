@@ -23,6 +23,8 @@ from typing import Dict, Type
 
 import ray
 import torch
+from nemo_automodel.components.distributed.mesh import MeshContext
+from nemo_automodel.engine import Engine
 from ray.util.placement_group import PlacementGroup, placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from tqdm import tqdm
@@ -30,6 +32,14 @@ from tqdm import tqdm
 from molt.models import Actor
 from molt.trainer.fsdp import FsdpStrategy
 from molt.trainer.placement import get_bundle_indices, ray_noset_visible_devices
+from molt.utils import get_tokenizer
+
+from .engine_utils import (
+    action_log_probs_from_output,
+    prepare_rl_engine_datum,
+    resolve_rl_engine_collation,
+    run_rl_engine_forward,
+)
 
 
 class BaseDistributedActor:
@@ -143,8 +153,34 @@ class ReferenceModelActor(BaseModelActor):
         )
         strategy.print(model)
 
+        self.tokenizer = get_tokenizer(
+            pretrain,
+            model.model,
+            "left",
+            use_fast=not strategy.args.data.disable_fast_tokenizer,
+        )
+
         self.model = self.strategy.prepare(model)
         self.model.eval()
+        raw_model = self.model.model
+        text_tokenizer = getattr(self.tokenizer, "tokenizer", self.tokenizer)
+        padding_token_id = getattr(text_tokenizer, "pad_token_id", None)
+        if padding_token_id is None:
+            padding_token_id = getattr(getattr(raw_model, "config", None), "pad_token_id", None) or 0
+        collate_fn, microbatch_size = resolve_rl_engine_collation(
+            self.model,
+            self.tokenizer,
+            strategy,
+            strategy.args.train.micro_batch_size,
+        )
+        self.engine = Engine(
+            raw_model,
+            device=next(raw_model.parameters()).device,
+            mesh_context=MeshContext.from_meshes(strategy.device_mesh, strategy.moe_mesh),
+            microbatch_size=microbatch_size,
+            collate_fn=collate_fn,
+            padding_token_id=padding_token_id,
+        )
 
     def forward(self, experience) -> torch.Tensor:
         """Reference log-probs for one rollout Experience. reload() first fetches the sample's heavy
@@ -152,23 +188,21 @@ class ReferenceModelActor(BaseModelActor):
         this rank straight from the runner, never through the controller. Called per sample by
         execute_batch; the controller attaches the result as base_action_log_probs."""
         experience = experience.reload()
-        device = torch.cuda.current_device()
-
-        # VLM: merge pre-processed multimodal inputs.
-        mm_inputs = {}
-        if experience.mm_train_inputs and getattr(self.model, "is_vlm", False):
-            from molt.utils.vlm_utils import merge_mm_train_inputs
-
-            mm_inputs = merge_mm_train_inputs(experience.mm_train_inputs, device)
-
-        with torch.no_grad():
-            output = self.model(
-                experience.sequences.to(device),
-                experience.action_mask.to(device),
-                experience.attention_mask.to(device),
-                **mm_inputs,
-            )
-        return output["action_log_probs"].to("cpu")
+        prepared = prepare_rl_engine_datum(
+            experience,
+            self.model,
+            loss_fields={},
+            packing_samples=self.model.packing_samples,
+        )
+        output = run_rl_engine_forward(
+            self.engine,
+            prepared,
+            "action_log_probs",
+            lambda model_output, loss_inputs: action_log_probs_from_output(
+                model_output, loss_inputs, self.model.temperature
+            ),
+        )
+        return output.to("cpu")
 
 
 class RayActorGroup:

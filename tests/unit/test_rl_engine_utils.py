@@ -7,14 +7,18 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
-
 from nemo_automodel import PreFSDPHookResult
 from nemo_automodel.components.datasets.datum import LossInputLayout, collate_vlm_datums
 from nemo_automodel.engine import Engine, LossFnOutputBatch, PerTokenOutput, collate_prebatched
 
-from molt.models.critic import _ValueHead, _install_value_head
+from molt.models.critic import _install_value_head, _ValueHead
 from molt.models.loss import PolicyLoss
-from molt.trainer.workers.engine_utils import prepare_rl_engine_datum, resolve_rl_engine_collation
+from molt.trainer.workers.engine_utils import (
+    action_log_probs_from_output,
+    prepare_rl_engine_datum,
+    resolve_rl_engine_collation,
+    run_rl_engine_forward,
+)
 from molt.trainer.workers.policy_actor import PolicyTrainer
 
 
@@ -240,18 +244,13 @@ def test_packed_vlm_rl_datums_collate_side_channels_and_restore_dense_outputs():
 
     seen = {}
 
-    def loss_fn(output, loss_inputs):
+    def token_output(output, loss_inputs):
         values = output.squeeze(-1)
         seen["routes"] = loss_inputs["routed_experts"]
-        return (values * loss_inputs["weights"]).sum(), LossFnOutputBatch(
-            per_token={"values": PerTokenOutput(values * loss_inputs["weights"], fill_value=0.0)}
-        )
+        return values
 
-    result = engine.forward(prepared.datums, loss_fn)
-    restored = prepared.restore_token_outputs([record["values"] for record in result.loss_fn_outputs])
+    restored = run_rl_engine_forward(engine, prepared, "values", token_output)
 
-    torch.testing.assert_close(result.loss_fn_outputs[0]["values"], torch.tensor([0.0, 9.9, 1.2]))
-    torch.testing.assert_close(result.loss_fn_outputs[1]["values"], torch.tensor([2.0, 2.1]))
     torch.testing.assert_close(restored, torch.tensor([[0.0, 9.9, 1.2, 0.0], [2.0, 2.1, 0.0, 0.0]]))
     assert seen["routes"].shape == (8, 1, 2)
     assert bool((seen["routes"] == -1).any())
@@ -331,6 +330,16 @@ def test_prebatched_rl_datum_runs_one_engine_backward_window():
     )
     engine = Engine(model, device="cpu", microbatch_size=1, collate_fn=collate_prebatched)
 
+    collected = run_rl_engine_forward(
+        engine,
+        prepared,
+        "action_values",
+        lambda output, _inputs: output.squeeze(-1),
+    )
+    expected_values = experience.sequences[:, :-1].float() * 0.1
+    assert torch.equal(collected, expected_values * experience.action_mask)
+    assert model.scale.grad is None
+
     def loss_fn(output, loss_inputs):
         values = output.squeeze(-1)
         weights = loss_inputs["weights"]
@@ -340,7 +349,6 @@ def test_prebatched_rl_datum_runs_one_engine_backward_window():
         )
 
     result = engine.forward_backward([prepared.datum], loss_fn)
-    expected_values = experience.sequences[:, :-1].float() * 0.1
     expected_sum = (0.5 * (expected_values - experience.returns).pow(2) * experience.action_mask).sum()
 
     assert torch.allclose(result.loss_sum, expected_sum.double())
@@ -365,7 +373,7 @@ def test_policy_callback_runs_engine_backward_and_optimizer_step(monkeypatch):
     # The production helper selects a CUDA-only fused CE kernel when flash-attn
     # is installed. Keep this Engine contract test CPU-only.
     monkeypatch.setattr(
-        "molt.trainer.workers.policy_actor.log_probs_from_logits",
+        "molt.trainer.workers.engine_utils.log_probs_from_logits",
         lambda logits, labels, temperature: (
             torch.log_softmax(logits / temperature, dim=-1).gather(-1, labels.unsqueeze(-1)).squeeze(-1)
         ),
@@ -413,6 +421,17 @@ def test_policy_callback_runs_engine_backward_and_optimizer_step(monkeypatch):
         max_grad_norm=1.0,
     )
     before = model.output.weight.detach().clone()
+
+    collected = run_rl_engine_forward(
+        engine,
+        prepared,
+        "action_log_probs",
+        lambda output, inputs: action_log_probs_from_output(output, inputs, wrapper.temperature),
+    )
+    assert collected.shape == experience.action_mask.shape
+    assert torch.equal(collected[~experience.action_mask], torch.zeros_like(collected[~experience.action_mask]))
+    assert all(parameter.grad is None for parameter in model.parameters())
+    assert not optimizer.state
 
     result = engine.forward_backward(
         [prepared.datum], lambda output, inputs: trainer._engine_loss(output, inputs, kl_ctl=0.1)
