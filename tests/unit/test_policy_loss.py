@@ -14,6 +14,8 @@
 # limitations under the License.
 
 import math
+import os
+import socket
 
 import pytest
 import torch
@@ -419,3 +421,123 @@ def test_gspo_gradient_reaches_each_token_through_its_own_log_prob():
 def test_gspo_rejects_dual_clip():
     with pytest.raises(ValueError, match="dual_clip is a PPO-only extra bound"):
         PolicyLoss(loss_mode="gspo", dual_clip=3.0)
+
+
+@pytest.mark.parametrize(
+    ("loss_mode", "correction_level"),
+    [("gspo", "off"), ("ppo", "geo")],
+)
+def test_segmented_packed_sequence_objectives_match_dense(loss_mode, correction_level):
+    dense_log_probs = torch.tensor([[0.3, -0.1, 0.2], [-0.2, 0.4, 0.0]], requires_grad=True)
+    old_log_probs = torch.zeros_like(dense_log_probs)
+    advantages = torch.tensor([[1.0, -0.5, 0.0], [0.7, 1.2, 0.0]])
+    action_mask = torch.tensor([[1, 1, 0], [1, 1, 0]], dtype=torch.bool)
+    rollout_log_probs = torch.tensor([[0.2, -0.2, 0.0], [-0.3, 0.5, 0.0]])
+    kwargs = {
+        "loss_mode": loss_mode,
+        "is_correction_level": correction_level,
+        "is_correction_mode": "mask",
+        "is_correction_threshold": [0.5, 2.0] if correction_level != "off" else None,
+    }
+    dense_loss = PolicyLoss(**kwargs)(
+        dense_log_probs,
+        old_log_probs,
+        advantages,
+        action_mask=action_mask,
+        rollout_log_probs=rollout_log_probs,
+    )[0]
+    dense_loss.backward()
+
+    # The packed callback sees one THD token stream, so sequence_ids preserve
+    # the row boundaries needed by GSPO and seq/geo correction.
+    packed_log_probs = dense_log_probs.detach().reshape(1, -1).requires_grad_(True)
+    packed_mask = action_mask.reshape(1, -1)
+    packed_loss = PolicyLoss(**kwargs)(
+        packed_log_probs,
+        old_log_probs.reshape(1, -1),
+        advantages.reshape(1, -1),
+        action_mask=packed_mask,
+        rollout_log_probs=rollout_log_probs.reshape(1, -1),
+        sequence_ids=torch.tensor([[0, 0, 0, 1, 1, 1]]),
+        num_sequences=2,
+    )[0]
+    packed_loss.backward()
+
+    torch.testing.assert_close(packed_loss, dense_loss.detach())
+    torch.testing.assert_close(packed_log_probs.grad, dense_log_probs.grad.reshape(1, -1))
+
+
+def _segmented_cp_worker(rank, world_size, port):
+    import torch.distributed as dist
+
+    os.environ.update(
+        MASTER_ADDR="127.0.0.1",
+        MASTER_PORT=str(port),
+        RANK=str(rank),
+        WORLD_SIZE=str(world_size),
+    )
+    dist.init_process_group("gloo", rank=rank, world_size=world_size)
+    try:
+        full_log_probs = torch.tensor([[0.3, -0.1, 0.2, 0.0], [-0.2, 0.4, 0.1, 0.0]])
+        full_old = torch.zeros_like(full_log_probs)
+        full_advantages = torch.tensor([[1.0, -0.5, 0.3, 0.0], [0.7, 1.2, -0.4, 0.0]])
+        full_mask = torch.tensor([[1, 1, 1, 0], [1, 1, 1, 0]], dtype=torch.bool)
+        full_rollout = torch.tensor([[0.2, -0.2, 0.1, 0.0], [-0.3, 0.5, 0.2, 0.0]])
+        # Split every dense sequence across CP ranks. Each rank still sees both
+        # logical sequence IDs but only its local token positions.
+        columns = torch.arange(rank, full_log_probs.shape[1], world_size)
+        sequence_ids = torch.arange(full_log_probs.shape[0]).unsqueeze(1).expand(-1, columns.numel()).reshape(1, -1)
+        num_tokens = full_mask.sum()
+
+        for loss_mode, correction_level in (("gspo", "off"), ("ppo", "geo")):
+            kwargs = {
+                "loss_mode": loss_mode,
+                "is_correction_level": correction_level,
+                "is_correction_mode": "mask",
+                "is_correction_threshold": [0.5, 2.0] if correction_level != "off" else None,
+            }
+            dense_log_probs = full_log_probs.clone().requires_grad_(True)
+            dense_loss = PolicyLoss(**kwargs)(
+                dense_log_probs,
+                full_old,
+                full_advantages,
+                action_mask=full_mask,
+                rollout_log_probs=full_rollout,
+            )[0]
+            dense_loss.backward()
+
+            local_log_probs = full_log_probs[:, columns].reshape(1, -1).clone().requires_grad_(True)
+            local_loss = PolicyLoss(**kwargs)(
+                local_log_probs,
+                full_old[:, columns].reshape(1, -1),
+                full_advantages[:, columns].reshape(1, -1),
+                action_mask=full_mask[:, columns].reshape(1, -1),
+                rollout_log_probs=full_rollout[:, columns].reshape(1, -1),
+                batch_num_tokens=num_tokens,
+                sequence_ids=sequence_ids,
+                num_sequences=full_log_probs.shape[0],
+                sequence_group=dist.group.WORLD,
+            )[0]
+            local_loss.backward()
+
+            reduced_loss = local_loss.detach().clone()
+            dist.all_reduce(reduced_loss)
+            torch.testing.assert_close(reduced_loss, dense_loss.detach())
+            torch.testing.assert_close(
+                local_log_probs.grad,
+                dense_log_probs.grad[:, columns].reshape(1, -1),
+            )
+    finally:
+        dist.barrier()
+        dist.destroy_process_group()
+
+
+def test_segmented_sequence_objectives_reduce_across_context_parallel_ranks():
+    import torch.multiprocessing as mp
+
+    if (os.cpu_count() or 1) < 2:
+        pytest.skip("needs >= 2 CPUs for a 2-rank gloo group")
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    mp.spawn(_segmented_cp_worker, args=(2, port), nprocs=2, join=True)

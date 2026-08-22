@@ -48,6 +48,9 @@ def prepare_rl_engine_datum(
     *,
     loss_fields: Mapping[str, torch.Tensor | None],
     packing_samples: bool,
+    replicated_loss_fields: Mapping[str, torch.Tensor] | None = None,
+    include_sequence_ids: bool = False,
+    routed_experts: torch.Tensor | None = None,
     loss_pad_values: Mapping[str, int | float | bool] | None = None,
 ) -> PreparedRLEngineDatum:
     """Convert one already-collated Experience microbatch into one Engine Datum.
@@ -76,10 +79,14 @@ def prepare_rl_engine_datum(
             f"got {tuple(action_mask.shape)}"
         )
 
-    # Only positions that can predict a real next token need a model forward.
-    # For right-padded rows, attention_mask[:, 1:] has exactly L-1 real states.
+    # Keep only real-token -> real-token transitions. Using attention_mask[:, 1:]
+    # alone would incorrectly turn the final left-padding slot into a live model
+    # token, while attention_mask[:, :-1] alone retains the final right-padded
+    # state even though it has no real next-token target.
     input_ids = sequences[:, :-1]
-    prediction_mask = attention_mask[:, 1:].bool()
+    prediction_mask = attention_mask[:, :-1].bool() & attention_mask[:, 1:].bool()
+    if bool((action_mask.bool() & ~prediction_mask).any()):
+        raise ValueError("action_mask may select only real-token -> real-token transitions")
     losses: dict[str, torch.Tensor] = {
         "weights": action_mask.to(torch.float32),
         "target_tokens": sequences[:, 1:],
@@ -89,6 +96,32 @@ def prepare_rl_engine_datum(
         if not isinstance(value, torch.Tensor) or value.ndim < 2 or tuple(value.shape[:2]) != (batch, sequence):
             shape = tuple(value.shape) if isinstance(value, torch.Tensor) else type(value).__name__
             raise ValueError(f"RL loss field {name!r} must start with {(batch, sequence)}, got {shape}")
+
+    resolved_pad_values = dict(loss_pad_values or {})
+    if include_sequence_ids:
+        sequence_ids = torch.arange(batch, device=sequences.device).unsqueeze(1).expand(batch, sequence).clone()
+        losses["sequence_ids"] = sequence_ids.masked_fill(~prediction_mask, -1)
+        resolved_pad_values["sequence_ids"] = -1
+    if routed_experts is not None:
+        adapter = getattr(model_wrapper, "_routing_replay_adapter", None)
+        if adapter is None:
+            raise RuntimeError("routed_experts requires an Actor constructed with routing_replay=True")
+        if routed_experts.ndim != 4 or routed_experts.shape[0] != batch or routed_experts.shape[-1] != full_sequence:
+            raise ValueError("rollout routed_experts must have shape [batch, global_layers, topk, full_sequence]")
+        prepared_routes = adapter.prepare_routed_experts(routed_experts[..., :-1])
+        prepared_routes = prepared_routes.masked_fill(~prediction_mask[..., None, None], -1)
+        losses["routed_experts"] = prepared_routes
+        resolved_pad_values["routed_experts"] = -1
+
+    replicated_losses = dict(replicated_loss_fields or {})
+    overlap = set(losses) & set(replicated_losses)
+    if overlap:
+        raise ValueError(f"RL loss fields cannot be both PER_TOKEN and REPLICATED: {sorted(overlap)}")
+    if include_sequence_ids:
+        replicated_losses.setdefault("num_sequences", torch.tensor(batch, device=sequences.device))
+    for name, value in replicated_losses.items():
+        if not isinstance(value, torch.Tensor):
+            raise TypeError(f"replicated RL loss field {name!r} must be a Tensor")
 
     is_vlm = bool(getattr(model_wrapper, "is_vlm", False))
     if packing_samples and is_vlm:
@@ -144,11 +177,15 @@ def prepare_rl_engine_datum(
             position_ids.masked_fill_(~prediction_mask, 1)
             model_inputs["position_ids"] = position_ids
 
-    layouts = {name: LossInputLayout.PER_TOKEN for name in losses}
+    losses.update(replicated_losses)
+    layouts = {
+        **{name: LossInputLayout.PER_TOKEN for name in losses if name not in replicated_losses},
+        **{name: LossInputLayout.REPLICATED for name in replicated_losses},
+    }
     datum = Datum(
         model_inputs=model_inputs,
         loss_fn_inputs=losses,
         loss_fn_input_layouts=layouts,
-        loss_fn_input_pad_values=dict(loss_pad_values or {}),
+        loss_fn_input_pad_values=resolved_pad_values,
     )
     return PreparedRLEngineDatum(datum=datum, dense_shape=(batch, sequence), packed_indices=packed_indices)

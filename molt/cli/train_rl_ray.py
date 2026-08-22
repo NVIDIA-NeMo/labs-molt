@@ -1002,6 +1002,31 @@ if __name__ == "__main__":
     if args.fsdp.pp_size > 1:
         raise NotImplementedError("Molt trainers are not pipeline-parallel aware yet; set --fsdp.pp_size 1")
 
+    if not args.eval.eval_only and args.fsdp.offload != "none":
+        raise NotImplementedError(
+            "RL Engine training does not yet support --fsdp.offload: Engine owns optimizer.step(), "
+            "but Molt's CPU optimizer offloader is not a standard Optimizer mutation. "
+            "Use --fsdp.offload none."
+        )
+
+    if args.algo.advantage.estimator == "gae":
+        unsupported_critic_parallelism = [
+            name
+            for name, size in (
+                ("TP", args.fsdp.tp_size),
+                ("CP", args.fsdp.cp_size),
+                ("EP", args.fsdp.ep_size),
+            )
+            if size != 1
+        ]
+        if args.fsdp.sequence_parallel:
+            unsupported_critic_parallelism.append("sequence parallelism")
+        if unsupported_critic_parallelism:
+            raise NotImplementedError(
+                "The AutoModel pre_fsdp_hook used to install the critic value head currently requires "
+                "tp_size=cp_size=ep_size=pp_size=1; GAE cannot use " + ", ".join(unsupported_critic_parallelism)
+            )
+
     if args.train.routing_replay and args.train.partial_rollout_enable:
         # vLLM frees a request's captured routing on preemption, and partial
         # rollout preempts in-flight requests at every weight sync -> the routing

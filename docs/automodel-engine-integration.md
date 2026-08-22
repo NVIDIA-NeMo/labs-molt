@@ -90,9 +90,50 @@ path. Critic CPU optimizer/full offload, Hugging Face fallback THD packing, and
 RL VLM packing also fail explicitly. The existing Transformers scheduler remains
 Molt-owned for the same `step()` versus `step(1)` protocol reason as SFT.
 
-The shared `FsdpStrategy` execution methods remain while policy optimization is
-still being migrated and because Molt continues to own model construction and
-checkpoints.
+## RL policy actor
+
+Policy optimization is Engine-only as well. Each already-collated replay-buffer
+microbatch becomes one prebatched Datum. Its shifted target tokens, action
+weights, old/base/rollout log-probabilities, advantages, and optional rollout
+routes are explicit loss-side channels. A complete optimizer window is one
+`forward_backward` call followed by one `optim_step`; Molt's callback contains
+only PPO/GSPO/CISPO, KL, and entropy numerators.
+
+Typed per-token callback outputs let Engine restore action log-probabilities and
+entropy from CP or packed THD order before Molt computes dense replay-buffer
+metrics. For GSPO and sequence/geometric IS correction, Molt supplies sequence
+IDs as a `PER_TOKEN` side channel and reduces detached per-sequence statistics
+over the CP group. This preserves the dense per-sequence objective after THD
+packing and CP sharding without gathering differentiable log-probabilities.
+
+AutoModel's `RouterReplayAdapter` consumes rollout routes only after Engine has
+applied packing and CP layout, and its context covers forward, activation-
+checkpoint recomputation, and backward. Native AutoModel MoE gates keep their
+`MoEAuxLossAutoScaler` path; adding the surfaced scalar aux loss in the callback
+would count that gradient twice.
+
+Padded text and VLM, native text THD packing, TP, CP, EP, sequence parallelism,
+R3, entropy regularization, and PPO/GSPO/CISPO all use this path. RL VLM packing,
+HF-fallback THD packing, and HF-fallback MoE auxiliary loss fail explicitly.
+The policy's Transformers scheduler remains Molt-owned and advances once after a
+successful Engine optimizer update.
+
+The legacy `Actor.forward` input-layout code remains only for collection-time
+old/reference log-probability inference. It no longer owns policy backward,
+gradient synchronization, clipping, or optimizer mutation.
+
+## Remaining blockers and retained boundaries
+
+| Boundary | Current behavior | Missing contract |
+| --- | --- | --- |
+| CPU optimizer/full offload | SFT and RL training fail before the first update | Engine invokes a standard `Optimizer.step`; Molt's `CpuOptimizerOffloader.step(optimizer, params)` needs a standard optimizer wrapper or an Engine optimizer-mutation adapter |
+| Transformers scheduler | Supported through one explicit Molt `step()` after `optim_step()` | Engine schedulers use incremental `step(1)`, while HF `LambdaLR` interprets the argument as absolute epoch 1 |
+| Pipeline parallelism | Molt CLI fails fast at `pp_size > 1` | Engine and R3 now support per-inner-microbatch contexts, but `FsdpStrategy` still constructs an eager model rather than `AutoPipeline` |
+| Critic model parallelism | GAE critic fails fast for TP/CP/EP/PP or sequence parallelism | AutoModel's current `pre_fsdp_hook` supports only unquantized, non-PEFT models with all model-parallel axes equal to one; PEFT, quantization, FP8, and QAT are restricted by the same hook |
+| RL VLM packing | Actor and critic fail fast; padded VLM remains supported | AutoModel's current VLM Datum collater owns SFT `labels`/`weights`, but does not collate arbitrary PPO side channels such as old values/log-probabilities, advantages, and replay routes |
+| HF fallback packing | Actor and critic fail fast | The fallback's FlashAttention packing adapter is part of Molt's legacy wrapper, not Engine's native THD Datum contract |
+| HF fallback MoE aux loss | Policy fails fast when its coefficient is nonzero | Only native AutoModel gates expose the Engine-scaled autograd injection; an HF scalar aux output is not an additive token numerator |
+| Multi-axis mRoPE + packed THD CP | Intentionally unsupported and fail-fast | The agreed scope excludes this combination; AutoModel also rejects 3-D packed position IDs when CP/PP reorders or splits the token stream |
 
 ## Dependency and validation status
 
@@ -104,10 +145,18 @@ critic value head, and the latest main-line context-parallel implementation.
 Molt's PyPI build still replaces source pins with `nemo-automodel>=0.5.0`; no
 released version floor currently guarantees this API.
 
-CPU tests use the real Engine and cover unequal binary masks, variable right
-padding, shifted labels and position IDs, tensor and model-output logits,
-pre-step gradients, parameter updates, scheduler ordering, validation
-aggregation, and zero-supervision validation. A two-GPU FSDP2 parity smoke with
-rank-asymmetric data and two accumulated microbatches matched the single-model
-reference loss, full gradients, and updated parameters. Checkpoint-resume smoke
-remains required before production adoption.
+CPU tests use the real Engine and cover unequal binary masks, left/right
+padding, shifted targets and position IDs, typed token-output restoration,
+critic and policy backward/optimizer mutation, packed GSPO and sequence-level
+IS parity, and a live two-rank gloo CP reduction of sequence statistics. A
+two-GPU FSDP2 SFT parity smoke with rank-asymmetric data and two accumulated
+microbatches matched the single-model reference loss, full gradients, and
+updated parameters.
+
+Production validation is still blocked on two external items: AutoModel commit
+`5420b30fd` is one local commit ahead of its remote integration branch, so the
+source pin cannot be installed elsewhere until it is pushed; and the available
+RL GPU image resolves incompatible CUDA 12/13 runtime libraries while loading a
+real model. Distributed TP/CP/EP/R3 policy and critic checkpoint-resume smokes
+therefore remain required after the image is repaired. No source workaround is
+added for either environment issue.

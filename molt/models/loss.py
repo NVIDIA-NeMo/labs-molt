@@ -19,6 +19,7 @@
 from typing import Callable, Dict, Optional, Tuple
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 
 from .utils import masked_mean
@@ -32,6 +33,40 @@ def masked_sum(values: torch.Tensor, mask: torch.Tensor, dim: int | tuple[int, .
     """
     valid_values = torch.where(mask.bool(), values, 0.0)
     return valid_values.sum(dim=dim)
+
+
+def _segmented_token_stats(
+    values: torch.Tensor,
+    mask: torch.Tensor,
+    sequence_ids: torch.Tensor,
+    num_sequences: int,
+    group=None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Detached per-sequence sums/counts for a possibly CP-local token stream."""
+
+    if values.shape != mask.shape or sequence_ids.shape != mask.shape:
+        raise ValueError(
+            "segmented policy reductions require values, action_mask, and sequence_ids to have identical shapes"
+        )
+    if sequence_ids.dtype not in {torch.int8, torch.int16, torch.int32, torch.int64}:
+        raise TypeError("sequence_ids must use a signed integer dtype")
+    valid = mask.bool() & (sequence_ids >= 0)
+    if bool((sequence_ids[valid] >= num_sequences).any()):
+        raise ValueError(f"sequence_ids must be smaller than num_sequences={num_sequences}")
+    safe_ids = sequence_ids.masked_fill(~valid, 0).reshape(-1).long()
+    sums = torch.zeros(num_sequences, device=values.device, dtype=torch.float32)
+    counts = torch.zeros_like(sums)
+    sums.scatter_add_(0, safe_ids, torch.where(valid, values.detach().float(), 0.0).reshape(-1))
+    counts.scatter_add_(0, safe_ids, valid.reshape(-1).to(torch.float32))
+    if group is not None and dist.is_available() and dist.is_initialized() and dist.get_world_size(group) > 1:
+        dist.all_reduce(sums, op=dist.ReduceOp.SUM, group=group)
+        dist.all_reduce(counts, op=dist.ReduceOp.SUM, group=group)
+    return sums, counts
+
+
+def _map_sequence_values(values: torch.Tensor, sequence_ids: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    safe_ids = sequence_ids.masked_fill(sequence_ids < 0, 0).long()
+    return values.index_select(0, safe_ids.reshape(-1)).view_as(sequence_ids).masked_fill(~mask.bool(), 0.0)
 
 
 def agg_loss(
@@ -189,7 +224,18 @@ def ppo_policy_loss(ratio, advantages, log_probs, action_mask, *, clip_eps_low, 
 
 
 @register_policy_loss("gspo")
-def gspo_policy_loss(ratio, advantages, log_probs, action_mask, *, clip_eps_low, clip_eps_high, policy_log_ratio, **_):
+def gspo_policy_loss(
+    ratio,
+    advantages,
+    log_probs,
+    action_mask,
+    *,
+    clip_eps_low,
+    clip_eps_high,
+    policy_log_ratio,
+    sequence_log_ratio=None,
+    **_,
+):
     """GSPO (https://arxiv.org/abs/2507.18071): clip one IS ratio per SEQUENCE, not per token.
 
     The ratio is the sequence's geometric mean `s = exp(mean_t log(pi/pi_old))`, so a single
@@ -201,7 +247,11 @@ def gspo_policy_loss(ratio, advantages, log_probs, action_mask, *, clip_eps_low,
     """
     # `policy_log_ratio` is forward's already-clamped log-ratio, so `s` inherits the same
     # +-log_ratio_limit bound (a mean of bounded terms) and needs no clamp of its own.
-    seq_log_ratio = masked_mean(policy_log_ratio, action_mask, dim=-1).detach().unsqueeze(-1)
+    seq_log_ratio = (
+        masked_mean(policy_log_ratio, action_mask, dim=-1).detach().unsqueeze(-1)
+        if sequence_log_ratio is None
+        else sequence_log_ratio.detach()
+    )
     seq_ratio = (log_probs - log_probs.detach() + seq_log_ratio).exp()
     surr1 = seq_ratio * advantages
     surr2 = seq_ratio.clamp(1 - clip_eps_low, 1 + clip_eps_high) * advantages
@@ -301,6 +351,9 @@ class PolicyLoss(nn.Module):
         dp_size: int = 1,
         batch_num_tokens: Optional[torch.Tensor] = None,
         global_batch_size: Optional[torch.Tensor] = None,
+        sequence_ids: Optional[torch.Tensor] = None,
+        num_sequences: Optional[torch.Tensor | int] = None,
+        sequence_group=None,
     ) -> torch.Tensor:
         log_ratio_limit = 30.0
         policy_log_ratio = torch.nan_to_num(
@@ -314,6 +367,26 @@ class PolicyLoss(nn.Module):
             mask = action_mask.bool()
             policy_log_ratio = torch.where(mask, policy_log_ratio, torch.zeros_like(policy_log_ratio))
             advantages = torch.where(mask, advantages, torch.zeros_like(advantages))
+        else:
+            mask = torch.ones_like(policy_log_ratio, dtype=torch.bool)
+
+        sequence_log_ratio = None
+        resolved_num_sequences = None
+        if sequence_ids is not None or num_sequences is not None:
+            if sequence_ids is None or num_sequences is None:
+                raise ValueError("sequence_ids and num_sequences must be provided together")
+            resolved_num_sequences = int(torch.as_tensor(num_sequences).item())
+            if resolved_num_sequences <= 0:
+                raise ValueError(f"num_sequences must be positive, got {resolved_num_sequences}")
+            policy_sums, policy_counts = _segmented_token_stats(
+                policy_log_ratio,
+                mask,
+                sequence_ids,
+                resolved_num_sequences,
+                sequence_group,
+            )
+            policy_means = policy_sums / policy_counts.clamp_min(1)
+            sequence_log_ratio = _map_sequence_values(policy_means, sequence_ids, mask)
 
         ratio = policy_log_ratio.clamp(min=-log_ratio_limit, max=log_ratio_limit).exp()
         loss, clip_ratio = self.policy_loss_fn(
@@ -325,6 +398,7 @@ class PolicyLoss(nn.Module):
             clip_eps_high=self.clip_eps_high,
             dual_clip=self.dual_clip,
             policy_log_ratio=policy_log_ratio,
+            sequence_log_ratio=sequence_log_ratio,
         )
 
         vllm_kl = None
@@ -345,8 +419,20 @@ class PolicyLoss(nn.Module):
             # (1) per-UNIT off-policy ratio (unit = token, or per-sequence for
             # seq/geo — kept at [B, 1] so the filter metric can stay per-sequence).
             # is_correction_level selects the aggregation.
+            sequence_unit_filtered = None
             if self.is_correction_level == "token":
                 unit_ratio = token_ratio
+            elif sequence_ids is not None:
+                is_sums, is_counts = _segmented_token_stats(
+                    is_log_ratio,
+                    mask,
+                    sequence_ids,
+                    resolved_num_sequences,
+                    sequence_group,
+                )
+                sequence_log = is_sums if self.is_correction_level == "seq" else is_sums / is_counts.clamp_min(1)
+                sequence_unit_ratio = torch.exp(sequence_log.clamp(min=-log_ratio_limit, max=log_ratio_limit))
+                unit_ratio = _map_sequence_values(sequence_unit_ratio, sequence_ids, mask)
             elif self.is_correction_level == "seq":
                 # product of a sequence's token ratios = exp(sum of log-ratios).
                 seq_log = (is_log_ratio * action_mask.float()).sum(dim=-1, keepdim=True)
@@ -362,6 +448,8 @@ class PolicyLoss(nn.Module):
                 keep = (unit_ratio >= low) & (unit_ratio <= high)
                 coef = torch.where(keep.expand_as(token_ratio), token_ratio, torch.zeros_like(token_ratio))
                 unit_filtered = ~keep
+                if sequence_ids is not None and self.is_correction_level in {"seq", "geo"}:
+                    sequence_unit_filtered = (sequence_unit_ratio < low) | (sequence_unit_ratio > high)
             elif self.is_correction_mode == "clip":
                 # Keep every unit, clamp its weight into [low, high] (applied per-token).
                 coef = unit_ratio.clamp(min=low, max=high).expand_as(token_ratio)
@@ -376,6 +464,8 @@ class PolicyLoss(nn.Module):
             # original seq-mask-tis: unit_filtered.mean() == 1 - seq_mask.mean()).
             if self.is_correction_level == "token":
                 is_filter_ratio = masked_mean(unit_filtered.float(), action_mask, dim=None)
+            elif sequence_unit_filtered is not None:
+                is_filter_ratio = sequence_unit_filtered.float().mean()
             else:
                 is_filter_ratio = unit_filtered.float().mean()
 
