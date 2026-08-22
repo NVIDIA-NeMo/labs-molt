@@ -18,28 +18,16 @@
 
 import json
 import os
-from typing import Callable, Dict, List, Optional
+from typing import Callable, List, Optional
 
 import torch
 from nemo_automodel.components.datasets.datum import Datum, LossInputLayout
 from torch.utils.data import Dataset
 
 from molt.utils.logging_utils import init_logger
-from molt.utils.utils import zero_pad_sequences
 from molt.utils.vlm_utils import should_expand_image_placeholder, split_image_placeholder
 
 logger = init_logger(__name__)
-
-
-class _SFTDatum(Datum):
-    """Keep DataLoader pinning after SFT collation moves into a Datum."""
-
-    def pin_memory(self):
-        for values in (self.model_inputs, self.loss_fn_inputs):
-            for name, value in values.items():
-                if torch.is_tensor(value):
-                    values[name] = value.pin_memory()
-        return self
 
 
 def _find_all(ids: List[int], pattern: List[int]) -> List[int]:
@@ -187,9 +175,6 @@ class SFTDataset(Dataset):
                 "or tokenizer (checked *_token_id attrs and image_token/video_token strings); "
                 "truncation cannot protect image placeholders."
             )
-        self.pad_token_id = self.text_tokenizer.pad_token_id
-        if self.pad_token_id is None:  # not `or`: a real pad id can be 0
-            self.pad_token_id = self.text_tokenizer.eos_token_id
         if image_key and self.processor is None:
             raise ValueError("--data.image_key needs an AutoProcessor (must expose .image_processor).")
 
@@ -285,11 +270,65 @@ class SFTDataset(Dataset):
                 "it will contribute no loss. Likely over-length truncation dropped the assistant reply — "
                 "raise --data.max_len or shorten the sample."
             )
-        return (
-            torch.tensor([token_ids], dtype=torch.long),
-            torch.ones(1, len(token_ids), dtype=torch.long),
-            torch.tensor([loss_mask], dtype=torch.float32),
-            mm_inputs,
+        return self._make_datum(token_ids, loss_mask, mm_inputs)
+
+    def _make_datum(
+        self,
+        token_ids: list[int],
+        loss_mask: list[float],
+        mm_inputs: dict[str, object] | None,
+    ) -> Datum:
+        """Build one processor-ready Engine item without batching it.
+
+        The canonical text collater consumes already-shifted sequences. AutoModel's
+        pre-tokenized VLM collater owns the shift, so VLM Datums retain the source
+        sequence and express supervision on target-token positions.
+
+        Args:
+            token_ids: Unshifted token IDs with shape ``[sequence]``.
+            loss_mask: Prediction-position supervision values with shape
+                ``[sequence]``.
+            mm_inputs: Optional processor tensors with shape ``[media, ...]``.
+
+        Returns:
+            A Datum with text token fields of shape ``[sequence - 1]`` or VLM
+            token fields of shape ``[sequence]``. Media tensor shapes are
+            unchanged.
+        """
+        if len(token_ids) < 2:
+            raise ValueError("SFT samples need at least two tokens for next-token training")
+        if len(loss_mask) != len(token_ids):
+            raise ValueError("SFT loss_mask must have one prediction-position value per token")
+
+        tokens = torch.tensor(token_ids, dtype=torch.long)
+        prediction_weights = torch.tensor(loss_mask[:-1], dtype=torch.bool)
+        if self.processor is None:
+            labels = tokens[1:].clone()
+            labels.masked_fill_(~prediction_weights, -100)
+            model_inputs = {"input_ids": tokens[:-1]}
+            weights = prediction_weights
+        else:
+            # pad_collate_fn shifts labels by one. Move each prediction-position
+            # mask to its target token first so the shifted result matches the text
+            # representation above. Position zero has no preceding prediction.
+            weights = torch.zeros_like(tokens, dtype=torch.bool)
+            weights[1:] = prediction_weights
+            labels = tokens.clone()
+            labels.masked_fill_(~weights, -100)
+            model_inputs = {
+                "input_ids": tokens,
+                "attention_mask": torch.ones_like(tokens),
+                **(mm_inputs or {}),
+            }
+
+        return Datum(
+            model_inputs=model_inputs,
+            loss_fn_inputs={"labels": labels, "weights": weights},
+            loss_fn_input_layouts={
+                "labels": LossInputLayout.PER_TOKEN,
+                "weights": LossInputLayout.PER_TOKEN,
+            },
+            loss_fn_input_pad_values={"labels": -100},
         )
 
     def _tokenize(self, text: str, images):
@@ -335,48 +374,3 @@ class SFTDataset(Dataset):
         # Next-token shift: the trainer scores its prediction at position t against
         # token t+1, so token t is supervised when token t+1 is a reply token.
         return [1.0 if (t + 1 < n and is_reply[t + 1]) else 0.0 for t in range(n)]
-
-    # ------------------------------------------------------------------
-    # Batching.
-    # ------------------------------------------------------------------
-    def collate_fn(self, items):
-        input_ids, attention_mask, loss_mask, mm_inputs = zip(*items)
-        input_ids = zero_pad_sequences(list(input_ids), "right", self.pad_token_id).squeeze(1)
-        attention_mask = zero_pad_sequences(list(attention_mask), "right").squeeze(1)
-        loss_mask = zero_pad_sequences(list(loss_mask), "right").squeeze(1)
-
-        labels = input_ids[:, 1:].clone()
-        labels.masked_fill_(loss_mask[:, :-1] == 0, -100)
-        input_ids = input_ids[:, :-1]
-        attention_mask = attention_mask[:, :-1]
-        position_ids = attention_mask.long().cumsum(-1) - 1
-        position_ids.masked_fill_(attention_mask == 0, 1)
-
-        model_inputs = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
-            "position_ids": position_ids,
-        }
-        model_inputs.update(self._stack_mm_inputs(mm_inputs))
-        return _SFTDatum(
-            model_inputs=model_inputs,
-            loss_fn_inputs={"labels": labels, "weights": labels.ne(-100)},
-            loss_fn_input_layouts={
-                "labels": LossInputLayout.PER_TOKEN,
-                "weights": LossInputLayout.PER_TOKEN,
-            },
-        )
-
-    @staticmethod
-    def _stack_mm_inputs(mm_inputs) -> Dict[str, torch.Tensor]:
-        """Concatenate per-sample VLM tensors (pixel_values, image_grid_thw, ...)
-        along dim 0. Returns {} for a text-only batch."""
-        dicts = [m for m in mm_inputs if m]
-        if not dicts:
-            return {}
-        out: Dict[str, torch.Tensor] = {}
-        for key in set().union(*(m.keys() for m in dicts)):
-            tensors = [m[key] for m in dicts if torch.is_tensor(m.get(key))]
-            if tensors:
-                out[key] = torch.cat(tensors, dim=0)
-        return out

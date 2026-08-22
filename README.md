@@ -520,8 +520,10 @@ model gets the sharding its attention backend needs — round-robin for hybrid
 SSM / linear-attention models (Nemotron Omni, Qwen3.5-MoE), flat THD streams for
 sparse-attention models (GLM-5.2 DSA). VLM vision towers and routing replay shard
 with the sequence, so `--fsdp.cp_size` composes with `--data.image_key` and
-`--train.routing_replay`. Sample packing (`--fsdp.packing_samples`) is text-only
-and off by default; under CP it takes the THD path.
+`--train.routing_replay`. RL sample packing (`--fsdp.packing_samples`) remains
+text-only and off by default; Engine-backed SFT additionally supports AutoModel's
+native packed-VLM THD path. Multi-axis mRoPE with packed THD CP is rejected until
+AutoModel can preserve its position layout through aligned CP sharding.
 
 ### ⚡ MTP rollout (speculative decoding)
 

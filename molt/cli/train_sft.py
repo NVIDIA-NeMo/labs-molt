@@ -72,7 +72,7 @@ def train(args):
         args.train.micro_batch_size,
         True,
         True,
-        train_dataset.collate_fn,
+        list,
         num_workers=args.data.dataloader_num_workers,
     )
 
@@ -98,7 +98,7 @@ def train(args):
             args.train.micro_batch_size,
             True,
             False,
-            eval_dataset.collate_fn,
+            list,
             num_workers=args.data.dataloader_num_workers,
         )
 
@@ -259,16 +259,10 @@ if __name__ == "__main__":
 
     # --- Engine-only SFT boundary ---
     unsupported = []
-    if args.data.image_key or args.model.freeze_visual_encoder:
-        unsupported.append("VLM input preparation")
-    if args.fsdp.packing_samples:
-        unsupported.append("packed input preparation")
     if args.fsdp.offload != "none":
         unsupported.append("CPU optimizer mutation")
-    if any(getattr(args.fsdp, name) != 1 for name in ("tp_size", "cp_size", "ep_size", "pp_size")):
-        unsupported.append("model parallelism")
-    if args.fsdp.sequence_parallel:
-        unsupported.append("sequence parallelism")
+    if args.fsdp.pp_size != 1:
+        unsupported.append("pipeline parallelism in Molt's trainer setup")
     if abs(args.model.aux_loss_coef) > 1e-8:
         unsupported.append("auxiliary-loss reporting")
     if unsupported:

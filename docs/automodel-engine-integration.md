@@ -11,21 +11,30 @@ gradient clipping, optimizer updates, or gradient clearing.
 
 ## Execution boundary
 
-`SFTDataset.collate_fn` emits one prebatched AutoModel `Datum` per dataloader
-batch. No trainer-side batch conversion remains.
+`SFTDataset.__getitem__` emits one AutoModel `Datum` per sample. The dataloader
+only groups those objects into a list, so AutoModel owns padding, packing,
+position IDs, loss-side-channel collation, pinning, and CP preparation.
 
 | Field | Layout |
 | --- | --- |
-| `input_ids`, `attention_mask`, `position_ids` | shifted model inputs `[batch, sequence - 1]` |
-| `labels` | `PER_TOKEN` next-token targets; unsupervised positions are `-100` |
+| text `input_ids` | one shifted 1-D sequence per Datum |
+| VLM processor outputs | one unbatched, unshifted processor mapping per Datum |
+| `labels` | `PER_TOKEN` targets; unsupervised positions are `-100` |
 | `weights` | `PER_TOKEN` boolean supervision mask |
 
-Engine uses `collate_prebatched` and calls Molt's thin
-`MaskedCrossEntropy(reduction="sum")` callback. The complete accumulation
-window maps to one `forward_backward([datum0, datum1, ...])` call and one
-`optim_step()`. Engine owns the global weight denominator, model-parallel loss
-reductions, gradient synchronization, clipping, optimizer update, and
-`zero_grad` lifecycle.
+Text uses AutoModel's canonical `collate_datums`, including its THD packing
+mode. VLM uses AutoModel's `collate_vlm_datums`, which delegates processor
+padding and shifting to `pad_collate_fn`, preserves additional processor
+tensors such as Nemotron-Omni's `image_flags` and `imgs_sizes`, and uses the
+canonical packed-VLM THD materializer when packing is enabled. The complete
+accumulation window maps to one `forward_backward([datum0, datum1, ...])` call
+and one `optim_step()`.
+
+Engine calls AutoModel's `MaskedCrossEntropy(reduction="sum")` through a small
+output-normalization callback because HF models return `.logits` while native
+AutoModel models may return the logits tensor directly. Engine owns the global
+weight denominator, model-parallel loss reductions, gradient synchronization,
+clipping, optimizer update, and `zero_grad` lifecycle.
 
 Molt advances its existing Transformers scheduler immediately after a
 successful Engine optimizer step. It is intentionally not passed as an Engine
@@ -44,13 +53,20 @@ this SFT execution integration.
 
 ## Current fail-fast boundary
 
-There is no legacy SFT fallback. The CLI rejects these configurations before
-model construction:
+There is no legacy SFT fallback. Padded text and VLM input, text THD packing,
+VLM THD packing on supported native models, TP, CP, EP, and sequence
+parallelism all stay on the same Engine path. Unsupported combinations fail
+before the first training batch:
 
-- VLM/media preparation and visual-encoder configuration;
-- packed samples;
 - optimizer or full CPU offload;
-- TP, CP, EP, PP, or sequence parallelism;
+- PP, because Molt's shared strategy does not yet construct an `AutoPipeline`;
+- THD packing on a Hugging Face fallback model, whose packing adapter is not
+  the AutoModel Engine THD contract;
+- packed VLM CP when the active model/backend does not declare packed-CP
+  support;
+- multi-axis mRoPE with packed THD CP, which AutoModel currently rejects
+  because aligned document padding and CP token reordering do not yet preserve
+  its three position axes;
 - explicit auxiliary-loss reporting.
 
 Muon and `MOLT_DEFER_GRAD_SYNC=0` use the same Engine path: Engine steps the
@@ -64,10 +80,11 @@ methods as SFT cleanup would break RL rather than simplify this integration.
 
 ## Dependency and validation status
 
-Source and Docker installs pin AutoModel revision `f864aadbe`, which contains
-the current Datum Engine, `forward` evaluation, complete-window accumulation,
-optimizer ownership, prepared-batch contexts, and the latest main-line
-context-parallel implementation.
+Source and Docker installs pin AutoModel revision `5420b30fd`, which contains
+the current Datum Engine, processor-ready recursive Datum pinning, padded and
+packed VLM Datum collation, pipeline batch contexts, model-scoped routing
+replay across local pipeline parts, the pre-FSDP structure hook used by the
+critic value head, and the latest main-line context-parallel implementation.
 Molt's PyPI build still replaces source pins with `nemo-automodel>=0.5.0`; no
 released version floor currently guarantees this API.
 
