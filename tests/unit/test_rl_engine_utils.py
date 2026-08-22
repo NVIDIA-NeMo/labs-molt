@@ -1,18 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+from functools import partial
 from types import SimpleNamespace
 
+import pytest
 import torch
 import torch.nn as nn
 
 from nemo_automodel import PreFSDPHookResult
-from nemo_automodel.components.datasets.datum import LossInputLayout
+from nemo_automodel.components.datasets.datum import LossInputLayout, collate_vlm_datums
 from nemo_automodel.engine import Engine, LossFnOutputBatch, PerTokenOutput, collate_prebatched
 
 from molt.models.critic import _ValueHead, _install_value_head
 from molt.models.loss import PolicyLoss
-from molt.trainer.workers.engine_utils import prepare_rl_engine_datum
+from molt.trainer.workers.engine_utils import prepare_rl_engine_datum, resolve_rl_engine_collation
 from molt.trainer.workers.policy_actor import PolicyTrainer
 
 
@@ -31,6 +33,60 @@ def _wrapper(**kwargs):
     defaults = {"model": nn.Linear(1, 1), "is_vlm": False}
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
+
+
+class _FakeDeviceMesh:
+    def __init__(self, cp_size):
+        self.mesh_dim_names = ("cp",) if cp_size > 1 else ()
+        self._cp_mesh = SimpleNamespace(size=lambda: cp_size)
+
+    def __getitem__(self, name):
+        assert name == "cp"
+        return self._cp_mesh
+
+
+def _vlm_collation_strategy(*, dynamic=False, cp_size=1):
+    return SimpleNamespace(
+        device_mesh=_FakeDeviceMesh(cp_size),
+        args=SimpleNamespace(train=SimpleNamespace(dynamic_batch_enable=dynamic)),
+    )
+
+
+def test_vlm_engine_collation_uses_automodel_and_preserves_fixed_sample_batching():
+    processor = SimpleNamespace(image_processor=object())
+    wrapper = _wrapper(is_vlm=True, packing_samples=True)
+
+    collate_fn, microbatch_size = resolve_rl_engine_collation(
+        wrapper, processor, _vlm_collation_strategy(), micro_train_batch_size=3
+    )
+
+    assert collate_fn.func is collate_vlm_datums
+    assert collate_fn.keywords["packed"] is True
+    assert microbatch_size == 3
+
+
+def test_dynamic_vlm_engine_collation_uses_one_datum_per_forward():
+    processor = SimpleNamespace(image_processor=object())
+    wrapper = _wrapper(is_vlm=True, packing_samples=False)
+
+    _collate_fn, microbatch_size = resolve_rl_engine_collation(
+        wrapper, processor, _vlm_collation_strategy(dynamic=True), micro_train_batch_size=3
+    )
+
+    assert microbatch_size == 1
+
+
+class _MropeModel(nn.Module):
+    def get_rope_index(self):
+        raise AssertionError("capability probing must not execute the position builder")
+
+
+def test_multi_axis_mrope_packed_vlm_cp_fails_fast():
+    processor = SimpleNamespace(image_processor=object())
+    wrapper = _wrapper(is_vlm=True, packing_samples=True, model=_MropeModel())
+
+    with pytest.raises(NotImplementedError, match="multi-axis mRoPE"):
+        resolve_rl_engine_collation(wrapper, processor, _vlm_collation_strategy(cp_size=2), micro_train_batch_size=2)
 
 
 def test_prepare_padded_rl_datum_uses_shifted_prediction_axis():
@@ -136,9 +192,69 @@ def test_prepare_vlm_rl_datum_keeps_media_and_builds_token_types():
         packing_samples=False,
     )
 
-    assert "position_ids" not in prepared.datum.model_inputs
-    assert prepared.datum.model_inputs["pixel_values"].shape == (1, 3, 2, 2)
-    assert prepared.datum.model_inputs["mm_token_type_ids"][0, 1] == 1
+    assert prepared.num_datums == 2
+    assert torch.equal(prepared.datums[0].model_inputs["input_ids"], torch.tensor([10, 99, 12, 13]))
+    assert torch.equal(prepared.datums[1].model_inputs["input_ids"], torch.tensor([20, 21, 22]))
+    assert "position_ids" not in prepared.datums[0].model_inputs
+    assert prepared.datums[0].model_inputs["pixel_values"].shape == (1, 3, 2, 2)
+    assert prepared.datums[0].model_inputs["mm_token_type_ids"][1] == 1
+    assert "pixel_values" not in prepared.datums[1].model_inputs
+    assert torch.equal(prepared.datums[0].loss_fn_inputs["returns"], experience.returns[0, :3])
+    assert torch.equal(prepared.datums[1].loss_fn_inputs["returns"], experience.returns[1, :2])
+
+
+def test_packed_vlm_rl_datums_collate_side_channels_and_restore_dense_outputs():
+    experience = _experience()
+    experience.sequences[0, 1] = 99
+    experience.mm_train_inputs = [
+        {"pixel_values": torch.ones(1, 3, 2, 2), "image_grid_thw": torch.tensor([[1, 2, 2]])},
+        None,
+    ]
+    wrapper = _wrapper(
+        is_vlm=True,
+        _image_token_id=99,
+        _video_token_id=None,
+        _routing_replay_adapter=_RouteAdapter(),
+    )
+    routes = torch.arange(2 * 1 * 2 * 5, dtype=torch.int16).reshape(2, 1, 2, 5)
+    prepared = prepare_rl_engine_datum(
+        experience,
+        wrapper,
+        loss_fields={"old_values": experience.values, "returns": experience.returns},
+        packing_samples=True,
+        routed_experts=routes,
+    )
+    processor = SimpleNamespace(
+        image_processor=SimpleNamespace(merge_size=2),
+        tokenizer=SimpleNamespace(pad_token_id=0),
+        image_token_id=99,
+    )
+    model = _ScalarValueModel()
+    model.backend = SimpleNamespace(attn="te")
+    engine = Engine(
+        model,
+        device="cpu",
+        microbatch_size=2,
+        collate_fn=partial(collate_vlm_datums, processor=processor, packed=True, sequence_alignment=4),
+    )
+
+    seen = {}
+
+    def loss_fn(output, loss_inputs):
+        values = output.squeeze(-1)
+        seen["routes"] = loss_inputs["routed_experts"]
+        return (values * loss_inputs["weights"]).sum(), LossFnOutputBatch(
+            per_token={"values": PerTokenOutput(values * loss_inputs["weights"], fill_value=0.0)}
+        )
+
+    result = engine.forward(prepared.datums, loss_fn)
+    restored = prepared.restore_token_outputs([record["values"] for record in result.loss_fn_outputs])
+
+    torch.testing.assert_close(result.loss_fn_outputs[0]["values"], torch.tensor([0.0, 9.9, 1.2]))
+    torch.testing.assert_close(result.loss_fn_outputs[1]["values"], torch.tensor([2.0, 2.1]))
+    torch.testing.assert_close(restored, torch.tensor([[0.0, 9.9, 1.2, 0.0], [2.0, 2.1, 0.0, 0.0]]))
+    assert seen["routes"].shape == (8, 1, 2)
+    assert bool((seen["routes"] == -1).any())
 
 
 class _HeadModel(nn.Module):

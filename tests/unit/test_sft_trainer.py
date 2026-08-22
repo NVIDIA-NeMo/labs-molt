@@ -190,7 +190,7 @@ def test_trainer_uses_automodel_vlm_collater_and_preserves_processor_fields():
     model_inputs, loss_inputs = trainer.engine.collate_fn(datums)
 
     torch.testing.assert_close(model_inputs["input_ids"], torch.tensor([[1, 2], [4, 5]]))
-    torch.testing.assert_close(model_inputs["attention_mask"], torch.tensor([[1, 1], [1, 1]]))
+    torch.testing.assert_close(model_inputs["attention_mask"], torch.tensor([[1, 1], [1, 0]]))
     torch.testing.assert_close(loss_inputs["labels"], torch.tensor([[2, 3], [5, -100]]))
     torch.testing.assert_close(loss_inputs["weights"], torch.tensor([[True, True], [True, False]]))
     torch.testing.assert_close(model_inputs["image_flags"], torch.tensor([[1]]))

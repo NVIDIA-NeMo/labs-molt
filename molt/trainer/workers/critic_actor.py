@@ -40,7 +40,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from nemo_automodel.components.distributed.mesh import MeshContext
-from nemo_automodel.engine import Engine, LossFnOutputBatch, PerTokenOutput, collate_prebatched
+from nemo_automodel.engine import Engine, LossFnOutputBatch, PerTokenOutput
 
 from molt.models import Critic, ValueLoss
 from molt.trainer.algorithm.experience import Experience, get_model_parallel_size
@@ -53,7 +53,7 @@ from molt.utils.vlm_utils import merge_mm_train_inputs
 
 from ..algorithm import NaiveReplayBuffer
 from .actor_group import BaseModelActor
-from .engine_utils import extract_model_logits, prepare_rl_engine_datum
+from .engine_utils import extract_model_logits, prepare_rl_engine_datum, resolve_rl_engine_collation
 
 logger = init_logger(__name__)
 
@@ -69,11 +69,13 @@ class CriticTrainer:
         critic_scheduler,
         micro_train_batch_size: int = 8,
         buffer_cpu_offload: bool = True,
+        tokenizer=None,
         dataloader_pin_memory: bool = True,
     ):
         self.strategy = strategy
         self.args = strategy.args
         self._defer_grad_sync = os.environ.get("MOLT_DEFER_GRAD_SYNC", "1") == "1"
+        self.tokenizer = tokenizer
         self.dataloader_pin_memory = dataloader_pin_memory
         self.critic = critic
         self.critic_optim = critic_optim
@@ -93,19 +95,18 @@ class CriticTrainer:
                 "Critic Engine training does not support --fsdp.offload: Engine owns optimizer.step(), "
                 "but Molt's CPU optimizer offloader is not a standard Optimizer mutation"
             )
-        if self.critic.packing_samples and getattr(self.critic, "is_vlm", False):
-            raise NotImplementedError(
-                "Critic Engine does not support RL VLM packing; disable --fsdp.packing_samples for VLM PPO"
-            )
         raw_model = self.critic.model
         padding_token_id = getattr(getattr(raw_model, "config", None), "pad_token_id", None) or 0
         max_grad_norm = self.args.critic.max_norm
+        collate_fn, engine_microbatch_size = resolve_rl_engine_collation(
+            self.critic, self.tokenizer, strategy, micro_train_batch_size
+        )
         self.engine = Engine(
             raw_model,
             device=next(raw_model.parameters()).device,
             mesh_context=MeshContext.from_meshes(strategy.device_mesh, strategy.moe_mesh),
-            microbatch_size=1,
-            collate_fn=collate_prebatched,
+            microbatch_size=engine_microbatch_size,
+            collate_fn=collate_fn,
             padding_token_id=padding_token_id,
             defer_fsdp_grad_sync=self._defer_grad_sync,
             optimizers=self.critic_optim,
@@ -193,9 +194,8 @@ class CriticTrainer:
                         )
                     )
 
-                result = self.engine.forward_backward(
-                    [prepared.datum for prepared in prepared_window], self._engine_loss
-                )
+                engine_datums = [datum for prepared in prepared_window for datum in prepared.datums]
+                result = self.engine.forward_backward(engine_datums, self._engine_loss)
                 self.strategy._maybe_debug_grad_stats(self.critic, "critic")
                 optim_result = self.engine.optim_step()
                 # Transformers LambdaLR.step() takes an absolute epoch when passed
@@ -204,13 +204,19 @@ class CriticTrainer:
                 last_grad_norm = float(optim_result.grad_norm)
                 last_lr = self.critic_scheduler.get_last_lr()[0]
 
-                if len(result.loss_fn_outputs) != len(window):
+                expected_outputs = sum(prepared.num_datums for prepared in prepared_window)
+                if len(result.loss_fn_outputs) != expected_outputs:
                     raise RuntimeError(
-                        f"Critic Engine returned {len(result.loss_fn_outputs)} outputs for {len(window)} Datums"
+                        f"Critic Engine returned {len(result.loss_fn_outputs)} outputs for {expected_outputs} Datums"
                     )
-                for exp, prepared, output_record in zip(window, prepared_window, result.loss_fn_outputs):
+                output_offset = 0
+                for exp, prepared in zip(window, prepared_window):
+                    output_records = result.loss_fn_outputs[output_offset : output_offset + prepared.num_datums]
+                    output_offset += prepared.num_datums
                     exp.to_device(device)
-                    action_values = prepared.restore_token_output(output_record["action_values"])
+                    action_values = prepared.restore_token_outputs(
+                        [record["action_values"] for record in output_records]
+                    )
                     _, reported_value_loss, value_clip_frac = self.value_loss_fn(
                         action_values,
                         exp.values,
@@ -336,6 +342,7 @@ class CriticModelActor(BaseModelActor):
             self.critic_optim,
             self.critic_scheduler,
             micro_train_batch_size=args.train.micro_batch_size,
+            tokenizer=self.tokenizer,
         )
 
     def fit(self):

@@ -993,11 +993,6 @@ if __name__ == "__main__":
             "consumes; use --rollout.top_p 1.0, or --algo.advantage.is_correction_level off."
         )
 
-    # --- Data ---
-    if args.data.max_images_per_prompt > 0 and args.fsdp.packing_samples:
-        print("[Warning] VLM training does not support --fsdp.packing_samples; disabling packing for this run.")
-        args.fsdp.packing_samples = False
-
     # --- Parallelism / FSDP ---
     if args.fsdp.pp_size > 1:
         raise NotImplementedError("Molt trainers are not pipeline-parallel aware yet; set --fsdp.pp_size 1")

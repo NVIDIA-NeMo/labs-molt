@@ -32,7 +32,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from nemo_automodel.components.distributed.mesh import MeshContext
-from nemo_automodel.engine import Engine, LossFnOutputBatch, PerTokenOutput, collate_prebatched
+from nemo_automodel.engine import Engine, LossFnOutputBatch, PerTokenOutput
 
 from molt.models import Actor, PolicyLoss
 from molt.models.loss import masked_sum
@@ -48,7 +48,7 @@ from molt.utils.vlm_utils import merge_mm_train_inputs
 
 from ..algorithm import NaiveReplayBuffer
 from .actor_group import BaseModelActor
-from .engine_utils import extract_model_logits, prepare_rl_engine_datum
+from .engine_utils import extract_model_logits, prepare_rl_engine_datum, resolve_rl_engine_collation
 
 logger = init_logger(__name__)
 
@@ -129,19 +129,18 @@ class PolicyTrainer:
                 "Policy Engine training does not support --fsdp.offload: Engine owns optimizer.step(), "
                 "but Molt's CPU optimizer offloader is not a standard Optimizer mutation"
             )
-        if self.actor.packing_samples and getattr(self.actor, "is_vlm", False):
-            raise NotImplementedError(
-                "Policy Engine does not support RL VLM packing; disable --fsdp.packing_samples for VLM RL"
-            )
         raw_model = self.actor.model
         padding_token_id = getattr(getattr(raw_model, "config", None), "pad_token_id", None) or 0
         max_grad_norm = self.args.actor.max_norm
+        collate_fn, engine_microbatch_size = resolve_rl_engine_collation(
+            self.actor, self.tokenizer, strategy, micro_train_batch_size
+        )
         self.engine = Engine(
             raw_model,
             device=next(raw_model.parameters()).device,
             mesh_context=MeshContext.from_meshes(strategy.device_mesh, strategy.moe_mesh),
-            microbatch_size=1,
-            collate_fn=collate_prebatched,
+            microbatch_size=engine_microbatch_size,
+            collate_fn=collate_fn,
             padding_token_id=padding_token_id,
             batch_context_fn=getattr(self.actor, "_routing_replay_adapter", None),
             defer_fsdp_grad_sync=self._defer_grad_sync,
@@ -361,27 +360,31 @@ class PolicyTrainer:
                         )
                     )
 
-                result = self.engine.forward_backward(
-                    [prepared.datum for prepared in prepared_window],
-                    partial(self._engine_loss, kl_ctl=kl_ctl),
-                )
+                engine_datums = [datum for prepared in prepared_window for datum in prepared.datums]
+                result = self.engine.forward_backward(engine_datums, partial(self._engine_loss, kl_ctl=kl_ctl))
                 self.strategy._maybe_debug_grad_stats(self.actor, "actor")
                 optim_result = self.engine.optim_step()
                 # Keep the HF scheduler out of Engine: LambdaLR.step(1) means
                 # absolute epoch 1, whereas AutoModel schedulers use an increment.
                 self.actor_scheduler.step()
-                if len(result.loss_fn_outputs) != len(window):
+                expected_outputs = sum(prepared.num_datums for prepared in prepared_window)
+                if len(result.loss_fn_outputs) != expected_outputs:
                     raise RuntimeError(
-                        f"Policy Engine returned {len(result.loss_fn_outputs)} outputs for {len(window)} Datums"
+                        f"Policy Engine returned {len(result.loss_fn_outputs)} outputs for {expected_outputs} Datums"
                     )
 
-                for idx, (exp, prepared, output_record) in enumerate(
-                    zip(window, prepared_window, result.loss_fn_outputs)
-                ):
+                output_offset = 0
+                for idx, (exp, prepared) in enumerate(zip(window, prepared_window)):
+                    output_records = result.loss_fn_outputs[output_offset : output_offset + prepared.num_datums]
+                    output_offset += prepared.num_datums
                     exp.to_device(device)
-                    action_log_probs = prepared.restore_token_output(output_record["action_log_probs"])
+                    action_log_probs = prepared.restore_token_outputs(
+                        [record["action_log_probs"] for record in output_records]
+                    )
                     entropy = (
-                        prepared.restore_token_output(output_record["entropy"]) if "entropy" in output_record else None
+                        prepared.restore_token_outputs([record["entropy"] for record in output_records])
+                        if output_records and "entropy" in output_records[0]
+                        else None
                     )
                     status = self._collect_metrics(
                         exp,
