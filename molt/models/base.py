@@ -16,11 +16,9 @@
 # Adapted from OpenRLHF (https://github.com/OpenRLHF/OpenRLHF),
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
-import inspect
 import os
 from contextlib import nullcontext
 from importlib.util import find_spec
-from pathlib import Path
 from typing import Optional, Union
 
 import torch
@@ -145,44 +143,16 @@ def _reject_hf_fallback_features(
         )
 
 
-def _class_source_supports_thd_packing(model_cls) -> bool:
-    try:
-        source_path = inspect.getsourcefile(model_cls)
-    except (TypeError, OSError):
-        return False
-    if not source_path:
+def _automodel_supports_thd_packing(model_or_path) -> bool:
+    """Return AutoModel's declared THD capability for a native model."""
+    if not isinstance(model_or_path, str) and not is_automodel_custom_model(model_or_path):
         return False
     try:
-        source = Path(source_path).read_text(errors="ignore")
-    except OSError:
-        return False
-    # THD packing is signalled by qkv_format='thd' plus per-sequence cu_seqlens.
-    return "qkv_format" in source and "cu_seqlens" in source
+        from nemo_automodel._transformers.model_capabilities import query_capabilities
 
-
-def _automodel_arch_supports_thd_packing(pretrain_or_model) -> bool:
-    """Return whether AutoModel's custom class consumes THD packing kwargs."""
-    # Only reached with a model-path string (the pre-instantiated branch returns earlier).
-    try:
-        from nemo_automodel._transformers.registry import ModelRegistry
-        from transformers import AutoConfig
-
-        cfg = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True)
-        archs = getattr(cfg, "architectures", None) or []
-        if not archs:
-            return False
-        # model_arch_name_to_cls is a _LazyArchMapping (no .get()) — use contains/getitem.
-        _arch_map = ModelRegistry.model_arch_name_to_cls
-        model_cls = _arch_map[archs[0]] if archs[0] in _arch_map else None
-        return bool(model_cls) and _class_source_supports_thd_packing(model_cls)
+        return query_capabilities(model_or_path, trust_remote_code=True).supports_thd
     except Exception:
         return False
-
-
-def _automodel_custom_supports_thd_packing(model: nn.Module) -> bool:
-    if not is_automodel_custom_model(model):
-        return False
-    return any(_class_source_supports_thd_packing(cls) for cls in type(model).__mro__)
 
 
 class _AttrDict(dict):
@@ -316,13 +286,14 @@ class BaseModel(nn.Module):
             if is_native_model:
                 configured_aux = configure_nemo_moe_aux_loss(self.model, moe_aux_loss_coef)
                 if abs(float(moe_aux_loss_coef or 0.0)) > 1e-8 and not configured_aux:
-                    raise ValueError("MoE auxiliary loss was requested, but the AutoModel model has no native MoE gates.")
-            if self.packing_samples:
-                if not _automodel_custom_supports_thd_packing(self.model):
                     raise ValueError(
-                        "This pre-instantiated AutoModel custom model does not consume THD packing kwargs. "
-                        "Use an AutoModel custom TE model or disable --fsdp.packing_samples."
+                        "MoE auxiliary loss was requested, but the AutoModel model has no native MoE gates."
                     )
+            if self.packing_samples and not _automodel_supports_thd_packing(self.model):
+                raise ValueError(
+                    "This pre-instantiated AutoModel custom model does not declare THD packing support. "
+                    "Use an AutoModel custom TE model or disable --fsdp.packing_samples."
+                )
             if routing_replay:
                 self._enable_routing_replay()
             return
@@ -355,12 +326,11 @@ class BaseModel(nn.Module):
                 "whose `architectures` is natively registered (e.g. omni3: NemotronH_Nano_Omni_Reasoning_V3, "
                 "the official GA model — not a renamed alias), or run with ep_size=1."
             )
-        if packing_samples:
-            if not _automodel_arch_supports_thd_packing(pretrain_or_model):
-                raise ValueError(
-                    "AutoModel custom implementation for this architecture does not consume THD packing kwargs; "
-                    "use --fsdp.attn_implementation te with a THD-capable custom model or disable packing."
-                )
+        if packing_samples and not _automodel_supports_thd_packing(pretrain_or_model):
+            raise ValueError(
+                "AutoModel custom implementation for this architecture does not declare THD packing support; "
+                "use --fsdp.attn_implementation te with a THD-capable custom model or disable packing."
+            )
 
         _validate_attn_implementation(attn_implementation)
         # fp32 master weights (including MoE): matches AutoModel's master-weight
