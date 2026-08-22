@@ -100,6 +100,16 @@ def test_hf_fallback_features_fail_fast(kwargs, message):
         BaseModel(torch.nn.Linear(2, 2), **kwargs)
 
 
+def test_hf_fallback_moe_model_fails_fast_without_aux_loss_or_ep():
+    model = torch.nn.Linear(2, 2)
+    model.config = SimpleNamespace(
+        architectures=["MixtralForCausalLM"],
+        text_config=SimpleNamespace(num_local_experts=8),
+    )
+    with pytest.raises(NotImplementedError, match="MoE model training"):
+        BaseModel(model)
+
+
 class _FakeMesh:  # single-process stand-in; make_* reads size() + get_group()
     def size(self):
         return 2

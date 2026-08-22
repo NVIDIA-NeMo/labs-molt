@@ -29,9 +29,9 @@
 # Thin wrapper over slurm/_launcher.sh that strips the VLM/MoE knobs
 # (EP=1, text-only single-turn math agent).
 #
-# Dense Qwen3 has no nemo_automodel native impl (HF Qwen3ForCausalLM only). That's fine: this
-# recipe runs EP=1, and molt permits the HF path whenever EP is off; the fallback is forbidden
-# only under expert parallelism (EP>1, e.g. the omni3 MoE), which HF transformers can't shard.
+# Dense Qwen3 has no nemo_automodel native impl (HF Qwen3ForCausalLM only). That's fine for
+# this padded EP=1 recipe. MoE checkpoints always require an AutoModel-native implementation;
+# HF fallback is also unavailable whenever EP is active.
 
 set -euo pipefail
 

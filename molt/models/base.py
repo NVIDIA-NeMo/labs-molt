@@ -37,24 +37,35 @@ from .utils import (
 )
 
 
-def _detect_moe_arch(pretrain_or_model) -> bool:
-    """Lightweight MoE detection from HF config (no model load)."""
-    if not isinstance(pretrain_or_model, str):
+def _config_is_moe(config) -> bool:
+    """Detect MoE on top-level and nested text configs."""
+    if config is None:
         return False
+    configs = [config]
+    text_config = getattr(config, "text_config", None)
+    if text_config is not None:
+        configs.append(text_config)
+    for candidate in configs:
+        names = [*(getattr(candidate, "architectures", None) or []), getattr(candidate, "model_type", "")]
+        if any("moe" in str(name).lower() for name in names):
+            return True
+        for key in ("num_experts", "n_routed_experts", "num_local_experts", "moe_num_experts"):
+            count = getattr(candidate, key, None)
+            if isinstance(count, int) and count > 1:
+                return True
+    return False
+
+
+def _detect_moe_arch(pretrain_or_model) -> bool:
+    """Detect MoE without loading weights."""
+    if not isinstance(pretrain_or_model, str):
+        return _config_is_moe(getattr(pretrain_or_model, "config", None))
     try:
         from transformers import AutoConfig
 
-        cfg = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True)
-        archs = getattr(cfg, "architectures", None) or []
-        if any("Moe" in a or "MoE" in a for a in archs):
-            return True
-        for k in ("num_experts", "n_routed_experts", "num_local_experts", "moe_num_experts"):
-            n = getattr(cfg, k, None)
-            if isinstance(n, int) and n > 1:
-                return True
+        return _config_is_moe(AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True))
     except Exception:
         return False
-    return False
 
 
 _HF_ATTN_IMPLEMENTATIONS = {"eager", "sdpa", "flash_attention_2", "flash_attention_3", "te"}
@@ -96,9 +107,9 @@ def _will_use_hf_model(pretrain_or_model, default: bool = True) -> bool:
     """True if this model would load through the plain HF transformers path.
 
     The AutoModel (NVIDIA-NeMo/Automodel) backend is the preferred path (native
-    CP/EP/TP, custom MoE+EP parallelizer, TE fused attention). HF is a fallback for
-    models with no registered native class. Packing and MoE auxiliary loss are
-    intentionally unavailable on that fallback.
+    CP/EP/TP, custom MoE+EP parallelizer, TE fused attention). HF is a fallback
+    only for dense models with no registered native class. MoE always requires
+    an AutoModel-native implementation.
     """
     if not isinstance(pretrain_or_model, str):
         return False
@@ -112,15 +123,19 @@ def _will_use_hf_model(pretrain_or_model, default: bool = True) -> bool:
         return default
 
 
-def _reject_hf_fallback_features(*, is_hf_model: bool, packing_samples: bool, moe_aux_loss_coef: float) -> None:
+def _reject_hf_fallback_features(
+    *, is_hf_model: bool, is_moe: bool, packing_samples: bool, moe_aux_loss_coef: float
+) -> None:
     """Reject features whose old HF-specific implementations were removed."""
     if not is_hf_model:
         return
 
     unsupported = []
+    if is_moe:
+        unsupported.append("MoE model training")
     if packing_samples:
         unsupported.append("THD sequence packing")
-    if abs(float(moe_aux_loss_coef or 0.0)) > 1e-8:
+    if not is_moe and abs(float(moe_aux_loss_coef or 0.0)) > 1e-8:
         unsupported.append("MoE auxiliary loss")
     if unsupported:
         raise NotImplementedError(
@@ -298,6 +313,7 @@ class BaseModel(nn.Module):
             is_native_model = is_automodel_custom_model(self.model)
             _reject_hf_fallback_features(
                 is_hf_model=not is_native_model,
+                is_moe=_detect_moe_arch(self.model),
                 packing_samples=self.packing_samples,
                 moe_aux_loss_coef=moe_aux_loss_coef,
             )
@@ -326,6 +342,7 @@ class BaseModel(nn.Module):
         use_hf_model = _will_use_hf_model(pretrain_or_model)
         _reject_hf_fallback_features(
             is_hf_model=use_hf_model,
+            is_moe=is_moe,
             packing_samples=packing_samples,
             moe_aux_loss_coef=moe_aux_loss_coef,
         )
@@ -363,17 +380,13 @@ class BaseModel(nn.Module):
             from nemo_automodel import NeMoAutoModelForCausalLM as ModelCls
 
         # AutoModel owns attention selection (forces sdpa under CP, falls back
-        # FA2->sdpa when a model lacks FA2). When no custom path matches (e.g. dense
-        # Qwen3-8B) it uses HF transformers directly — fine for dense models, which
-        # lack the MoE/EP/CP features anyway. Log once so MoE users notice a silent degrade.
+        # FA2->sdpa when a model lacks FA2). When no custom path matches a dense
+        # model (e.g. Qwen3-8B), it uses HF transformers directly.
         if use_hf_model and (not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0):
             print(
                 f"[AutoModel] WARNING: no native AutoModel implementation matched {pretrain_or_model!r} "
                 "(architecture not in nemo_automodel ModelRegistry) — falling back to HuggingFace "
-                "transformers. The native path (custom MoE/EP parallelizer, selective activation "
-                "checkpointing, TE attention) is OFF. For MoE / hybrid-SSM (Mamba) checkpoints this can "
-                "silently degrade throughput AND break activation-checkpoint recompute determinism. "
-                "Verify this checkpoint's `architectures` is registered if you expected the native path."
+                "transformers. Native parallelism, selective activation checkpointing, and TE attention are OFF."
             )
         # AutoModel custom drives attention/MoE through a BackendConfig and hands
         # from_pretrained "sdpa": passing "te" would also fire AutoModel's own post-init
@@ -461,6 +474,7 @@ class BaseModel(nn.Module):
         is_native_model = is_automodel_custom_model(self.model)
         _reject_hf_fallback_features(
             is_hf_model=not is_native_model,
+            is_moe=_detect_moe_arch(self.model),
             packing_samples=packing_samples,
             moe_aux_loss_coef=moe_aux_loss_coef,
         )

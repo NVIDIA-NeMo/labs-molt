@@ -114,9 +114,9 @@ would count that gradient twice.
 
 Padded text and VLM, native text THD packing, TP, CP, EP, sequence parallelism,
 R3, entropy regularization, and PPO/GSPO/CISPO all use this path. RL VLM packing,
-HF-fallback THD packing, and nonzero HF-fallback MoE auxiliary loss fail during
-model construction. Molt retains neither the HF varlen-attention packing kwargs
-nor a scalar HF auxiliary-loss optimization branch.
+HF-fallback THD packing and every HF-fallback MoE model fail during model
+construction. Molt retains neither the HF varlen-attention packing kwargs nor an
+HF MoE training or scalar auxiliary-loss optimization branch.
 The policy's Transformers scheduler remains Molt-owned and advances once after a
 successful Engine optimizer update.
 
@@ -140,7 +140,7 @@ debugging.
 | Critic model parallelism | GAE critic fails fast for TP/CP/EP/PP or sequence parallelism | AutoModel's current `pre_fsdp_hook` supports only unquantized, non-PEFT models with all model-parallel axes equal to one; PEFT, quantization, FP8, and QAT are restricted by the same hook |
 | RL VLM packing | Actor and critic fail fast; padded VLM remains supported | AutoModel's current VLM Datum collater owns SFT `labels`/`weights`, but does not collate arbitrary PPO side channels such as old values/log-probabilities, advantages, and replay routes |
 | HF fallback packing | Model construction fails fast | The old FlashAttention varlen packing implementation was deleted; packed training requires AutoModel's native THD Datum contract |
-| HF fallback MoE aux loss | Model construction fails fast when its coefficient is nonzero | The old scalar-loss branch was deleted; only native AutoModel gates expose Engine-scaled autograd injection |
+| HF fallback MoE | Model construction always fails fast, independent of auxiliary-loss settings or EP size | All MoE training requires an AutoModel-native implementation; the old scalar auxiliary-loss branch was deleted |
 | Multi-axis mRoPE + packed THD CP | Intentionally unsupported and fail-fast | The agreed scope excludes this combination; AutoModel also rejects 3-D packed position IDs when CP/PP reorders or splits the token stream |
 
 ## Dependency and validation status
