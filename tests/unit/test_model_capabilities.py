@@ -48,3 +48,20 @@ def test_hf_fallback_moe_model_fails_fast_without_aux_loss_or_ep():
     )
     with pytest.raises(NotImplementedError, match="MoE model training"):
         BaseModel(model)
+
+
+def test_automodel_full_cpu_offload_is_allowed_for_dense_model():
+    wrapped = BaseModel(
+        _DeclaredTHDModel(),
+        distributed_config=SimpleNamespace(offload_policy=object()),
+    )
+
+    assert isinstance(wrapped.model, _DeclaredTHDModel)
+
+
+def test_automodel_full_cpu_offload_fails_fast_for_custom_moe():
+    model = _DeclaredTHDModel()
+    model.config = SimpleNamespace(num_local_experts=8)
+
+    with pytest.raises(NotImplementedError, match="CPU parameter offload.*custom-MoE"):
+        BaseModel(model, distributed_config=SimpleNamespace(offload_policy=object()))

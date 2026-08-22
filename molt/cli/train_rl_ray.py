@@ -997,13 +997,6 @@ if __name__ == "__main__":
     if args.fsdp.pp_size > 1:
         raise NotImplementedError("Molt trainers are not pipeline-parallel aware yet; set --fsdp.pp_size 1")
 
-    if not args.eval.eval_only and args.fsdp.offload != "none":
-        raise NotImplementedError(
-            "RL Engine training does not yet support --fsdp.offload: Engine owns optimizer.step(), "
-            "but Molt's CPU optimizer offloader is not a standard Optimizer mutation. "
-            "Use --fsdp.offload none."
-        )
-
     if args.train.routing_replay and args.train.partial_rollout_enable:
         # vLLM frees a request's captured routing on preemption, and partial
         # rollout preempts in-flight requests at every weight sync -> the routing

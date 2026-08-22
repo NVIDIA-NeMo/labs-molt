@@ -20,7 +20,6 @@ from datetime import timedelta
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-import torch.optim as optim
 import transformers
 from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy
 from torch.distributed.tensor import DTensor
@@ -29,7 +28,6 @@ from transformers.optimization import get_scheduler
 
 from molt.models.utils import resolve_ac_mode
 from molt.trainer.fsdp.checkpoint import CheckpointManager
-from molt.trainer.fsdp.optimizer_offload import CpuOptimizerOffloader, local_shard
 from molt.utils.distributed_sampler import DistributedSampler
 
 
@@ -72,14 +70,10 @@ class FsdpStrategy:
         self.ep_size = getattr(fsdp, "ep_size", 1)
         self.pp_size = getattr(fsdp, "pp_size", 1)
         self.param_dtype = getattr(fsdp, "param_dtype", "bf16")
-        # CPU-offload level (--fsdp.offload): none / optimizer / full. 'full' (FSDP2
-        # CPUOffloadPolicy) streams params to CPU and the optimizer follows;
-        # 'optimizer' keeps params on GPU and runs only the AdamW step on CPU
-        # (MoE-safe; see optimizer_offload.py).
         offload = getattr(fsdp, "offload", "none")
+        if offload not in {"none", "full"}:
+            raise ValueError(f"Unsupported --fsdp.offload mode: {offload!r}; choose none or full")
         self.cpu_offload = offload == "full"
-        self.offload_optimizer = offload == "optimizer"
-        self._optimizer_offloader = CpuOptimizerOffloader() if self.offload_optimizer else None
         # SP off by default (opt in via --fsdp.sequence_parallel); avoids the
         # _NormPartial 2D TP+FSDP weight-load hang on the HF-fallback path.
         self.sequence_parallel = bool(getattr(fsdp, "sequence_parallel", False))
@@ -168,11 +162,6 @@ class FsdpStrategy:
             dist.init_process_group(backend=backend, timeout=timeout)
 
         self.world_size = dist.get_world_size()
-        if self.world_size == 1 and self.cpu_offload:
-            raise NotImplementedError(
-                "CPU offload is not supported by AutoModel/FSDP2 on a single rank; "
-                "set --fsdp.offload to none/optimizer or launch with more than one rank."
-            )
         if self.pp_size > 1:
             raise NotImplementedError("Molt trainers are not pipeline-parallel aware yet; set --fsdp.pp_size 1")
 
@@ -327,11 +316,6 @@ class FsdpStrategy:
         kind = cfg["optim"]
         adam = cfg["adam"]
         if kind == "muon":
-            if self.offload_optimizer:
-                raise NotImplementedError(
-                    "--fsdp.offload optimizer supports AdamW only; Muon's Newton-Schulz "
-                    "iterations are impractical on CPU. Use --optim adam, or --fsdp.offload none."
-                )
             from molt.trainer.fsdp.muon import build_automodel_muon_optimizer
 
             optimizer = build_automodel_muon_optimizer(train_model, cfg["muon"], adam, self.device_mesh)
@@ -356,13 +340,6 @@ class FsdpStrategy:
             scheduler_specific_kwargs={"min_lr_rate": cfg.get("min_lr_ratio", 0.1)},
         )
         return model, optimizer, scheduler
-
-    def offload_moments_to_cpu(self, optimizer: optim.Optimizer) -> None:
-        """Page the Adam moments back to CPU after a checkpoint resume (DCP restores
-        them onto the model param's GPU device). No-op unless the optimizer is
-        CPU-offloaded."""
-        if self._optimizer_offloader is not None:
-            self._optimizer_offloader.moments_to_cpu(optimizer)
 
     def _maybe_debug_grad_stats(self, model: nn.Module, optim_name: str) -> None:
         debug = os.environ.get("MOLT_FSDP_DEBUG_GRADS", "")
@@ -394,7 +371,7 @@ class FsdpStrategy:
             if patterns and not any(pattern in param_name for pattern in patterns):
                 continue
             total_tensors += 1
-            local_grad = local_shard(grad).detach()
+            local_grad = (grad.to_local() if isinstance(grad, DTensor) else grad).detach()
             total_elems += local_grad.numel()
             finite = torch.isfinite(local_grad)
             bad = local_grad.numel() - int(finite.sum().item())

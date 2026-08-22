@@ -93,11 +93,6 @@ class CriticTrainer:
             buffer_cpu_offload,
             dynamic_batch=self.args.train.dynamic_batch_enable,
         )
-        if strategy.cpu_offload or strategy.offload_optimizer:
-            raise NotImplementedError(
-                "Critic Engine training does not support --fsdp.offload: Engine owns optimizer.step(), "
-                "but Molt's CPU optimizer offloader is not a standard Optimizer mutation"
-            )
         raw_model = self.critic.model
         padding_token_id = getattr(getattr(raw_model, "config", None), "pad_token_id", None) or 0
         max_grad_norm = self.args.critic.max_norm
@@ -106,7 +101,7 @@ class CriticTrainer:
         )
         self.engine = Engine(
             raw_model,
-            device=next(raw_model.parameters()).device,
+            device=torch.device("cuda", torch.cuda.current_device()),
             mesh_context=MeshContext.from_meshes(strategy.device_mesh, strategy.moe_mesh),
             microbatch_size=engine_microbatch_size,
             collate_fn=collate_fn,
@@ -278,11 +273,6 @@ class CriticModelActor(BaseModelActor):
     def init_model_from_pretrained(self, strategy: FsdpStrategy, pretrain, max_steps=None):
         args = strategy.args
         self._setup_distributed(strategy)
-        if strategy.cpu_offload or strategy.offload_optimizer:
-            raise NotImplementedError(
-                "Critic Engine training does not support --fsdp.offload; use --fsdp.offload none"
-            )
-
         # Init from the critic checkpoint (a reward model / value model) when given,
         # else from the actor checkpoint. `pretrain` is already the actor path.
         critic_pretrain = args.critic.model_name_or_path or pretrain

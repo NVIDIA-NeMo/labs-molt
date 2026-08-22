@@ -107,7 +107,7 @@ class SFTTrainer:
             padding_token_id = getattr(getattr(raw_model, "config", None), "pad_token_id", None) or 0
         self.engine = Engine(
             raw_model,
-            device=next(raw_model.parameters()).device,
+            device=torch.device("cuda", torch.cuda.current_device()),
             mesh_context=MeshContext.from_meshes(strategy.device_mesh, strategy.moe_mesh),
             microbatch_size=strategy.args.train.micro_batch_size,
             collate_fn=collate_fn,

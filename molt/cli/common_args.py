@@ -40,16 +40,11 @@ def add_fsdp_args(parser) -> None:
         "--fsdp.offload",
         type=str,
         default="none",
-        choices=["none", "optimizer", "full"],
-        help="CPU-offload level — a nested progression, not orthogonal toggles (FSDP "
-        "param offload inherently offloads the optimizer too). "
+        choices=["none", "full"],
+        help="CPU-offload mode. "
         "'none': everything on GPU. "
-        "'optimizer': run the AdamW step on CPU so the fp32 master + Adam moments never "
-        "occupy GPU during the step (shrinks the optimizer-step peak, the binding one at "
-        "long context); params stay on GPU for the forward, so it's safe on Qwen3.6 MoE; "
-        "AdamW only; numerically equivalent to a GPU step. "
-        "'full': FSDP2 CPUOffloadPolicy also streams the *params* to CPU (maximal saving, "
-        "but breaks Qwen3.6 MoE and slows the forward).",
+        "'full': use AutoModel's FSDP2 CPUOffloadPolicy to stream parameters and optimizer "
+        "state to CPU (maximal saving, slower forward); custom MoE models remain unsupported.",
     )
     parser.add_argument(
         "--fsdp.param_dtype",

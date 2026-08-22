@@ -142,15 +142,6 @@ def compute_entropy(logits: torch.Tensor):
     return torch.logsumexp(logits, dim=-1) - torch.sum(pd * logits, dim=-1)
 
 
-def move_model_to_cpu_for_offload(model: nn.Module, distributed_config):
-    """Move params + buffers to CPU when FSDP offload is on (else a no-op)."""
-    if getattr(distributed_config, "offload_policy", None) is None:
-        return model
-    for buffer in model.buffers():
-        buffer.data = buffer.data.to("cpu")
-    return model.to("cpu")
-
-
 def _iter_nemo_moe_gates(model: nn.Module):
     for module in model.modules():
         cls = type(module)

@@ -27,7 +27,6 @@ from molt.trainer.fsdp.packing import is_automodel_custom_model
 
 from .utils import (
     configure_nemo_moe_aux_loss,
-    move_model_to_cpu_for_offload,
     resolve_ac_mode,
 )
 
@@ -140,6 +139,14 @@ def _reject_hf_fallback_features(
         )
 
 
+def _reject_moe_cpu_offload(is_moe: bool, distributed_config) -> None:
+    if is_moe and getattr(distributed_config, "offload_policy", None) is not None:
+        raise NotImplementedError(
+            "AutoModel FSDP2 CPU parameter offload is not supported for Molt custom-MoE training; "
+            "use --fsdp.offload none."
+        )
+
+
 def _automodel_supports_thd_packing(model_or_path) -> bool:
     """Return AutoModel's declared THD capability for a native model."""
     if not isinstance(model_or_path, str) and not is_automodel_custom_model(model_or_path):
@@ -237,9 +244,11 @@ class BaseModel(nn.Module):
             self.model = pretrain_or_model
             self.is_vlm = False
             is_native_model = is_automodel_custom_model(self.model)
+            is_moe = _detect_moe_arch(self.model)
+            _reject_moe_cpu_offload(is_moe, distributed_config)
             _reject_hf_fallback_features(
                 is_hf_model=not is_native_model,
-                is_moe=_detect_moe_arch(self.model),
+                is_moe=is_moe,
                 packing_samples=self.packing_samples,
                 moe_aux_loss_coef=moe_aux_loss_coef,
             )
@@ -265,6 +274,7 @@ class BaseModel(nn.Module):
         # MixedPrecisionPolicy.
         compute_dtype = convert_to_torch_dtype(param_dtype)
         is_moe = _detect_moe_arch(pretrain_or_model)
+        _reject_moe_cpu_offload(is_moe, distributed_config)
         ep_active = moe_mesh is not None
         use_hf_model = _will_use_hf_model(pretrain_or_model)
         _reject_hf_fallback_features(
@@ -393,7 +403,6 @@ class BaseModel(nn.Module):
             **_mtp_off_kwargs(pretrain_or_model),
             **backend_kwarg,
         )
-        self.model = move_model_to_cpu_for_offload(self.model, distributed_config)
         # Registry/config inspection is best-effort. Recheck the loaded class so
         # a late AutoModel -> HF fallback cannot enter either removed feature.
         is_native_model = is_automodel_custom_model(self.model)

@@ -259,8 +259,6 @@ if __name__ == "__main__":
 
     # --- Engine-only SFT boundary ---
     unsupported = []
-    if args.fsdp.offload != "none":
-        unsupported.append("CPU optimizer mutation")
     if args.fsdp.pp_size != 1:
         unsupported.append("pipeline parallelism in Molt's trainer setup")
     if abs(args.model.aux_loss_coef) > 1e-8:

@@ -58,7 +58,8 @@ VLM THD packing on supported native models, TP, CP, EP, and sequence
 parallelism all stay on the same Engine path. Unsupported combinations fail
 before the first training batch:
 
-- optimizer or full CPU offload;
+- custom MoE full CPU offload; dense full offload uses AutoModel's FSDP2
+  `CPUOffloadPolicy`. The old optimizer-only implementation was removed;
 - PP, because Molt's shared strategy does not yet construct an `AutoPipeline`;
 - THD packing on a Hugging Face fallback model; Molt's old FA2 packing adapter
   has been removed and model construction fails before loading that path;
@@ -90,8 +91,9 @@ excludes it from PEFT and lower-precision transforms, and includes it in trainin
 checkpoints. Molt therefore uses the same critic path with TP, CP, EP, and sequence
 parallelism; PP remains unsupported. Molt does not expose critic PEFT,
 quantization, FP8, or QAT options, so those AutoModel capabilities are not Molt
-feature claims. Critic CPU optimizer/full offload and Hugging Face fallback THD
-packing fail explicitly. The existing Transformers scheduler remains
+feature claims. Dense critic full CPU offload uses AutoModel; custom-MoE full
+offload and Hugging Face fallback THD packing fail explicitly. The old
+optimizer-only offload implementation was removed. The existing Transformers scheduler remains
 Molt-owned for the same `step()` versus `step(1)` protocol reason as SFT.
 
 ## RL policy actor
@@ -141,7 +143,7 @@ debugging.
 
 | Boundary | Current behavior | Missing contract |
 | --- | --- | --- |
-| CPU optimizer/full offload | SFT and RL training fail before the first update | Engine invokes a standard `Optimizer.step`; Molt's `CpuOptimizerOffloader.step(optimizer, params)` needs a standard optimizer wrapper or an Engine optimizer-mutation adapter |
+| CPU offload | Dense full offload uses AutoModel's `CPUOffloadPolicy`; custom MoE full offload fails fast; optimizer-only mode was removed | AutoModel does not provide Molt's former MoE-safe optimizer-only mutation contract |
 | Transformers scheduler | Supported through one explicit Molt `step()` after `optim_step()` | Engine schedulers use incremental `step(1)`, while HF `LambdaLR` interprets the argument as absolute epoch 1 |
 | Pipeline parallelism | Molt CLI fails fast at `pp_size > 1` | Engine and R3 now support per-inner-microbatch contexts, but `FsdpStrategy` still constructs an eager model rather than `AutoPipeline` |
 | Dynamic VLM replay batching | Functionally supported with one VLM Datum per Engine forward | Engine currently has one fixed outer microbatch size, so preserving a variable replay-buffer sample group as one cross-sample VLM pack needs a variable grouping contract; fixed-size replay batches pack samples together |
@@ -179,6 +181,10 @@ packing of two processor-ready VLM Datums, Engine loss/backward/clip/optimizer
 mutation, finite nonzero global gradient norms, and restoration of token outputs
 to the dense replay-buffer coordinates. Unit tests additionally cover packed
 VLM routing-replay side channels and their `-1` alignment sentinel.
+
+A two-GPU dense FSDP2 smoke passed AutoModel Engine backward, CPU-resident
+gradient clipping and optimizer mutation under `CPUOffloadPolicy`, followed by
+Molt's CUDA-staged DTensor gather for vLLM refit.
 
 AutoModel revision `fbf186640` is available on the remote integration branch,
 so the source pin is reproducible outside this checkout. The PyPI release floor
