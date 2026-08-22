@@ -22,6 +22,9 @@ navigation:
       - page: Overview
         path: ../../index.md
         slug: overview
+      - page: AutoModel Engine integration
+        path: ../../automodel-engine-integration.md
+        slug: automodel-engine-integration
   - section: Reference
     slug: reference
     contents:

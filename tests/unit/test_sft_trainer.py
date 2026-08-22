@@ -16,8 +16,11 @@
 from contextlib import ExitStack
 from types import SimpleNamespace
 
+import pytest
 import torch
+import torch.nn.functional as F
 
+from molt.trainer import sft_trainer as sft_trainer_module
 from molt.trainer.sft_trainer import SFTTrainer
 
 
@@ -32,9 +35,13 @@ class _Strategy:
         )
         self.cp_size = 1
         self.dp_size = 1
+        self.messages = []
 
     def is_rank_0(self):
         return True
+
+    def print(self, *args, **kwargs):
+        self.messages.append(" ".join(str(arg) for arg in args))
 
     def global_token_count(self, mask):
         return mask.sum()
@@ -310,3 +317,255 @@ def test_fit_logs_the_window_token_mean_not_a_microbatch_fraction():
     # Each microbatch reported its OWN per-token mean, on the same scale as the step metric.
     per_microbatch = [d["sft_loss"] for d in seen if isinstance(d, dict) and "sft_loss" in d]
     assert per_microbatch == [(-lp).mean().item() for lp in log_probs]
+
+
+class _RawLM(torch.nn.Module):
+    """Tiny raw backbone returning logits with shape ``[batch, sequence, vocab]``."""
+
+    def __init__(self, tensor_output=False):
+        super().__init__()
+        self.logits = torch.nn.Parameter(torch.tensor([0.2, -0.3, 0.1, 0.7]))
+        self.config = SimpleNamespace(pad_token_id=0)
+        self.tensor_output = tensor_output
+
+    def forward(self, input_ids, attention_mask=None, position_ids=None):
+        assert position_ids is not None
+        del attention_mask, position_ids
+        logits = self.logits.expand(*input_ids.shape, -1)
+        return logits if self.tensor_output else {"logits": logits}
+
+
+class _EngineActor(torch.nn.Module):
+    """Minimal Actor boundary; Engine must call ``model`` rather than this wrapper."""
+
+    is_vlm = False
+    packing_samples = False
+
+    def __init__(self, model=None):
+        super().__init__()
+        self.model = model or _RawLM()
+
+    def forward(self, *args, **kwargs):
+        raise AssertionError("Engine SFT must bypass the outer Actor wrapper")
+
+
+class _EngineStrategy(_TrainStrategy):
+    def __init__(self):
+        super().__init__()
+        self.args.optim = "adam"
+        self.accumulated_gradient = 2
+        self.cpu_offload = False
+        self.offload_optimizer = False
+        self.tp_size = self.cp_size = self.ep_size = self.pp_size = 1
+        self.sequence_parallel = False
+        self.device_mesh = self.moe_mesh = None
+        self.events = []
+
+    def global_token_count(self, mask):
+        raise AssertionError("Engine owns the global loss denominator")
+
+    def all_reduce(self, data, op="mean"):
+        raise AssertionError("Engine results must not be reduced again by the trainer")
+
+    def backward(self, *args, **kwargs):
+        raise AssertionError("Engine owns backward")
+
+    def optimizer_step(self, *args, **kwargs):
+        raise AssertionError("Engine owns the optimizer step")
+
+    def _maybe_debug_grad_stats(self, model, name):
+        self.events.append("debug")
+
+
+class _CountingScheduler:
+    def __init__(self, optimizer, events):
+        self.optimizer = optimizer
+        self.events = events
+        self.step_calls = 0
+
+    def step(self):
+        self.events.append("scheduler")
+        self.step_calls += 1
+
+    def get_last_lr(self):
+        return [self.optimizer.param_groups[0]["lr"]]
+
+
+class _Loader(list):
+    sampler = None
+
+
+def _engine_batch(tokens, weights):
+    tokens = torch.tensor([tokens])
+    return tokens, torch.ones_like(tokens), torch.tensor([weights]), {}
+
+
+@pytest.mark.parametrize("tensor_output", [False, True])
+def test_engine_sft_matches_full_window_weighted_update(tensor_output):
+    strategy = _EngineStrategy()
+    actor = _EngineActor(_RawLM(tensor_output=tensor_output))
+    initial = actor.model.state_dict()
+    optimizer = torch.optim.AdamW(actor.parameters(), lr=0.05, weight_decay=0.0)
+    scheduler = _CountingScheduler(optimizer, strategy.events)
+    batches = [
+        _engine_batch([0, 1, 2, 3], [0.0, 0.5, 0.0, 9.0]),
+        _engine_batch([3, 2, 1, 0], [1.0, 1.0, 0.0, 7.0]),
+    ]
+
+    trainer = SFTTrainer(
+        model=actor,
+        strategy=strategy,
+        optim=optimizer,
+        train_dataloader=_Loader(batches),
+        eval_dataloader=None,
+        scheduler=scheduler,
+        max_norm=0,
+        max_epochs=1,
+    )
+    assert trainer.engine is not None
+    assert trainer.engine.max_grad_norm is None
+    assert strategy.messages[-1] == "[SFT] backend=engine"
+
+    real_forward_backward = trainer.engine.forward_backward
+    real_optim_step = trainer.engine.optim_step
+    engine_grads = []
+
+    def tracked_forward_backward(*args, **kwargs):
+        strategy.events.append("forward_backward")
+        return real_forward_backward(*args, **kwargs)
+
+    def tracked_optim_step(*args, **kwargs):
+        engine_grads.append(actor.model.logits.grad.detach().clone())
+        strategy.events.append("optim_step")
+        return real_optim_step(*args, **kwargs)
+
+    trainer.engine.forward_backward = tracked_forward_backward
+    trainer.engine.optim_step = tracked_optim_step
+    logged = []
+    trainer.save_logs_and_checkpoints = lambda a, gs, bar, logs=None, states=None: logged.append(
+        (gs, dict(logs), dict(states))
+    )
+
+    reference = _RawLM()
+    reference.load_state_dict(initial)
+    reference_optimizer = torch.optim.AdamW(reference.parameters(), lr=0.05, weight_decay=0.0)
+    numerator = torch.zeros(())
+    denominator = torch.zeros(())
+    for inputs, attention_mask, weights, _ in batches:
+        logits = reference.logits.expand(*inputs.shape, -1)
+        token_nll = F.cross_entropy(
+            logits[:, :-1].flatten(0, 1),
+            inputs[:, 1:].flatten(),
+            reduction="none",
+        ).view_as(inputs[:, 1:])
+        weights = weights.clone()
+        weights[:, -1] = 0
+        numerator = numerator + (token_nll * weights[:, :-1]).sum()
+        denominator = denominator + weights[:, :-1].sum()
+    expected_loss = numerator / denominator
+    expected_loss.backward()
+    reference_optimizer.step()
+
+    trainer.fit(
+        SimpleNamespace(
+            train=SimpleNamespace(batch_size=2),
+            eval=SimpleNamespace(steps=-1),
+            ckpt=SimpleNamespace(save_steps=-1),
+            logger=SimpleNamespace(logging_steps=1),
+        ),
+        num_update_steps_per_epoch=1,
+    )
+
+    assert strategy.events == ["forward_backward", "debug", "optim_step", "scheduler"]
+    assert scheduler.step_calls == 1
+    assert len(logged) == 1
+    global_step, logs, client_states = logged[0]
+    assert global_step == 1
+    assert client_states == {"consumed_samples": 2}
+    assert logs["sft_loss"] == pytest.approx(expected_loss.item())
+    assert logs["grad_norm"] == 0.0  # Engine reports zero when clipping is disabled.
+    torch.testing.assert_close(engine_grads[0], reference.logits.grad)
+    torch.testing.assert_close(actor.model.logits, reference.logits)
+
+
+@pytest.mark.parametrize(
+    ("case", "reason"),
+    [
+        ("vlm", "VLM input preparation"),
+        ("packing", "packed input preparation"),
+        ("optimizer_offload", "CPU offload"),
+        ("full_offload", "CPU offload"),
+        ("tensor_parallel", "model parallelism"),
+        ("context_parallel", "model parallelism"),
+        ("expert_parallel", "model parallelism"),
+        ("pipeline_parallel", "model parallelism"),
+        ("sequence_parallel", "sequence parallelism"),
+        ("muon", "non-Adam optimizer"),
+        ("per_microbatch_sync", "per-microbatch gradient sync"),
+        ("aux", "explicit auxiliary-loss logging"),
+    ],
+)
+def test_unsupported_sft_configuration_keeps_legacy_backend(case, reason, monkeypatch):
+    strategy = _EngineStrategy()
+    actor = _EngineActor()
+    if case == "vlm":
+        actor.is_vlm = True
+    elif case == "packing":
+        actor.packing_samples = True
+    elif case == "optimizer_offload":
+        strategy.offload_optimizer = True
+    elif case == "full_offload":
+        strategy.cpu_offload = True
+    elif case == "tensor_parallel":
+        strategy.tp_size = 2
+    elif case == "context_parallel":
+        strategy.cp_size = 2
+    elif case == "expert_parallel":
+        strategy.ep_size = 2
+    elif case == "pipeline_parallel":
+        strategy.pp_size = 2
+    elif case == "sequence_parallel":
+        strategy.sequence_parallel = True
+    elif case == "muon":
+        strategy.args.optim = "muon"
+    elif case == "per_microbatch_sync":
+        monkeypatch.setenv("MOLT_DEFER_GRAD_SYNC", "0")
+    elif case == "aux":
+        strategy.args.model.aux_loss_coef = 0.1
+
+    optimizer = torch.optim.AdamW(actor.parameters())
+    trainer = SFTTrainer(actor, strategy, optimizer, [], None, _CountingScheduler(optimizer, []))
+
+    assert trainer.engine is None
+    assert reason in strategy.messages[-1]
+
+
+def test_missing_engine_module_keeps_legacy_backend(monkeypatch):
+    strategy = _EngineStrategy()
+    actor = _EngineActor()
+    optimizer = torch.optim.AdamW(actor.parameters())
+    real_import_module = sft_trainer_module.import_module
+
+    def missing_engine(name):
+        if name == "nemo_automodel.engine":
+            raise ModuleNotFoundError("No module named 'nemo_automodel.engine'", name=name)
+        return real_import_module(name)
+
+    monkeypatch.setattr(sft_trainer_module, "import_module", missing_engine)
+    trainer = SFTTrainer(actor, strategy, optimizer, [], None, _CountingScheduler(optimizer, []))
+
+    assert trainer.engine is None
+    assert "Engine API unavailable" in strategy.messages[-1]
+
+
+def test_broken_engine_dependency_does_not_silently_fall_back(monkeypatch):
+    strategy = _EngineStrategy()
+    actor = _EngineActor()
+    optimizer = torch.optim.AdamW(actor.parameters())
+
+    def broken_engine(name):
+        raise ModuleNotFoundError("No module named 'engine_dependency'", name="engine_dependency")
+
+    monkeypatch.setattr(sft_trainer_module, "import_module", broken_engine)
+    with pytest.raises(ModuleNotFoundError, match="engine_dependency"):
+        SFTTrainer(actor, strategy, optimizer, [], None, _CountingScheduler(optimizer, []))

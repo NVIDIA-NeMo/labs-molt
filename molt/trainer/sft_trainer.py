@@ -18,13 +18,14 @@
 
 import os
 from contextlib import ExitStack
+from importlib import import_module
 
 import torch
 from torch.optim import Optimizer
 from tqdm import tqdm
 
 from molt.models import SFTLoss
-from molt.models.utils import masked_mean, split_moe_aux_loss
+from molt.models.utils import log_probs_from_logits, masked_mean, split_moe_aux_loss
 from molt.utils.distributed_sampler import DistributedSampler
 
 
@@ -84,6 +85,66 @@ class SFTTrainer:
         self._defer_grad_sync = os.environ.get("MOLT_DEFER_GRAD_SYNC", "1") == "1"
 
         self.cp_enabled = getattr(strategy, "cp_size", 1) > 1
+
+        # Keep the existing trainer for configurations whose model-input or
+        # update contract Engine does not yet own. This first integration slice
+        # covers the dense text SFT quick-start without changing those knobs.
+        engine_fallbacks = []
+        if not hasattr(model, "model"):
+            engine_fallbacks.append("model wrapper has no raw backbone")
+        if getattr(model, "is_vlm", False):
+            engine_fallbacks.append("VLM input preparation")
+        if getattr(model, "packing_samples", False):
+            engine_fallbacks.append("packed input preparation")
+        if getattr(strategy, "cpu_offload", False) or getattr(strategy, "offload_optimizer", False):
+            engine_fallbacks.append("CPU offload")
+        if any(getattr(strategy, name, 1) > 1 for name in ("tp_size", "cp_size", "ep_size", "pp_size")):
+            engine_fallbacks.append("model parallelism")
+        if getattr(strategy, "sequence_parallel", False):
+            engine_fallbacks.append("sequence parallelism")
+        if getattr(self.args, "optim", None) != "adam":
+            engine_fallbacks.append("non-Adam optimizer")
+        if not self._defer_grad_sync:
+            engine_fallbacks.append("per-microbatch gradient sync")
+        if self.aux_loss:
+            engine_fallbacks.append("explicit auxiliary-loss logging")
+
+        self.engine = None
+        if not engine_fallbacks:
+            try:
+                engine_module = import_module("nemo_automodel.engine")
+                mesh_module = import_module("nemo_automodel.components.distributed.mesh")
+            except ModuleNotFoundError as error:
+                if error.name not in {
+                    "nemo_automodel.engine",
+                    "nemo_automodel.components.distributed.mesh",
+                }:
+                    raise
+                engine_fallbacks.append(f"Engine API unavailable: {error}")
+            else:
+                Engine = getattr(engine_module, "Engine", None)
+                collate_prebatched = getattr(engine_module, "collate_prebatched", None)
+                MeshContext = getattr(mesh_module, "MeshContext", None)
+                if any(symbol is None for symbol in (Engine, collate_prebatched, MeshContext)):
+                    engine_fallbacks.append("Engine API unavailable: required symbols are missing")
+
+            if not engine_fallbacks:
+                raw_model = model.model
+                clip_norm = max_norm if max_norm and max_norm > 0 else None
+                self.engine = Engine(
+                    raw_model,
+                    device=next(raw_model.parameters()).device,
+                    mesh_context=MeshContext.from_meshes(strategy.device_mesh, strategy.moe_mesh),
+                    microbatch_size=1,
+                    collate_fn=collate_prebatched,
+                    padding_token_id=getattr(getattr(raw_model, "config", None), "pad_token_id", None) or 0,
+                    defer_fsdp_grad_sync=True,
+                    optimizers=optim,
+                    max_grad_norm=clip_norm,
+                )
+
+        backend = "engine" if self.engine is not None else f"legacy ({'; '.join(engine_fallbacks)})"
+        self.strategy.print(f"[SFT] backend={backend}")
 
         # wandb/tensorboard setting
         self._wandb = None
@@ -237,6 +298,23 @@ class SFTTrainer:
             disable=not self.strategy.is_rank_0(),
         )
         loss_sum = 0
+        if self.engine is not None:
+            from nemo_automodel.components.datasets.datum import Datum, LossInputLayout
+
+            def engine_loss(model_output, loss_inputs):
+                """Return masked token NLL in the Engine's local token layout.
+
+                ``model_output`` logits have shape ``[batch, local_sequence,
+                vocab]``.
+                ``target_tokens`` and ``weights`` have matching
+                ``[batch, local_sequence]`` leading dimensions. The returned
+                tensor has that same token layout.
+                """
+                logits = model_output if torch.is_tensor(model_output) else model_output["logits"]
+                targets = loss_inputs["target_tokens"]
+                log_probs = log_probs_from_logits(logits, targets)
+                return torch.where(loss_inputs["weights"].bool(), -log_probs, 0.0)
+
         for epoch in range(start_epoch, self.epochs):
             if isinstance(self.train_dataloader.sampler, DistributedSampler):
                 self.train_dataloader.sampler.set_epoch(
@@ -257,6 +335,58 @@ class SFTTrainer:
             for batch in self.train_dataloader:
                 accum_window.append(batch)
                 if len(accum_window) < accum_steps:
+                    continue
+
+                if self.engine is not None:
+                    datums = []
+                    for inputs, attention_masks, loss_masks, mm_inputs in accum_window:
+                        if mm_inputs:
+                            raise RuntimeError("SFT Engine text path received multimodal inputs")
+                        inputs = inputs.to(device).squeeze(1)
+                        attention_mask = attention_masks.to(device).squeeze(1)
+                        position_ids = attention_mask.long().cumsum(-1) - 1
+                        position_ids.masked_fill_(attention_mask == 0, 1)
+                        weights = loss_masks.to(device).squeeze(1).clone()
+                        weights[:, -1] = 0
+                        datums.append(
+                            Datum(
+                                model_inputs={
+                                    "input_ids": inputs,
+                                    "attention_mask": attention_mask,
+                                    "position_ids": position_ids,
+                                },
+                                loss_fn_inputs={
+                                    "target_tokens": torch.roll(inputs, shifts=-1, dims=-1),
+                                    "weights": weights,
+                                },
+                                loss_fn_input_layouts={
+                                    "target_tokens": LossInputLayout.PER_TOKEN,
+                                    "weights": LossInputLayout.PER_TOKEN,
+                                },
+                            )
+                        )
+                    accum_window = []
+
+                    result = self.engine.forward_backward(datums, engine_loss)
+                    self.strategy._maybe_debug_grad_stats(self.model, "model")
+                    optim_result = self.engine.optim_step()
+                    # Transformers schedulers interpret step(1) as an absolute
+                    # epoch, unlike AutoModel's increment-based scheduler.
+                    self.scheduler.step()
+
+                    logs_dict = {
+                        "sft_loss": result.loss.item(),
+                        "lr": self.scheduler.get_last_lr()[0],
+                        "grad_norm": float(optim_result.grad_norm),
+                    }
+                    step_bar.set_postfix(logs_dict)
+                    step_bar.update(len(datums))
+
+                    step += len(datums) - 1
+                    global_step = step // self.strategy.accumulated_gradient
+                    client_states = {"consumed_samples": global_step * args.train.batch_size}
+                    self.save_logs_and_checkpoints(args, global_step, step_bar, logs_dict, client_states)
+                    step += 1
                     continue
 
                 prepared, batch_num_tokens = self._prepare_accum_window(accum_window, device)
