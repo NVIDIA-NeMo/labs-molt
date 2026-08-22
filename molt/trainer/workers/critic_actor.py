@@ -269,26 +269,6 @@ class CriticModelActor(BaseModelActor):
     def init_model_from_pretrained(self, strategy: FsdpStrategy, pretrain, max_steps=None):
         args = strategy.args
         self._setup_distributed(strategy)
-        # AutoModel's new structure hook solves the replicated-head correctness
-        # problem, but currently gates model parallel transforms. Reject before
-        # loading a large checkpoint instead of falling back to an external head.
-        unsupported_axes = [
-            name
-            for name, size in (
-                ("TP", strategy.tp_size),
-                ("CP", strategy.cp_size),
-                ("EP", strategy.ep_size),
-                ("PP", strategy.pp_size),
-            )
-            if size != 1
-        ]
-        if unsupported_axes or getattr(strategy, "sequence_parallel", False):
-            if getattr(strategy, "sequence_parallel", False):
-                unsupported_axes.append("sequence parallelism")
-            raise NotImplementedError(
-                "AutoModel pre_fsdp_hook currently requires tp_size=cp_size=ep_size=pp_size=1; "
-                "critic value-head construction cannot use " + ", ".join(unsupported_axes)
-            )
         if strategy.cpu_offload or strategy.offload_optimizer:
             raise NotImplementedError(
                 "Critic Engine training does not support --fsdp.offload; use --fsdp.offload none"

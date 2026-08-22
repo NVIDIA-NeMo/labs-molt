@@ -83,12 +83,16 @@ through AutoModel's `pre_fsdp_hook`, before parameter discovery and FSDP wrap;
 the old replicated-head broadcast and manual DP gradient all-reduce have been
 deleted.
 
-The current AutoModel structure-hook contract limits critic construction to
-unquantized, non-PEFT `tp=cp=ep=pp=1` models. Molt reports the active unsupported
-axis before loading the critic instead of silently restoring the external-head
-path. Critic CPU optimizer/full offload, Hugging Face fallback THD packing, and
-RL VLM packing also fail explicitly. The existing Transformers scheduler remains
-Molt-owned for the same `step()` versus `step(1)` protocol reason as SFT.
+The hook returns AutoModel's managed-task-module declaration. AutoModel keeps the
+value head replicated across TP and EP, gives it an fp32 FSDP unit over DP and CP,
+excludes it from PEFT and lower-precision transforms, and includes it in training
+checkpoints. Molt therefore uses the same critic path with TP, CP, EP, and sequence
+parallelism; PP remains unsupported. Molt does not expose critic PEFT,
+quantization, FP8, or QAT options, so those AutoModel capabilities are not Molt
+feature claims. Critic CPU optimizer/full offload, Hugging Face fallback THD
+packing, and RL VLM packing also fail explicitly. The existing Transformers
+scheduler remains Molt-owned for the same `step()` versus `step(1)` protocol
+reason as SFT.
 
 ## RL policy actor
 
@@ -137,7 +141,6 @@ debugging.
 | CPU optimizer/full offload | SFT and RL training fail before the first update | Engine invokes a standard `Optimizer.step`; Molt's `CpuOptimizerOffloader.step(optimizer, params)` needs a standard optimizer wrapper or an Engine optimizer-mutation adapter |
 | Transformers scheduler | Supported through one explicit Molt `step()` after `optim_step()` | Engine schedulers use incremental `step(1)`, while HF `LambdaLR` interprets the argument as absolute epoch 1 |
 | Pipeline parallelism | Molt CLI fails fast at `pp_size > 1` | Engine and R3 now support per-inner-microbatch contexts, but `FsdpStrategy` still constructs an eager model rather than `AutoPipeline` |
-| Critic model parallelism | GAE critic fails fast for TP/CP/EP/PP or sequence parallelism | AutoModel's current `pre_fsdp_hook` supports only unquantized, non-PEFT models with all model-parallel axes equal to one; PEFT, quantization, FP8, and QAT are restricted by the same hook |
 | RL VLM packing | Actor and critic fail fast; padded VLM remains supported | AutoModel's current VLM Datum collater owns SFT `labels`/`weights`, but does not collate arbitrary PPO side channels such as old values/log-probabilities, advantages, and replay routes |
 | HF fallback packing | Model construction fails fast | The old FlashAttention varlen packing implementation was deleted; packed training requires AutoModel's native THD Datum contract |
 | HF fallback MoE | Model construction always fails fast, independent of auxiliary-loss settings or EP size | All MoE training requires an AutoModel-native implementation; the old scalar auxiliary-loss branch was deleted |
@@ -145,11 +148,11 @@ debugging.
 
 ## Dependency and validation status
 
-Source and Docker installs pin AutoModel revision `5420b30fd`, which contains
+Source and Docker installs pin AutoModel revision `174d7c175`, which contains
 the current Datum Engine, processor-ready recursive Datum pinning, padded and
 packed VLM Datum collation, pipeline batch contexts, model-scoped routing
-replay across local pipeline parts, the pre-FSDP structure hook used by the
-critic value head, and the latest main-line context-parallel implementation.
+replay across local pipeline parts, and managed pre-FSDP task modules used by
+the critic value head.
 Molt's PyPI build still replaces source pins with `nemo-automodel>=0.5.0`; no
 released version floor currently guarantees this API.
 
@@ -161,10 +164,14 @@ two-GPU FSDP2 SFT parity smoke with rank-asymmetric data and two accumulated
 microbatches matched the single-model reference loss, full gradients, and
 updated parameters.
 
-Production validation is still blocked on two external items: AutoModel commit
-`5420b30fd` is one local commit ahead of its remote integration branch, so the
-source pin cannot be installed elsewhere until it is pushed; and the available
-RL GPU image resolves incompatible CUDA 12/13 runtime libraries while loading a
-real model. Distributed TP/CP/EP/R3 policy and critic checkpoint-resume smokes
-therefore remain required after the image is repaired. No source workaround is
-added for either environment issue.
+Critic H100 smokes with a real Qwen3 checkpoint passed Engine backward and
+optimizer update for DP=2, TP=2 with sequence parallelism, CP=2, and TP=2+CP=2;
+the managed value head was FSDP-wrapped, received a finite nonzero global
+gradient, updated, and remained replica-consistent. EP/R3 and critic
+checkpoint-resume smokes remain to be run.
+
+The remaining external distribution blocker is that AutoModel commit
+`174d7c175` is one local commit ahead of its remote integration branch, so the
+source pin cannot be installed elsewhere until it is pushed. Local validation
+uses that source checkout; Molt does not add a workaround for an unavailable
+dependency revision.

@@ -27,13 +27,14 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+from nemo_automodel import PreFSDPHookResult
 
 from molt.trainer.fsdp.packing import unshard_dtensor
 
 from .base import BaseModel, _AttrDict
 
 
-class _ValueHead(nn.Module):
+class _ValueHead(nn.Linear):
     """Scalar value projection over the backbone's last hidden state.
 
     Replaces the vocab ``lm_head`` so the model's "logits" are per-token values.
@@ -53,18 +54,20 @@ class _ValueHead(nn.Module):
     ``unshard_dtensor`` is a no-op at TP=1 (input already plain).
     """
 
-    def __init__(self, hidden_size: int):
-        super().__init__()
-        # fp32 to match the fp32 master-weight convention; the value head is tiny,
-        # so running it in fp32 (upcasting the bf16 backbone hidden) is cheap.
-        self.proj = nn.Linear(hidden_size, 1, bias=False, dtype=torch.float32)
+    def __init__(self, hidden_size: int, initializer_range: float = 0.02, device=None):
+        self.initializer_range = initializer_range
+        # The head stays fp32; its scalar output makes the extra compute negligible.
+        super().__init__(hidden_size, 1, bias=False, device=device, dtype=torch.float32)
+
+    def reset_parameters(self) -> None:
+        nn.init.normal_(self.weight, mean=0.0, std=self.initializer_range)
 
     def forward(self, hidden_states):
         # Gather any TP/SP sharding (no-op for a replicated DTensor or a plain tensor).
         hidden_states = unshard_dtensor(hidden_states)
         # No forward autocast anymore, so align the bf16 backbone hidden to the
         # fp32 value-head weight explicitly instead of relying on autocast.
-        return self.proj(hidden_states.to(self.proj.weight.dtype))
+        return super().forward(hidden_states.to(self.weight.dtype))
 
 
 def _resolve_hidden_size(model) -> int:
@@ -86,16 +89,18 @@ def _resolve_hidden_size(model) -> int:
     return int(getattr(emb, "embedding_dim", None) or emb.weight.shape[-1])
 
 
-def _install_value_head(model) -> None:
+def _install_value_head(model) -> PreFSDPHookResult:
     """Replace ``model``'s task head in place before AutoModel applies FSDP."""
 
-    value_head = _ValueHead(_resolve_hidden_size(model))
-    # A load-before-shard model is already materialized, so initialize its fresh
-    # head explicitly. Meta heads are initialized by AutoModel after sharding.
-    if value_head.proj.weight.device.type != "meta":
-        # HF's standard fresh-head initialization keeps |V| ~ O(1), so the
-        # backbone learns immediately and --critic.max_norm bounds its gradient.
-        nn.init.normal_(value_head.proj.weight, mean=0.0, std=getattr(model.config, "initializer_range", 0.02))
+    old_head = model.get_output_embeddings() if hasattr(model, "get_output_embeddings") else model.lm_head
+    source_weight = getattr(old_head, "weight", None)
+    if source_weight is None:
+        source_weight = model.get_input_embeddings().weight
+    value_head = _ValueHead(
+        _resolve_hidden_size(model),
+        initializer_range=getattr(model.config, "initializer_range", 0.02),
+        device=source_weight.device,
+    )
     # The value head is NOT tied to the vocabulary embeddings. Keeping this flag
     # set would make checkpoint export deduplicate or later re-tie incompatible
     # [1,H] and [vocab,H] tensors.
@@ -106,6 +111,7 @@ def _install_value_head(model) -> None:
         model.set_output_embeddings(value_head)
     else:
         model.lm_head = value_head
+    return PreFSDPHookResult(task_module=value_head)
 
 
 class Critic(BaseModel):
@@ -123,17 +129,6 @@ class Critic(BaseModel):
             if kwargs.get("pre_fsdp_hook") is not None:
                 raise TypeError("Critic owns pre_fsdp_hook; callers must not override it")
             kwargs["pre_fsdp_hook"] = _install_value_head
-            # These are native runtime FQNs, not checkpoint-export names. The
-            # base-model loader drops whichever path the architecture exposes so
-            # a vocab-shaped checkpoint tensor is never loaded into the new [1,H]
-            # projection. Full DCP critic restores do not apply this filter.
-            kwargs["skip_task_head_prefixes_for_base_model"] = (
-                "lm_head.",
-                "model.lm_head.",
-                "language_model.lm_head.",
-                "thinker.lm_head.",
-                "thinker.model.lm_head.",
-            )
             super().__init__(*args, **kwargs)
         else:
             # Preserve the lightweight pre-instantiated-model path used by unit

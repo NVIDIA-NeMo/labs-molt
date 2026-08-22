@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import torch
 import torch.nn as nn
 
+from nemo_automodel import PreFSDPHookResult
 from nemo_automodel.components.datasets.datum import LossInputLayout
 from nemo_automodel.engine import Engine, LossFnOutputBatch, PerTokenOutput, collate_prebatched
 
@@ -161,12 +162,37 @@ class _HeadModel(nn.Module):
 def test_install_value_head_replaces_task_head_before_fsdp():
     model = _HeadModel()
 
-    assert _install_value_head(model) is None
+    result = _install_value_head(model)
 
+    assert isinstance(result, PreFSDPHookResult)
+    assert result.task_module is model.lm_head
     assert isinstance(model.lm_head, _ValueHead)
-    assert model.lm_head.proj.weight.shape == (1, 4)
+    assert model.lm_head.weight.shape == (1, 4)
+    assert model.lm_head.weight.dtype == torch.float32
+    assert set(model.state_dict()) == {"embed_tokens.weight", "lm_head.weight"}
     assert not model.config.tie_word_embeddings
     assert not model.config.text_config.tie_word_embeddings
+
+
+def test_value_head_uses_model_initializer_and_upcasts_hidden_states():
+    torch.manual_seed(123)
+    expected = torch.empty(1, 4)
+    nn.init.normal_(expected, mean=0.0, std=0.01)
+
+    torch.manual_seed(123)
+    head = _ValueHead(4, initializer_range=0.01)
+
+    assert torch.equal(head.weight, expected)
+    assert head(torch.ones(2, 4, dtype=torch.bfloat16)).dtype == torch.float32
+
+
+def test_install_value_head_follows_meta_output_head_device():
+    model = _HeadModel().to(device="meta")
+
+    result = _install_value_head(model)
+
+    assert result.task_module is model.lm_head
+    assert model.lm_head.weight.device.type == "meta"
 
 
 class _ScalarValueModel(nn.Module):
