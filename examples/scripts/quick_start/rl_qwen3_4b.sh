@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Single-node quick-start: Qwen3-4B dense math RL.
+# Single-node quick-start: Qwen3-4B dense math RL on padded HF fallback.
 #
 # 8 GPUs on one machine, split 4 actor + 4 vLLM rollout. No slurm. Same
 # standard batch / context / dataset as slurm/qwen3_4b.sh — only the topology
@@ -89,7 +89,6 @@ python3 -u -m molt.cli.train_rl_ray \
   --fsdp.tp_size 1 \
   --fsdp.ep_size 1 \
   --fsdp.cp_size 1 \
-  --fsdp.packing_samples \
   --actor.gradient_checkpoint full \
   --actor.adam.lr 1e-6 \
   --actor.eps_clip_low_high 0.2 0.27 \

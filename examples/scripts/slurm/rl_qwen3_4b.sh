@@ -25,11 +25,9 @@
 #SBATCH --overcommit
 #SBATCH --exclusive
 
-# Qwen3-4B dense math RL with FA2 + cu_seq_lens packing.
+# Qwen3-4B dense math RL on the padded Hugging Face fallback path.
 # Thin wrapper over slurm/_launcher.sh that strips the VLM/MoE knobs
-# (EP=1, text-only single-turn math agent) and appends
-# --fsdp.packing_samples to exercise the HF FA2 packed path
-# (cu_seq_lens_q/k kwargs from utils/fsdp/packing.py:182).
+# (EP=1, text-only single-turn math agent).
 #
 # Dense Qwen3 has no nemo_automodel native impl (HF Qwen3ForCausalLM only). That's fine: this
 # recipe runs EP=1, and molt permits the HF path whenever EP is off; the fallback is forbidden
@@ -46,8 +44,7 @@ export TP_SIZE="${TP_SIZE:-1}"
 export EP_SIZE="${EP_SIZE:-1}"
 export CP_SIZE="${CP_SIZE:-1}"
 export MAX_LENGTH="${MAX_LENGTH:-16384}"
-# FA2 is required for HF packing (cu_seq_lens path); init-time validation
-# in Actor.from_pretrained refuses other attn impls when packing is on.
+# FA2 remains a valid attention backend for padded HF fallback models.
 export FSDP_ATTN_IMPLEMENTATION="${FSDP_ATTN_IMPLEMENTATION:-flash_attention_2}"
 
 export VLLM_ENABLE_EXPERT_PARALLEL=0
@@ -64,18 +61,11 @@ export EVAL_N_SAMPLES_PER_PROMPT="${EVAL_N_SAMPLES_PER_PROMPT:-1}"
 
 export VLLM_GPU_MEMORY_UTILIZATION="${VLLM_GPU_MEMORY_UTILIZATION:-0.8}"
 
-export SAVE_ROOT="${SAVE_ROOT:-$REPO_ROOT/outputs/rl-qwen3-4b-packing/run}"
-export WANDB_PROJECT="${WANDB_PROJECT:-molt_rl_qwen3_4b_packing}"
-export WANDB_RUN_NAME="${WANDB_RUN_NAME:-qwen3_4b_packing_$SLURM_JOB_ID}"
+export SAVE_ROOT="${SAVE_ROOT:-$REPO_ROOT/outputs/rl-qwen3-4b/run}"
+export WANDB_PROJECT="${WANDB_PROJECT:-molt_rl_qwen3_4b}"
+export WANDB_RUN_NAME="${WANDB_RUN_NAME:-qwen3_4b_$SLURM_JOB_ID}"
 
 # === Inlined launcher (was slurm/_launcher.sh) ===
-# Packing on by default (this is the FA2 packed-path recipe); set PACKING_SAMPLES=0
-# to run the plain AutoModel path (e.g. sdpa, no cu_seq_lens) for A/B debugging.
-# Snapshot caller-wrapper positional args before `set --` clears $@ (the line below
-# then re-injects only the packing flag).
-_FWD_ARGS=("$@")
-set --
-[ "${PACKING_SAMPLES:-1}" = "1" ] && set -- --fsdp.packing_samples
 set -x
 
 REPO_ROOT="${MOLT_PATH:-${SLURM_SUBMIT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)}}"
@@ -382,12 +372,8 @@ if [ -n "${WANDB_API_KEY:-}" ]; then
   RL_ARGS+=(--logger.wandb.key "$WANDB_API_KEY")
 fi
 
-# Forward any positional args from caller wrappers — e.g. the dense
-# Qwen3-4B packing wrapper appends `--fsdp.packing_samples` to opt into
-# the FA2 THD path.
+# Forward any additional CLI arguments supplied by the caller.
 RL_ARGS+=("$@")
-# Forward the caller-wrapper positional args snapshotted before `set --`.
-RL_ARGS+=("${_FWD_ARGS[@]+"${_FWD_ARGS[@]}"}")
 
 printf -v RL_ARGS_Q " %q" "${RL_ARGS[@]}"
 

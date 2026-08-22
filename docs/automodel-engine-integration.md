@@ -60,8 +60,8 @@ before the first training batch:
 
 - optimizer or full CPU offload;
 - PP, because Molt's shared strategy does not yet construct an `AutoPipeline`;
-- THD packing on a Hugging Face fallback model, whose packing adapter is not
-  the AutoModel Engine THD contract;
+- THD packing on a Hugging Face fallback model; Molt's old FA2 packing adapter
+  has been removed and model construction fails before loading that path;
 - packed VLM CP when the active model/backend does not declare packed-CP
   support;
 - multi-axis mRoPE with packed THD CP, which AutoModel currently rejects
@@ -114,7 +114,9 @@ would count that gradient twice.
 
 Padded text and VLM, native text THD packing, TP, CP, EP, sequence parallelism,
 R3, entropy regularization, and PPO/GSPO/CISPO all use this path. RL VLM packing,
-HF-fallback THD packing, and HF-fallback MoE auxiliary loss fail explicitly.
+HF-fallback THD packing, and nonzero HF-fallback MoE auxiliary loss fail during
+model construction. Molt retains neither the HF varlen-attention packing kwargs
+nor a scalar HF auxiliary-loss optimization branch.
 The policy's Transformers scheduler remains Molt-owned and advances once after a
 successful Engine optimizer update.
 
@@ -137,8 +139,8 @@ debugging.
 | Pipeline parallelism | Molt CLI fails fast at `pp_size > 1` | Engine and R3 now support per-inner-microbatch contexts, but `FsdpStrategy` still constructs an eager model rather than `AutoPipeline` |
 | Critic model parallelism | GAE critic fails fast for TP/CP/EP/PP or sequence parallelism | AutoModel's current `pre_fsdp_hook` supports only unquantized, non-PEFT models with all model-parallel axes equal to one; PEFT, quantization, FP8, and QAT are restricted by the same hook |
 | RL VLM packing | Actor and critic fail fast; padded VLM remains supported | AutoModel's current VLM Datum collater owns SFT `labels`/`weights`, but does not collate arbitrary PPO side channels such as old values/log-probabilities, advantages, and replay routes |
-| HF fallback packing | Actor and critic fail fast | The fallback's FlashAttention packing adapter is part of Molt's legacy wrapper, not Engine's native THD Datum contract |
-| HF fallback MoE aux loss | Policy fails fast when its coefficient is nonzero | Only native AutoModel gates expose the Engine-scaled autograd injection; an HF scalar aux output is not an additive token numerator |
+| HF fallback packing | Model construction fails fast | The old FlashAttention varlen packing implementation was deleted; packed training requires AutoModel's native THD Datum contract |
+| HF fallback MoE aux loss | Model construction fails fast when its coefficient is nonzero | The old scalar-loss branch was deleted; only native AutoModel gates expose Engine-scaled autograd injection |
 | Multi-axis mRoPE + packed THD CP | Intentionally unsupported and fail-fast | The agreed scope excludes this combination; AutoModel also rejects 3-D packed position IDs when CP/PP reorders or splits the token stream |
 
 ## Dependency and validation status

@@ -73,9 +73,7 @@ def test_ep_equalized_packing_masks_and_drops_synthetic_suffix():
     sequences = torch.tensor([[10, 11, 0, 0], [20, 21, 22, 0]])
     attention_mask = torch.tensor([[1, 1, 0, 0], [1, 1, 1, 0]])
 
-    packed, positions, _rolled, indices, kwargs = pack_padded_batch(
-        sequences, attention_mask, style="automodel", pad_to_tokens=8
-    )
+    packed, positions, _rolled, indices, kwargs = pack_padded_batch(sequences, attention_mask, pad_to_tokens=8)
 
     assert packed.tolist() == [[10, 11, 20, 21, 22, 0, 0, 0]]
     assert positions.tolist() == [[0, 1, 0, 1, 2, 3, 4, 5]]
@@ -88,6 +86,18 @@ def test_ep_equalized_packing_masks_and_drops_synthetic_suffix():
     # the five original real-token rows back into [B, S].
     restored = unpack_to_padded(torch.arange(1, 9).view(1, 8), indices, batch=2, seqlen=4)
     assert restored.tolist() == [[1, 2, 0, 0], [3, 4, 5, 0]]
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"packing_samples": True}, "THD sequence packing"),
+        ({"moe_aux_loss_coef": 0.01}, "MoE auxiliary loss"),
+    ],
+)
+def test_hf_fallback_features_fail_fast(kwargs, message):
+    with pytest.raises(NotImplementedError, match=message):
+        BaseModel(torch.nn.Linear(2, 2), **kwargs)
 
 
 class _FakeMesh:  # single-process stand-in; make_* reads size() + get_group()

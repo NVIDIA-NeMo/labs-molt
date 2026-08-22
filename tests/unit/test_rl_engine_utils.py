@@ -27,7 +27,7 @@ def _experience():
 
 
 def _wrapper(**kwargs):
-    defaults = {"model": nn.Linear(1, 1), "is_vlm": False, "_packing_style": "automodel"}
+    defaults = {"model": nn.Linear(1, 1), "is_vlm": False}
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
 

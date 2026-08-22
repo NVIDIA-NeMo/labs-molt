@@ -13,15 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Padded <-> packed conversion for the FSDP2 model backend.
+"""Padded <-> AutoModel THD conversion for the FSDP2 model backend.
 
 Molt's datasets emit `(B, S)` padded batches. Packing removes padding and
-creates `(1, total_tokens)` streams plus sequence-boundary metadata. The exact
-kwargs depend on the selected model path:
-
-- HF flash-attn2 consumes ``FlashAttentionKwargs``.
-- AutoModel custom TE consumes THD kwargs
-  (``qkv_format=thd`` / ``cu_seqlens`` / ``max_seqlen``).
+creates `(1, total_tokens)` streams plus AutoModel THD sequence-boundary
+metadata (``qkv_format=thd`` / ``cu_seqlens`` / ``max_seqlen``).
 """
 
 from typing import Any
@@ -71,7 +67,6 @@ def pack_padded_batch(
     sequences: torch.Tensor,
     attention_mask: torch.Tensor,
     *,
-    style: str = "hf",
     pad_to_tokens: int | None = None,
 ):
     """Convert a padded `(B, S)` batch to packed `(1, total_real_tokens)` format.
@@ -81,15 +76,12 @@ def pack_padded_batch(
         position_ids:     `(1, total_real_tokens)` with resets at sequence boundaries
         rolled_input_ids: `(1, total_real_tokens)` from `torch.roll(input_ids, -1)` then unpadded
         indices:          flat indices into `(B*S,)` of real tokens (for `unpack_to_padded`)
-        attn_kwargs:      HF FlashAttention kwargs or AutoModel THD kwargs
+        attn_kwargs:      AutoModel THD attention kwargs
 
     ``pad_to_tokens`` extends the last packed sequence with synthetic tokens so EP ranks
     agree on the token count. They are causal-suffixed (real outputs unchanged), flagged
     in ``padding_mask`` so experts skip them, and dropped by :func:`unpack_to_padded`.
     """
-    if style not in {"hf", "automodel"}:
-        raise ValueError(f"Unsupported packing style: {style}")
-
     batch, seqlen = sequences.shape
     mask = attention_mask.bool()
     indices = mask.reshape(-1).nonzero(as_tuple=False).flatten()
@@ -123,23 +115,15 @@ def pack_padded_batch(
         cu_seq_lens[-1] += trailing_pad
         max_length = max(max_length, last_len + trailing_pad)
 
-    if style == "automodel":
-        attn_kwargs = {
-            "qkv_format": "thd",
-            "cu_seqlens": cu_seq_lens,
-            "cu_seqlens_padded": cu_seq_lens,
-            "max_seqlen": int(max_length),
-        }
-        if trailing_pad:
-            is_pad = torch.arange(real_tokens + trailing_pad, device=sequences.device) >= real_tokens
-            attn_kwargs["padding_mask"] = is_pad.unsqueeze(0)
-    else:
-        attn_kwargs = {
-            "cu_seq_lens_q": cu_seq_lens,
-            "cu_seq_lens_k": cu_seq_lens,
-            "max_length_q": int(max_length),
-            "max_length_k": int(max_length),
-        }
+    attn_kwargs = {
+        "qkv_format": "thd",
+        "cu_seqlens": cu_seq_lens,
+        "cu_seqlens_padded": cu_seq_lens,
+        "max_seqlen": int(max_length),
+    }
+    if trailing_pad:
+        is_pad = torch.arange(real_tokens + trailing_pad, device=sequences.device) >= real_tokens
+        attn_kwargs["padding_mask"] = is_pad.unsqueeze(0)
     return packed_ids, position_ids, rolled_packed, indices, attn_kwargs
 
 

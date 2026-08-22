@@ -20,7 +20,6 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
-from torch.distributed.tensor import DTensor
 
 
 def resolve_ac_mode(value: Union[bool, str, None]) -> Union[bool, str]:
@@ -143,29 +142,6 @@ def compute_entropy(logits: torch.Tensor):
     return torch.logsumexp(logits, dim=-1) - torch.sum(pd * logits, dim=-1)
 
 
-def split_moe_aux_loss(output, enabled: bool):
-    """Return ``(aux_loss_for_optimization, aux_loss_for_logging)``.
-
-    HF MoE models return an unscaled ``output.aux_loss`` that Molt adds to
-    the trainer loss. NeMo AutoModel custom MoE injects aux-loss gradients via
-    ``MoEAuxLossAutoScaler`` during backward, so those outputs are marked and the
-    first element is zeroed (already in the gradient) while logging still sees it.
-    """
-    if not enabled:
-        return 0.0, 0.0
-
-    if isinstance(output, dict):
-        aux_loss = output.get("aux_loss", 0.0)
-        in_backward = bool(output.get("_molt_aux_loss_in_backward", False))
-    else:
-        aux_loss = getattr(output, "aux_loss", 0.0)
-        in_backward = bool(getattr(output, "_molt_aux_loss_in_backward", False))
-
-    if aux_loss is None:
-        aux_loss = 0.0
-    return (0.0 if in_backward else aux_loss), aux_loss
-
-
 def move_model_to_cpu_for_offload(model: nn.Module, distributed_config):
     """Move params + buffers to CPU when FSDP offload is on (else a no-op)."""
     if getattr(distributed_config, "offload_policy", None) is None:
@@ -206,31 +182,4 @@ def configure_nemo_moe_aux_loss(model: nn.Module, aux_loss_coef: float) -> bool:
         if moe_config is not None and hasattr(moe_config, "aux_loss_coeff"):
             moe_config.aux_loss_coeff = coef
 
-    active = coef > 0
-    model._molt_aux_loss_in_backward = active
-    return active
-
-
-def attach_nemo_moe_aux_loss(output, model: nn.Module):
-    if not model.training or not getattr(model, "_molt_aux_loss_in_backward", False):
-        return output
-
-    aux_losses = []
-    for gate in _iter_nemo_moe_gates(model):
-        aux_loss = getattr(gate, "_last_aux_loss", None)
-        if aux_loss is None:
-            continue
-        if isinstance(aux_loss, DTensor):
-            aux_loss = aux_loss.to_local()
-        aux_losses.append(aux_loss.detach().float())
-    if not aux_losses:
-        return output
-
-    aux_loss = torch.stack(aux_losses).sum()
-    if isinstance(output, dict):
-        output["aux_loss"] = aux_loss
-        output["_molt_aux_loss_in_backward"] = True
-    else:
-        output.aux_loss = aux_loss
-        output._molt_aux_loss_in_backward = True
-    return output
+    return coef > 0

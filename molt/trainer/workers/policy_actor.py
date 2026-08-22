@@ -118,9 +118,6 @@ class PolicyTrainer:
             ),
         )
 
-        # Add the MoE router load-balancing aux loss only when its coefficient is set.
-        self.aux_loss = self.args.actor.aux_loss_coef > 1e-8
-
         self.replay_buffer = NaiveReplayBuffer(
             micro_train_batch_size,
             buffer_limit,
@@ -136,16 +133,6 @@ class PolicyTrainer:
             raise NotImplementedError(
                 "Policy Engine does not support RL VLM packing; disable --fsdp.packing_samples for VLM RL"
             )
-        if self.actor.packing_samples and getattr(self.actor, "_packing_style", "automodel") != "automodel":
-            raise NotImplementedError(
-                "Policy Engine THD packing requires an AutoModel-native THD model; disable packing for HF fallback"
-            )
-        if self.aux_loss and not bool(getattr(self.actor.model, "_molt_aux_loss_in_backward", False)):
-            raise NotImplementedError(
-                "Policy Engine auxiliary loss currently requires AutoModel's MoEAuxLossAutoScaler path; "
-                "HF fallback aux_loss is not an additive token numerator"
-            )
-
         raw_model = self.actor.model
         padding_token_id = getattr(getattr(raw_model, "config", None), "pad_token_id", None) or 0
         max_grad_norm = self.args.actor.max_norm

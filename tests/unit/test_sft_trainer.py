@@ -252,17 +252,6 @@ def test_trainer_rejects_mrope_vlm_packing_with_context_parallelism():
         SFTTrainer(actor, strategy, optimizer, [], None, _Scheduler(optimizer, []), tokenizer=processor)
 
 
-def test_trainer_rejects_hf_fallback_packing():
-    strategy = _Strategy(accumulated_gradient=1)
-    strategy.args.fsdp.packing_samples = True
-    actor = _Actor()
-    actor._packing_style = "hf"
-    optimizer = torch.optim.SGD(actor.parameters(), lr=0.05)
-
-    with pytest.raises(NotImplementedError, match="AutoModel-native THD model"):
-        SFTTrainer(actor, strategy, optimizer, [], None, _Scheduler(optimizer, []))
-
-
 def test_trainer_selects_automodel_text_packing_collater():
     strategy = _Strategy(accumulated_gradient=1)
     strategy.args.fsdp.packing_samples = True

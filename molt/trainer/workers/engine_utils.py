@@ -131,11 +131,6 @@ def prepare_rl_engine_datum(
 
     packed_indices = None
     if packing_samples:
-        if getattr(model_wrapper, "_packing_style", "automodel") != "automodel":
-            raise NotImplementedError(
-                "RL Engine THD packing requires an AutoModel-native THD model; Hugging Face packing belongs to "
-                "Molt's removed legacy forward adapter"
-            )
         packed_indices = prediction_mask.reshape(-1).nonzero(as_tuple=False).flatten()
         features = []
         for row in range(batch):

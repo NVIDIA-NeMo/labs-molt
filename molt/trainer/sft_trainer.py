@@ -74,11 +74,6 @@ class SFTTrainer:
         raw_model = model.model
         processor = tokenizer if hasattr(tokenizer, "image_processor") else None
         packing_samples = strategy.args.fsdp.packing_samples
-        if packing_samples and getattr(model, "_packing_style", "automodel") != "automodel":
-            raise NotImplementedError(
-                "Engine THD packing requires an AutoModel-native THD model; the Hugging Face fallback's "
-                "FlashAttention packing adapter lives in Molt's legacy wrapper and is not used by Engine."
-            )
         mesh_names = getattr(strategy.device_mesh, "mesh_dim_names", ()) or ()
         cp_size = strategy.device_mesh["cp"].size() if "cp" in mesh_names else 1
         if processor is not None:

@@ -1072,10 +1072,12 @@ if __name__ == "__main__":
 
     if args.fsdp.packing_samples:
         assert args.vllm.num_engines > 0, "Only support `--fsdp.packing_samples` with vLLM."
-        # tilelang joins te/fa2: DSA (glm_moe_dsa) is THD-native and *requires* packing.
-        if args.fsdp.attn_implementation not in {"te", "flash_attention_2", "tilelang"}:
+        # DSA (glm_moe_dsa) is THD-native and uses tilelang; other native
+        # packed models use Transformer Engine.
+        if args.fsdp.attn_implementation not in {"te", "tilelang"}:
             raise ValueError(
-                "--fsdp.packing_samples requires --fsdp.attn_implementation te, flash_attention_2, or tilelang."
+                "--fsdp.packing_samples requires an AutoModel-native THD backend: "
+                "--fsdp.attn_implementation te or tilelang."
             )
 
     # --- Training / rollout sizing ---

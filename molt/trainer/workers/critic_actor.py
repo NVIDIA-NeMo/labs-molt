@@ -97,10 +97,6 @@ class CriticTrainer:
             raise NotImplementedError(
                 "Critic Engine does not support RL VLM packing; disable --fsdp.packing_samples for VLM PPO"
             )
-        if self.critic.packing_samples and getattr(self.critic, "_packing_style", "automodel") != "automodel":
-            raise NotImplementedError(
-                "Critic Engine THD packing requires an AutoModel-native THD model; disable packing for HF fallback"
-            )
         raw_model = self.critic.model
         padding_token_id = getattr(getattr(raw_model, "config", None), "pad_token_id", None) or 0
         max_grad_norm = self.args.critic.max_norm

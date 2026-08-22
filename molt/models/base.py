@@ -28,14 +28,9 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
-from molt.trainer.fsdp.packing import (
-    is_automodel_custom_model,
-    pack_padded_batch,
-    unpack_to_padded,
-)
+from molt.trainer.fsdp.packing import is_automodel_custom_model, pack_padded_batch, unpack_to_padded
 
 from .utils import (
-    attach_nemo_moe_aux_loss,
     configure_nemo_moe_aux_loss,
     move_model_to_cpu_for_offload,
     resolve_ac_mode,
@@ -62,15 +57,6 @@ def _detect_moe_arch(pretrain_or_model) -> bool:
     return False
 
 
-def _has_hf_flash_attn_2() -> bool:
-    try:
-        from transformers.utils import is_flash_attn_2_available
-
-        return bool(is_flash_attn_2_available())
-    except Exception:
-        return find_spec("flash_attn") is not None
-
-
 _HF_ATTN_IMPLEMENTATIONS = {"eager", "sdpa", "flash_attention_2", "flash_attention_3", "te"}
 # "tilelang" drives AutoModel's DSA (DeepSeek-style sparse attention) TileLang
 # kernels — the indexer + sparse MLA path for glm_moe_dsa / deepseek_v3.2.
@@ -94,13 +80,9 @@ def _resolve_custom_backend_attn(attn_implementation: str, packing_samples: bool
             # DSA (glm_moe_dsa / deepseek_v3.2) is THD-native: its sparse indexer
             # *requires* qkv_format='thd', which is exactly the packed layout.
             return "tilelang"
-        if attn_implementation == "flash_attention_2":
-            raise ValueError(
-                "--fsdp.packing_samples with AutoModel custom models requires --fsdp.attn_implementation te. "
-                "HF fallback packing is removed in this branch."
-            )
         raise ValueError(
-            "--fsdp.packing_samples supports only --fsdp.attn_implementation te, tilelang, or flash_attention_2."
+            "--fsdp.packing_samples requires an AutoModel-native THD backend: "
+            "--fsdp.attn_implementation te or tilelang."
         )
 
     if attn_implementation in _CUSTOM_ATTN_IMPLEMENTATIONS:
@@ -115,8 +97,8 @@ def _will_use_hf_model(pretrain_or_model, default: bool = True) -> bool:
 
     The AutoModel (NVIDIA-NeMo/Automodel) backend is the preferred path (native
     CP/EP/TP, custom MoE+EP parallelizer, TE fused attention). HF is a fallback for
-    models with no registered native class and supports only text +
-    flash_attention_2 + packing (no CP/EP/TP).
+    models with no registered native class. Packing and MoE auxiliary loss are
+    intentionally unavailable on that fallback.
     """
     if not isinstance(pretrain_or_model, str):
         return False
@@ -128,6 +110,24 @@ def _will_use_hf_model(pretrain_or_model, default: bool = True) -> bool:
         return get_is_hf_model(cfg, force_hf=False)
     except Exception:
         return default
+
+
+def _reject_hf_fallback_features(*, is_hf_model: bool, packing_samples: bool, moe_aux_loss_coef: float) -> None:
+    """Reject features whose old HF-specific implementations were removed."""
+    if not is_hf_model:
+        return
+
+    unsupported = []
+    if packing_samples:
+        unsupported.append("THD sequence packing")
+    if abs(float(moe_aux_loss_coef or 0.0)) > 1e-8:
+        unsupported.append("MoE auxiliary loss")
+    if unsupported:
+        raise NotImplementedError(
+            "Hugging Face fallback models do not support "
+            + " or ".join(unsupported)
+            + "; use an AutoModel-native implementation or disable the requested feature."
+        )
 
 
 def _class_source_supports_thd_packing(model_cls) -> bool:
@@ -295,20 +295,21 @@ class BaseModel(nn.Module):
                 )
             self.model = pretrain_or_model
             self.is_vlm = False
-            self._packing_style = "automodel" if is_automodel_custom_model(self.model) else "hf"
-            configure_nemo_moe_aux_loss(self.model, moe_aux_loss_coef)
-            if self.packing_samples and self._packing_style == "automodel":
+            is_native_model = is_automodel_custom_model(self.model)
+            _reject_hf_fallback_features(
+                is_hf_model=not is_native_model,
+                packing_samples=self.packing_samples,
+                moe_aux_loss_coef=moe_aux_loss_coef,
+            )
+            if is_native_model:
+                configured_aux = configure_nemo_moe_aux_loss(self.model, moe_aux_loss_coef)
+                if abs(float(moe_aux_loss_coef or 0.0)) > 1e-8 and not configured_aux:
+                    raise ValueError("MoE auxiliary loss was requested, but the AutoModel model has no native MoE gates.")
+            if self.packing_samples:
                 if not _automodel_custom_supports_thd_packing(self.model):
                     raise ValueError(
                         "This pre-instantiated AutoModel custom model does not consume THD packing kwargs. "
                         "Use an AutoModel custom TE model or disable --fsdp.packing_samples."
-                    )
-            if self.packing_samples and self._packing_style == "hf":
-                cfg = getattr(self.model, "config", None)
-                if getattr(cfg, "_attn_implementation", None) != "flash_attention_2" or not _has_hf_flash_attn_2():
-                    raise ValueError(
-                        "HF packed sequence requires flash_attention_2 and flash-attn. "
-                        "Use an AutoModel custom TE model or load the HF model with flash_attention_2."
                     )
             if routing_replay:
                 self._enable_routing_replay()
@@ -322,9 +323,14 @@ class BaseModel(nn.Module):
         compute_dtype = convert_to_torch_dtype(param_dtype)
         is_moe = _detect_moe_arch(pretrain_or_model)
         ep_active = moe_mesh is not None
+        use_hf_model = _will_use_hf_model(pretrain_or_model)
+        _reject_hf_fallback_features(
+            is_hf_model=use_hf_model,
+            packing_samples=packing_samples,
+            moe_aux_loss_coef=moe_aux_loss_coef,
+        )
         if is_moe and not ep_active:
             raise ValueError("MoE models require --fsdp.ep_size > 1 in the AutoModel custom-only branch.")
-        use_hf_model = _will_use_hf_model(pretrain_or_model)
         # EP dispatch is a nemo_automodel custom-path feature; HF has no equivalent. An
         # HF-fallback model under active EP would silently mis-shard experts / train on
         # wrong grads, so forbid it loudly. (TP/CP run on HF, so they aren't gated here.)
@@ -337,17 +343,10 @@ class BaseModel(nn.Module):
                 "the official GA model — not a renamed alias), or run with ep_size=1."
             )
         if packing_samples:
-            if not use_hf_model and not _automodel_arch_supports_thd_packing(pretrain_or_model):
+            if not _automodel_arch_supports_thd_packing(pretrain_or_model):
                 raise ValueError(
                     "AutoModel custom implementation for this architecture does not consume THD packing kwargs; "
                     "use --fsdp.attn_implementation te with a THD-capable custom model or disable packing."
-                )
-            # HF packing works only with FA2's varlen kernel: sdpa ignores the
-            # cu_seq_lens kwargs and would silently fuse packed-row boundaries.
-            if use_hf_model and (attn_implementation != "flash_attention_2" or not _has_hf_flash_attn_2()):
-                raise ValueError(
-                    "HF model packing requires --fsdp.attn_implementation flash_attention_2 with flash-attn installed. "
-                    "Disable --fsdp.packing_samples or use FA2 (sdpa would silently fuse packed-batch boundaries)."
                 )
 
         _validate_attn_implementation(attn_implementation)
@@ -457,10 +456,18 @@ class BaseModel(nn.Module):
             **backend_kwarg,
         )
         self.model = move_model_to_cpu_for_offload(self.model, distributed_config)
-        # from_pretrained may downgrade to HF even when custom was requested;
-        # re-derive from the loaded class so the forward picks the right pack style.
-        self._packing_style = "automodel" if is_automodel_custom_model(self.model) else "hf"
-        configure_nemo_moe_aux_loss(self.model, moe_aux_loss_coef)
+        # Registry/config inspection is best-effort. Recheck the loaded class so
+        # a late AutoModel -> HF fallback cannot enter either removed feature.
+        is_native_model = is_automodel_custom_model(self.model)
+        _reject_hf_fallback_features(
+            is_hf_model=not is_native_model,
+            packing_samples=packing_samples,
+            moe_aux_loss_coef=moe_aux_loss_coef,
+        )
+        if is_native_model:
+            configured_aux = configure_nemo_moe_aux_loss(self.model, moe_aux_loss_coef)
+            if abs(float(moe_aux_loss_coef or 0.0)) > 1e-8 and not configured_aux:
+                raise ValueError("MoE auxiliary loss was requested, but the AutoModel model has no native MoE gates.")
         if routing_replay:
             self._enable_routing_replay()
         if self.packing_samples:
@@ -558,8 +565,8 @@ class BaseModel(nn.Module):
         """Input prep (packing / VLM token-type ids / CP sharding) + model call.
 
         Returns ``(output, rolled_sequences, cp_forward, indices, batch, seqlen)``:
-        ``output`` is the normalized model output (``_AttrDict`` with ``logits`` and,
-        for custom MoE, ``aux_loss``); the rest is the state ``_restore_full_sequence``
+        ``output`` is the normalized model output containing ``logits``; the rest
+        is the state ``_restore_full_sequence``
         needs to map a per-token tensor back onto the dense ``[B, seqlen]`` axis.
         ``Actor`` turns this into log-probs; ``Critic`` into per-token values.
 
@@ -585,7 +592,7 @@ class BaseModel(nn.Module):
                 dist.all_reduce(local_tokens, op=dist.ReduceOp.MAX, group=self._ep_pad_group)
                 pad_to_tokens = int(local_tokens)
             sequences, position_ids, rolled_sequences, indices, attn_kwargs = pack_padded_batch(
-                sequences, attention_mask, style=self._packing_style, pad_to_tokens=pad_to_tokens
+                sequences, attention_mask, pad_to_tokens=pad_to_tokens
             )
             forward_attention_mask = None
         else:
@@ -773,6 +780,4 @@ class BaseModel(nn.Module):
                 output = self.model(**forward_kwargs)
         # AutoModel's custom MoE/LLM models (e.g. Qwen3MoeForCausalLM) return a
         # raw logits Tensor; HF returns a ModelOutput with `.logits`. Normalize.
-        output = _normalize_output(output)
-        output = attach_nemo_moe_aux_loss(output, self.model)
-        return output, rolled_sequences, cp_forward, indices, batch, seqlen
+        return _normalize_output(output), rolled_sequences, cp_forward, indices, batch, seqlen

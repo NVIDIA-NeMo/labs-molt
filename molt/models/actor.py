@@ -55,7 +55,6 @@ class Actor(BaseModel):
         - ``action_log_probs``: ``[B, num_actions]`` masked to the generated span —
                                 only when ``action_mask`` is given (RL / reference).
         - ``entropy``:          ``[B, S-1]`` — only when ``return_entropy`` (RL).
-        - ``aux_loss``:         MoE load-balancing loss — only for NeMo custom MoE.
         """
         output, rolled_sequences, cp_forward, indices, batch, seqlen = self._forward_backbone(
             sequences, attention_mask, position_ids, cp_context_stack, mm_inputs, routed_experts=routed_experts
