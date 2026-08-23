@@ -16,10 +16,26 @@
 # Adapted from OpenRLHF (https://github.com/OpenRLHF/OpenRLHF),
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
-from typing import Optional, Union
+from typing import Any, Optional, Union
 
 import torch
 import torch.nn as nn
+from torch.distributed.tensor import DTensor
+
+
+def unshard_dtensor(tensor: torch.Tensor) -> torch.Tensor:
+    """Materialize a DTensor as a plain, unsharded tensor on every rank."""
+    return tensor.full_tensor() if isinstance(tensor, DTensor) else tensor
+
+
+def is_automodel_custom_model(model: Any) -> bool:
+    """Recognize AutoModel-native modules, including FSDP dynamic subclasses."""
+    for cls in type(model).__mro__:
+        if getattr(cls, "_molt_automodel_custom", False):
+            return True
+        if issubclass(cls, nn.Module) and cls.__module__.startswith("nemo_automodel.components.models"):
+            return True
+    return False
 
 
 def resolve_ac_mode(value: Union[bool, str, None]) -> Union[bool, str]:

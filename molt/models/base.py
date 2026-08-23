@@ -23,10 +23,9 @@ from typing import Union
 import torch
 import torch.nn as nn
 
-from molt.trainer.fsdp.packing import is_automodel_custom_model
-
 from .utils import (
     configure_nemo_moe_aux_loss,
+    is_automodel_custom_model,
     resolve_ac_mode,
 )
 

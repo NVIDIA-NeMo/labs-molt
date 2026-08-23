@@ -26,9 +26,8 @@ one-wide is what turns that tensor into the per-token value directly.
 import torch
 import torch.nn as nn
 
-from molt.trainer.fsdp.packing import unshard_dtensor
-
 from .base import BaseModel
+from .utils import unshard_dtensor
 
 
 class _ValueHead(nn.Linear):

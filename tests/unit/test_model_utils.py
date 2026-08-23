@@ -3,7 +3,7 @@
 
 import torch.nn as nn
 
-from molt.trainer.fsdp.packing import is_automodel_custom_model
+from molt.models.utils import is_automodel_custom_model
 
 
 def test_hf_checkpointing_mixin_does_not_mark_hf_model_as_custom():
