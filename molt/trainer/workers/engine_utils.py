@@ -10,11 +10,11 @@ from functools import partial
 import torch
 from nemo_automodel._transformers.utils import resolve_get_rope_index
 from nemo_automodel.components.datasets.datum import Datum, LossInputLayout, collate_datums, collate_vlm_datums
+from nemo_automodel.components.loss import vocab_parallel_log_probs
 from nemo_automodel.engine import Engine, LossFnOutputBatch, PerTokenOutput
 from torch.distributed.tensor import DTensor
 
 from molt.models.utils import log_probs_from_logits
-from molt.trainer.fsdp.packing import log_probs_from_vocab_parallel_logits
 from molt.utils.vlm_utils import merge_mm_train_inputs
 
 
@@ -110,7 +110,7 @@ def action_log_probs_from_output(output, loss_inputs, temperature: float) -> tor
     logits = extract_model_logits(output)
     target_tokens = loss_inputs["target_tokens"]
     if isinstance(logits, DTensor):
-        return log_probs_from_vocab_parallel_logits(logits, target_tokens, temperature=temperature)
+        return vocab_parallel_log_probs(logits, target_tokens, temperature=temperature)
     return log_probs_from_logits(logits, target_tokens, temperature=temperature)
 
 

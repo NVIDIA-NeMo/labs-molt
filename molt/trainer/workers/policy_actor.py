@@ -27,6 +27,7 @@ import ray
 import torch
 import torch.distributed
 from nemo_automodel.components.distributed.mesh import MeshContext
+from nemo_automodel.components.loss import vocab_parallel_entropy
 from nemo_automodel.engine import Engine, LossFnOutputBatch, PerTokenOutput
 from torch.distributed.tensor import DTensor
 from torch.optim import Optimizer
@@ -38,7 +39,6 @@ from molt.models.loss import masked_sum
 from molt.models.utils import compute_approx_kl, compute_entropy, masked_mean
 from molt.trainer.algorithm.experience import Experience, get_model_parallel_size
 from molt.trainer.fsdp import FsdpStrategy
-from molt.trainer.fsdp.packing import unshard_dtensor
 from molt.trainer.fsdp.refit import gather_full_param
 from molt.utils import get_tokenizer
 from molt.utils.distributed_util import stateless_init_process_group, torch_dist_barrier_and_cuda_sync
@@ -462,10 +462,13 @@ class PolicyTrainer:
             "action_log_probs": PerTokenOutput(action_log_probs * weights, fill_value=0.0),
         }
         if bool(self.args.actor.entropy_coef):
-            entropy_logits = unshard_dtensor(logits).float()
-            if self.actor.temperature != 1.0:
-                entropy_logits = entropy_logits / self.actor.temperature
-            entropy = compute_entropy(entropy_logits)
+            if isinstance(logits, DTensor):
+                entropy = vocab_parallel_entropy(logits, temperature=self.actor.temperature)
+            else:
+                entropy_logits = logits.float()
+                if self.actor.temperature != 1.0:
+                    entropy_logits = entropy_logits / self.actor.temperature
+                entropy = compute_entropy(entropy_logits)
             numerator = numerator - masked_sum(entropy, weights.bool()) * self.args.actor.entropy_coef
             token_outputs["entropy"] = PerTokenOutput(entropy, fill_value=0.0)
 

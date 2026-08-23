@@ -36,6 +36,11 @@ AutoModel models may return the logits tensor directly. Engine owns the global
 weight denominator, model-parallel loss reductions, gradient synchronization,
 clipping, optimizer update, and `zero_grad` lifecycle.
 
+For RL, Molt still owns target and action-mask semantics, advantages, and
+PPO/KL/GSPO objectives. Its callbacks delegate selected-token log probabilities
+and exact entropy for vocab-sharded DTensor logits to AutoModel's tensor-parallel
+loss primitives, without gathering the full vocabulary.
+
 Molt advances its existing Transformers scheduler immediately after a
 successful Engine optimizer step. It is intentionally not passed as an Engine
 scheduler: AutoModel's scheduler uses `step(1)` as an increment, while a
@@ -160,12 +165,13 @@ debugging.
 
 ## Dependency and validation status
 
-Source and Docker installs pin AutoModel revision `1e8e58f1c`, which contains
+Source and Docker installs pin AutoModel revision `4559938f6`, which contains
 the current Datum Engine, processor-ready recursive Datum pinning, padded and
 packed VLM Datum collation with arbitrary layout-aware loss side channels,
 explicit variable microbatch groups, pipeline batch contexts, model-scoped
 routing replay across local pipeline parts, and managed pre-FSDP task modules
-used by the critic value head.
+used by the critic value head, plus vocab-parallel selected-token log
+probability and exact-entropy primitives.
 Molt's PyPI build still replaces source pins with `nemo-automodel>=0.5.0`; no
 released version floor currently guarantees this API.
 
@@ -196,6 +202,6 @@ Molt's CUDA-staged DTensor gather for vLLM refit. A two-GPU custom Qwen3.5-MoE
 HybridEP smoke passed the same Engine path with all expert DTensor shards
 resident on CPU between model calls.
 
-AutoModel revision `1e8e58f1c` is available on the remote integration branch,
+AutoModel revision `4559938f6` is available on the remote integration branch,
 so the source pin is reproducible outside this checkout. The PyPI release floor
 remains a packaging boundary until a release containing these APIs is cut.

@@ -395,6 +395,68 @@ class _TinyPolicyModel(nn.Module):
         return self.output(self.embedding(input_ids))
 
 
+def test_action_log_probs_delegate_vocab_sharded_logits_to_automodel(monkeypatch):
+    class FakeDTensor:
+        pass
+
+    logits = FakeDTensor()
+    targets = torch.tensor([[2, 3]])
+    expected = torch.tensor([[-0.2, -0.3]])
+
+    def log_probs(received_logits, received_targets, *, temperature):
+        assert received_logits is logits
+        assert received_targets is targets
+        assert temperature == 0.7
+        return expected
+
+    monkeypatch.setattr("molt.trainer.workers.engine_utils.DTensor", FakeDTensor)
+    monkeypatch.setattr("molt.trainer.workers.engine_utils.vocab_parallel_log_probs", log_probs)
+
+    result = action_log_probs_from_output({"logits": logits}, {"target_tokens": targets}, temperature=0.7)
+
+    assert result is expected
+
+
+def test_policy_entropy_delegates_vocab_sharded_logits_to_automodel(monkeypatch):
+    class FakeDTensor:
+        pass
+
+    logits = FakeDTensor()
+    log_probs = torch.tensor([[-0.2, -0.3]])
+    expected_entropy = torch.tensor([[0.4, 0.5]])
+
+    def entropy(received_logits, *, temperature):
+        assert received_logits is logits
+        assert temperature == 0.7
+        return expected_entropy
+
+    monkeypatch.setattr("molt.trainer.workers.policy_actor.DTensor", FakeDTensor)
+    monkeypatch.setattr("molt.trainer.workers.policy_actor.vocab_parallel_entropy", entropy)
+    monkeypatch.setattr(
+        "molt.trainer.workers.policy_actor.action_log_probs_from_output",
+        lambda _output, _inputs, _temperature: log_probs,
+    )
+
+    trainer = object.__new__(PolicyTrainer)
+    trainer.actor = SimpleNamespace(temperature=0.7)
+    trainer.actor_loss_fn = lambda *_args, **_kwargs: (log_probs.new_zeros(()),)
+    trainer._sequence_group = None
+    trainer.args = SimpleNamespace(
+        actor=SimpleNamespace(entropy_coef=0.1),
+        algo=SimpleNamespace(kl=SimpleNamespace(use_loss=False, init_coef=0.0)),
+    )
+    loss_inputs = {
+        "weights": torch.ones_like(log_probs),
+        "advantages": torch.ones_like(log_probs),
+    }
+
+    numerator, outputs = trainer._engine_loss({"logits": logits}, loss_inputs, kl_ctl=0.0)
+
+    torch.testing.assert_close(numerator, -expected_entropy.sum() * 0.1)
+    torch.testing.assert_close(outputs.per_token["action_log_probs"].tensor, log_probs)
+    assert outputs.per_token["entropy"].tensor is expected_entropy
+
+
 def test_policy_callback_runs_engine_backward_and_optimizer_step(monkeypatch):
     # The production helper selects a CUDA-only fused CE kernel when flash-attn
     # is installed. Keep this Engine contract test CPU-only.
