@@ -7,8 +7,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
-from nemo_automodel.components.datasets.datum import LossInputLayout, collate_vlm_datums
-from nemo_automodel.engine import Engine, LossFnOutputBatch, PerTokenOutput, collate_prebatched
+from nemo_automodel.components.datasets.datum import LossInputLayout, collate_datums, collate_vlm_datums
+from nemo_automodel.engine import Engine, LossFnOutputBatch, PerTokenOutput
 
 from molt.models.critic import _install_value_head, _ValueHead
 from molt.models.loss import PolicyLoss
@@ -92,28 +92,46 @@ def test_multi_axis_mrope_packed_vlm_cp_fails_fast():
         resolve_rl_engine_collation(wrapper, processor, _vlm_collation_strategy(cp_size=2), micro_train_batch_size=2)
 
 
+@pytest.mark.parametrize("packed", [False, True])
+def test_text_engine_collation_delegates_padding_and_packing_to_automodel(packed):
+    wrapper = _wrapper(packing_samples=packed)
+
+    collate_fn, microbatch_size = resolve_rl_engine_collation(
+        wrapper, None, _vlm_collation_strategy(), micro_train_batch_size=3
+    )
+
+    assert collate_fn.func is collate_datums
+    assert collate_fn.keywords == {"packed": packed}
+    assert microbatch_size == 3
+
+
 def test_prepare_padded_rl_datum_uses_shifted_prediction_axis():
     experience = _experience()
     prepared = prepare_rl_engine_datum(
         experience,
         _wrapper(),
         loss_fields={"old_values": experience.values, "returns": experience.returns},
-        packing_samples=False,
     )
 
     assert prepared.dense_shape == (2, 4)
-    assert prepared.packed_indices is None
-    assert torch.equal(prepared.datum.model_inputs["input_ids"], experience.sequences[:, :-1])
+    assert prepared.num_datums == 2
+    assert torch.equal(prepared.datums[0].model_inputs["input_ids"], torch.tensor([10, 11, 12]))
+    assert torch.equal(prepared.datums[1].model_inputs["input_ids"], torch.tensor([20, 21]))
+    assert torch.equal(prepared.datums[0].loss_fn_inputs["target_tokens"], torch.tensor([11, 12, 13]))
+    assert torch.equal(prepared.datums[1].loss_fn_inputs["target_tokens"], torch.tensor([21, 22]))
+    assert set(prepared.datums[0].loss_fn_input_layouts.values()) == {LossInputLayout.PER_TOKEN}
+
+    model_inputs, loss_inputs = collate_datums(list(prepared.datums), packed=False)
+    assert torch.equal(model_inputs["input_ids"], torch.tensor([[10, 11, 12], [20, 21, 0]]))
     assert torch.equal(
-        prepared.datum.model_inputs["attention_mask"],
-        torch.tensor([[1, 1, 1, 0], [1, 1, 0, 0]]),
+        model_inputs["attention_mask"],
+        torch.tensor([[1, 1, 1], [1, 1, 0]]),
     )
     assert torch.equal(
-        prepared.datum.model_inputs["position_ids"],
-        torch.tensor([[0, 1, 2, 1], [0, 1, 1, 1]]),
+        loss_inputs["target_tokens"],
+        torch.tensor([[11, 12, 13], [21, 22, 0]]),
     )
-    assert torch.equal(prepared.datum.loss_fn_inputs["target_tokens"], experience.sequences[:, 1:])
-    assert set(prepared.datum.loss_fn_input_layouts.values()) == {LossInputLayout.PER_TOKEN}
+    assert torch.equal(loss_inputs["weights"], torch.tensor([[0.0, 1.0, 1.0], [1.0, 1.0, 0.0]]))
 
 
 def test_prepare_padded_rl_datum_masks_left_padding_without_activating_its_last_slot():
@@ -128,11 +146,13 @@ def test_prepare_padded_rl_datum_masks_left_padding_without_activating_its_last_
         experience,
         _wrapper(),
         loss_fields={"old_values": experience.values, "returns": experience.returns},
-        packing_samples=False,
     )
 
-    assert torch.equal(prepared.datum.model_inputs["attention_mask"], torch.tensor([[0, 0, 1, 1]]))
-    assert torch.equal(prepared.datum.model_inputs["position_ids"], torch.tensor([[1, 1, 0, 1]]))
+    assert torch.equal(prepared.datums[0].model_inputs["input_ids"], torch.tensor([10, 11]))
+    assert torch.equal(prepared.datums[0].loss_fn_inputs["target_tokens"], torch.tensor([11, 12]))
+    assert torch.equal(prepared.datums[0].loss_fn_inputs["weights"], torch.tensor([1.0, 1.0]))
+    restored = prepared.restore_token_outputs([torch.tensor([3.0, 4.0])])
+    assert torch.equal(restored, torch.tensor([[0.0, 0.0, 3.0, 4.0]]))
 
 
 def test_prepare_packed_rl_datum_uses_automodel_thd_and_restores_dense_output():
@@ -141,16 +161,15 @@ def test_prepare_packed_rl_datum_uses_automodel_thd_and_restores_dense_output():
         experience,
         _wrapper(),
         loss_fields={"old_values": experience.values, "returns": experience.returns},
-        packing_samples=True,
     )
 
-    model_inputs = prepared.datum.model_inputs
+    model_inputs, loss_inputs = collate_datums(list(prepared.datums), packed=True)
     assert model_inputs["qkv_format"] == "thd"
     assert torch.equal(model_inputs["input_ids"], torch.tensor([[10, 11, 12, 20, 21]]))
     assert torch.equal(model_inputs["seq_lens"], torch.tensor([[3, 2]]))
-    assert torch.equal(prepared.datum.loss_fn_inputs["weights"], torch.tensor([[0.0, 1.0, 1.0, 1.0, 1.0]]))
+    assert torch.equal(loss_inputs["weights"], torch.tensor([[0.0, 1.0, 1.0, 1.0, 1.0]]))
 
-    restored = prepared.restore_token_output(torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0]]))
+    restored = prepared.restore_token_outputs([torch.tensor([1.0, 2.0, 3.0]), torch.tensor([4.0, 5.0])])
     assert torch.equal(restored, torch.tensor([[1.0, 2.0, 3.0, 0.0], [4.0, 5.0, 0.0, 0.0]]))
 
 
@@ -166,19 +185,22 @@ def test_prepare_rl_datum_declares_sequence_boundaries_and_routing_side_channel(
         experience,
         _wrapper(_routing_replay_adapter=_RouteAdapter()),
         loss_fields={"old_values": experience.values, "returns": experience.returns},
-        packing_samples=True,
         include_sequence_ids=True,
         routed_experts=routes,
     )
 
-    assert prepared.datum.loss_fn_input_layouts["sequence_ids"] is LossInputLayout.PER_TOKEN
-    assert prepared.datum.loss_fn_input_layouts["routed_experts"] is LossInputLayout.PER_TOKEN
-    assert prepared.datum.loss_fn_input_layouts["num_sequences"] is LossInputLayout.REPLICATED
-    assert prepared.datum.loss_fn_input_pad_values["sequence_ids"] == -1
-    assert prepared.datum.loss_fn_input_pad_values["routed_experts"] == -1
-    assert torch.equal(prepared.datum.loss_fn_inputs["sequence_ids"], torch.tensor([[0, 0, 0, 1, 1]]))
-    assert prepared.datum.loss_fn_inputs["routed_experts"].shape == (1, 5, 3, 2)
-    assert prepared.datum.loss_fn_inputs["num_sequences"].item() == 2
+    for datum in prepared.datums:
+        assert datum.loss_fn_input_layouts["sequence_ids"] is LossInputLayout.PER_TOKEN
+        assert datum.loss_fn_input_layouts["routed_experts"] is LossInputLayout.PER_TOKEN
+        assert datum.loss_fn_input_layouts["num_sequences"] is LossInputLayout.REPLICATED
+        assert datum.loss_fn_input_pad_values["sequence_ids"] == -1
+        assert datum.loss_fn_input_pad_values["routed_experts"] == -1
+
+    _, loss_inputs = collate_datums(list(prepared.datums), packed=False)
+    assert torch.equal(loss_inputs["sequence_ids"], torch.tensor([[0, 0, 0], [1, 1, -1]]))
+    assert loss_inputs["routed_experts"].shape == (2, 3, 3, 2)
+    assert bool((loss_inputs["routed_experts"][1, 2] == -1).all())
+    assert loss_inputs["num_sequences"].item() == 2
 
 
 def test_prepare_vlm_rl_datum_keeps_media_and_builds_token_types():
@@ -192,7 +214,6 @@ def test_prepare_vlm_rl_datum_keeps_media_and_builds_token_types():
         experience,
         _wrapper(is_vlm=True, _image_token_id=99, _video_token_id=None),
         loss_fields={"old_values": experience.values, "returns": experience.returns},
-        packing_samples=False,
     )
 
     assert prepared.num_datums == 2
@@ -224,7 +245,6 @@ def test_packed_vlm_rl_datums_collate_side_channels_and_restore_dense_outputs():
         experience,
         wrapper,
         loss_fields={"old_values": experience.values, "returns": experience.returns},
-        packing_samples=True,
         routed_experts=routes,
     )
     processor = SimpleNamespace(
@@ -319,16 +339,15 @@ class _ScalarValueModel(nn.Module):
         return input_ids.float().unsqueeze(-1) * self.scale
 
 
-def test_prebatched_rl_datum_runs_one_engine_backward_window():
+def test_per_sample_rl_datums_run_one_engine_backward_window():
     experience = _experience()
     model = _ScalarValueModel()
     prepared = prepare_rl_engine_datum(
         experience,
         _wrapper(model=model),
         loss_fields={"old_values": experience.values, "returns": experience.returns},
-        packing_samples=False,
     )
-    engine = Engine(model, device="cpu", microbatch_size=1, collate_fn=collate_prebatched)
+    engine = Engine(model, device="cpu", microbatch_size=2, collate_fn=partial(collate_datums, packed=False))
 
     collected = run_rl_engine_forward(
         engine,
@@ -348,12 +367,19 @@ def test_prebatched_rl_datum_runs_one_engine_backward_window():
             per_token={"action_values": PerTokenOutput(values * weights)}
         )
 
-    result = engine.forward_backward([prepared.datum], loss_fn)
+    result = engine.forward_backward(
+        prepared.datums,
+        loss_fn,
+        microbatch_sizes=(prepared.num_datums,),
+    )
     expected_sum = (0.5 * (expected_values - experience.returns).pow(2) * experience.action_mask).sum()
+    restored_values = prepared.restore_token_outputs(
+        [record["action_values"] for record in result.loss_fn_outputs]
+    )
 
     assert torch.allclose(result.loss_sum, expected_sum.double())
     assert torch.allclose(result.loss, expected_sum.double() / experience.action_mask.sum())
-    assert torch.equal(result.loss_fn_outputs[0]["action_values"], expected_values * experience.action_mask)
+    assert torch.equal(restored_values, expected_values * experience.action_mask)
     assert model.scale.grad is not None
 
 
@@ -409,14 +435,13 @@ def test_policy_callback_runs_engine_backward_and_optimizer_step(monkeypatch):
             "base_action_log_probs": experience.base_action_log_probs,
             "rollout_log_probs": experience.rollout_log_probs,
         },
-        packing_samples=False,
     )
     optimizer = torch.optim.SGD(model.parameters(), lr=0.05)
     engine = Engine(
         model,
         device="cpu",
-        microbatch_size=1,
-        collate_fn=collate_prebatched,
+        microbatch_size=2,
+        collate_fn=partial(collate_datums, packed=False),
         optimizers=optimizer,
         max_grad_norm=1.0,
     )
@@ -434,13 +459,19 @@ def test_policy_callback_runs_engine_backward_and_optimizer_step(monkeypatch):
     assert not optimizer.state
 
     result = engine.forward_backward(
-        [prepared.datum], lambda output, inputs: trainer._engine_loss(output, inputs, kl_ctl=0.1)
+        prepared.datums,
+        lambda output, inputs: trainer._engine_loss(output, inputs, kl_ctl=0.1),
+        microbatch_sizes=(prepared.num_datums,),
     )
     optim_result = engine.optim_step()
+    action_log_probs = prepared.restore_token_outputs(
+        [record["action_log_probs"] for record in result.loss_fn_outputs]
+    )
+    entropy = prepared.restore_token_outputs([record["entropy"] for record in result.loss_fn_outputs])
 
     assert torch.isfinite(result.loss)
     assert result.weight_sum.item() == experience.action_mask.sum().item()
-    assert result.loss_fn_outputs[0]["action_log_probs"].shape == experience.action_mask.shape
-    assert result.loss_fn_outputs[0]["entropy"].shape == experience.action_mask.shape
+    assert action_log_probs.shape == experience.action_mask.shape
+    assert entropy.shape == experience.action_mask.shape
     assert float(optim_result.grad_norm) > 0
     assert not torch.equal(model.output.weight, before)

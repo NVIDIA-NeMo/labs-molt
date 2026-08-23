@@ -352,7 +352,6 @@ class PolicyTrainer:
                                 "base_action_log_probs": exp.base_action_log_probs,
                                 "rollout_log_probs": exp.rollout_log_probs,
                             },
-                            packing_samples=self.actor.packing_samples,
                             include_sequence_ids=self._needs_sequence_ids,
                             routed_experts=exp.routed_experts,
                         )
@@ -874,7 +873,6 @@ class PolicyModelActor(BaseModelActor):
             experience,
             self.actor,
             loss_fields={},
-            packing_samples=self.actor.packing_samples,
             routed_experts=experience.routed_experts,
         )
         self.actor.eval()

@@ -187,7 +187,6 @@ class CriticTrainer:
                             exp,
                             self.critic,
                             loss_fields={"old_values": exp.values, "returns": exp.returns},
-                            packing_samples=self.critic.packing_samples,
                         )
                     )
 
@@ -363,7 +362,6 @@ class CriticModelActor(BaseModelActor):
             experience,
             self.critic,
             loss_fields={},
-            packing_samples=self.critic.packing_samples,
         )
         self.critic.eval()
         try:

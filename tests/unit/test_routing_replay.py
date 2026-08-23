@@ -193,7 +193,6 @@ def test_engine_forward_replays_routes_through_automodel_adapter():
         experience,
         wrapped,
         loss_fields={},
-        packing_samples=False,
         routed_experts=routed,
     )
     engine = Engine(

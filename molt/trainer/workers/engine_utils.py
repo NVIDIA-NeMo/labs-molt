@@ -9,9 +9,8 @@ from functools import partial
 
 import torch
 from nemo_automodel._transformers.utils import resolve_get_rope_index
-from nemo_automodel.components.datasets.datum import Datum, LossInputLayout, collate_vlm_datums
-from nemo_automodel.components.datasets.utils import pack_features_for_thd, packed_sequence_thd_collater
-from nemo_automodel.engine import Engine, LossFnOutputBatch, PerTokenOutput, collate_prebatched
+from nemo_automodel.components.datasets.datum import Datum, LossInputLayout, collate_datums, collate_vlm_datums
+from nemo_automodel.engine import Engine, LossFnOutputBatch, PerTokenOutput
 from torch.distributed.tensor import DTensor
 
 from molt.models.utils import log_probs_from_logits
@@ -25,54 +24,29 @@ class PreparedRLEngineDatum:
 
     datums: tuple[Datum, ...]
     dense_shape: tuple[int, int]
-    packed_indices: torch.Tensor | None = None
-    sample_prediction_indices: tuple[torch.Tensor, ...] | None = None
-
-    @property
-    def datum(self) -> Datum:
-        """The single prebatched Datum used by the text path."""
-
-        if len(self.datums) != 1:
-            raise ValueError("this prepared VLM microbatch contains multiple Datums; use .datums")
-        return self.datums[0]
+    prediction_indices: tuple[torch.Tensor, ...]
 
     @property
     def num_datums(self) -> int:
         return len(self.datums)
 
-    def restore_token_output(self, tensor: torch.Tensor) -> torch.Tensor:
-        """Restore an Engine token output to the Experience's dense ``[B, T-1]`` axis."""
-
-        if self.packed_indices is None:
-            return tensor
-        batch, sequence = self.dense_shape
-        values = tensor.squeeze(0) if tensor.ndim > 1 and tensor.shape[0] == 1 else tensor
-        indices = self.packed_indices.to(tensor.device)
-        restored = values.new_zeros((batch * sequence, *values.shape[1:]))
-        restored.index_copy_(0, indices, values[: indices.numel()])
-        return restored.view(batch, sequence, *values.shape[1:])
-
     def restore_token_outputs(self, tensors: Sequence[torch.Tensor]) -> torch.Tensor:
         """Restore per-Datum Engine outputs to the Experience's dense token axis."""
 
-        if self.sample_prediction_indices is None:
-            if len(tensors) != 1:
-                raise ValueError(f"text RL microbatches expect one Engine output, got {len(tensors)}")
-            return self.restore_token_output(tensors[0])
-        if len(tensors) != len(self.sample_prediction_indices):
+        if len(tensors) != len(self.prediction_indices):
             raise ValueError(
-                f"VLM RL microbatch expects {len(self.sample_prediction_indices)} Engine outputs, got {len(tensors)}"
+                f"RL microbatch expects {len(self.prediction_indices)} Engine outputs, got {len(tensors)}"
             )
         if not tensors:
-            raise ValueError("VLM RL microbatches cannot be empty")
+            raise ValueError("RL microbatches cannot be empty")
 
         batch, sequence = self.dense_shape
         trailing_shape = tensors[0].shape[1:]
         restored = tensors[0].new_zeros((batch, sequence, *trailing_shape))
-        for row, (tensor, indices) in enumerate(zip(tensors, self.sample_prediction_indices)):
+        for row, (tensor, indices) in enumerate(zip(tensors, self.prediction_indices)):
             if tensor.shape[1:] != trailing_shape or tensor.shape[0] != indices.numel():
                 raise ValueError(
-                    "VLM Engine output does not match its original prediction axis: "
+                    "Engine output does not match its original prediction axis: "
                     f"output={tuple(tensor.shape)}, indices={indices.numel()}"
                 )
             restored[row].index_copy_(0, indices.to(tensor.device), tensor)
@@ -83,7 +57,7 @@ def resolve_rl_engine_collation(model_wrapper, tokenizer, strategy, micro_train_
     """Select the AutoModel collater and outer Datum batch size for RL."""
 
     if not bool(getattr(model_wrapper, "is_vlm", False)):
-        return collate_prebatched, 1
+        return partial(collate_datums, packed=bool(model_wrapper.packing_samples)), micro_train_batch_size
     if tokenizer is None or not hasattr(tokenizer, "image_processor"):
         raise ValueError("RL VLM training requires the model's AutoProcessor")
 
@@ -243,7 +217,7 @@ def _prepare_vlm_rl_engine_datums(
     return PreparedRLEngineDatum(
         datums=tuple(datums),
         dense_shape=(batch, full_sequence - 1),
-        sample_prediction_indices=tuple(prediction_indices),
+        prediction_indices=tuple(prediction_indices),
     )
 
 
@@ -252,16 +226,13 @@ def prepare_rl_engine_datum(
     model_wrapper,
     *,
     loss_fields: Mapping[str, torch.Tensor | None],
-    packing_samples: bool,
-    replicated_loss_fields: Mapping[str, torch.Tensor] | None = None,
     include_sequence_ids: bool = False,
     routed_experts: torch.Tensor | None = None,
-    loss_pad_values: Mapping[str, int | float | bool] | None = None,
 ) -> PreparedRLEngineDatum:
-    """Convert one already-collated Experience microbatch into one Engine Datum.
+    """Convert one already-collated Experience microbatch into Engine Datums.
 
     Molt keeps replay-buffer batching and dense-coordinate mapping. AutoModel
-    owns VLM media collation, padding/packing, device movement, CP layout,
+    owns text/VLM collation, padding/packing, device movement, CP layout,
     normalization, backward, gradient finalization, clipping, and optimizer
     mutation. Autoregressive model inputs use states ``tokens[:-1]`` while loss
     fields use next-token positions ``tokens[1:]``.
@@ -302,7 +273,7 @@ def prepare_rl_engine_datum(
             shape = tuple(value.shape) if isinstance(value, torch.Tensor) else type(value).__name__
             raise ValueError(f"RL loss field {name!r} must start with {(batch, sequence)}, got {shape}")
 
-    resolved_pad_values = dict(loss_pad_values or {})
+    resolved_pad_values: dict[str, int | float | bool] = {}
     if include_sequence_ids:
         sequence_ids = torch.arange(batch, device=sequences.device).unsqueeze(1).expand(batch, sequence).clone()
         losses["sequence_ids"] = sequence_ids.masked_fill(~prediction_mask, -1)
@@ -318,15 +289,9 @@ def prepare_rl_engine_datum(
         losses["routed_experts"] = prepared_routes
         resolved_pad_values["routed_experts"] = -1
 
-    replicated_losses = dict(replicated_loss_fields or {})
-    overlap = set(losses) & set(replicated_losses)
-    if overlap:
-        raise ValueError(f"RL loss fields cannot be both PER_TOKEN and REPLICATED: {sorted(overlap)}")
+    replicated_losses: dict[str, torch.Tensor] = {}
     if include_sequence_ids:
-        replicated_losses.setdefault("num_sequences", torch.tensor(batch, device=sequences.device))
-    for name, value in replicated_losses.items():
-        if not isinstance(value, torch.Tensor):
-            raise TypeError(f"replicated RL loss field {name!r} must be a Tensor")
+        replicated_losses["num_sequences"] = torch.tensor(batch, device=sequences.device)
 
     is_vlm = bool(getattr(model_wrapper, "is_vlm", False))
     if is_vlm:
@@ -338,40 +303,35 @@ def prepare_rl_engine_datum(
             loss_pad_values=resolved_pad_values,
         )
 
-    packed_indices = None
-    if packing_samples:
-        packed_indices = prediction_mask.reshape(-1).nonzero(as_tuple=False).flatten()
-        features = []
-        for row in range(batch):
-            row_ids = input_ids[row][prediction_mask[row]]
-            if row_ids.numel() == 0:
-                raise ValueError("RL Engine packing cannot pack a sequence with no real prediction positions")
-            features.append({"input_ids": row_ids.tolist()})
-        model_inputs = packed_sequence_thd_collater([pack_features_for_thd(features)])
-        model_inputs.pop("labels", None)
-        packed_losses = {}
-        for name, value in losses.items():
-            flat = value.reshape(batch * sequence, *value.shape[2:])
-            packed_losses[name] = flat.index_select(0, packed_indices).unsqueeze(0)
-        losses = packed_losses
-    else:
-        model_inputs = {
-            "input_ids": input_ids,
-            "attention_mask": prediction_mask.to(attention_mask.dtype),
-        }
-        position_ids = prediction_mask.long().cumsum(-1) - 1
-        position_ids.masked_fill_(~prediction_mask, 1)
-        model_inputs["position_ids"] = position_ids
+    datums = []
+    prediction_indices = []
+    for row in range(batch):
+        valid = attention_mask[row].bool().nonzero(as_tuple=False).flatten()
+        if valid.numel() < 2:
+            raise ValueError("RL text Datums require at least two contiguous real tokens per sample")
+        start = int(valid[0])
+        stop = int(valid[-1]) + 1
+        if valid.numel() != stop - start:
+            raise ValueError("RL text Datums require a contiguous real-token attention span")
 
-    losses.update(replicated_losses)
-    layouts = {
-        **{name: LossInputLayout.PER_TOKEN for name in losses if name not in replicated_losses},
-        **{name: LossInputLayout.REPLICATED for name in replicated_losses},
-    }
-    datum = Datum(
-        model_inputs=model_inputs,
-        loss_fn_inputs=losses,
-        loss_fn_input_layouts=layouts,
-        loss_fn_input_pad_values=resolved_pad_values,
+        sample_losses = {name: value[row, start : stop - 1] for name, value in losses.items()}
+        sample_losses.update(replicated_losses)
+        layouts = {
+            **{name: LossInputLayout.PER_TOKEN for name in losses},
+            **{name: LossInputLayout.REPLICATED for name in replicated_losses},
+        }
+        datums.append(
+            Datum(
+                model_inputs={"input_ids": input_ids[row, start : stop - 1]},
+                loss_fn_inputs=sample_losses,
+                loss_fn_input_layouts=layouts,
+                loss_fn_input_pad_values=resolved_pad_values,
+            )
+        )
+        prediction_indices.append(torch.arange(start, stop - 1, device=sequences.device))
+
+    return PreparedRLEngineDatum(
+        datums=tuple(datums),
+        dense_shape=(batch, sequence),
+        prediction_indices=tuple(prediction_indices),
     )
-    return PreparedRLEngineDatum(datums=(datum,), dense_shape=(batch, sequence), packed_indices=packed_indices)

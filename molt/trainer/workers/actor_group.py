@@ -192,7 +192,6 @@ class ReferenceModelActor(BaseModelActor):
             experience,
             self.model,
             loss_fields={},
-            packing_samples=self.model.packing_samples,
         )
         output = run_rl_engine_forward(
             self.engine,
