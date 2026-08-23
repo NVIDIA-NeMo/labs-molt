@@ -347,6 +347,22 @@ def test_engine_only_sft_matches_full_window_masked_update(tensor_output):
     )
 
 
+def test_sft_loss_callback_does_not_double_count_native_moe_aux_loss():
+    trainer = object.__new__(SFTTrainer)
+    trainer.loss_fn = lambda logits, labels: F.cross_entropy(logits.flatten(0, 1), labels.flatten(), reduction="sum")
+    logits = torch.tensor([[[0.2, -0.3, 0.1], [0.7, 0.0, -0.4]]], requires_grad=True)
+    aux_loss = torch.tensor(2.0, requires_grad=True)
+
+    loss = trainer._engine_loss(
+        SimpleNamespace(logits=logits, aux_loss=aux_loss),
+        {"labels": torch.tensor([[0, 1]])},
+    )
+    loss.backward()
+
+    assert logits.grad is not None
+    assert aux_loss.grad is None
+
+
 def test_eval_uses_engine_forward_and_one_dataset_reduction():
     strategy = _Strategy(accumulated_gradient=1)
     actor = _Actor()

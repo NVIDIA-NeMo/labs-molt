@@ -175,7 +175,12 @@ if __name__ == "__main__":
         help="Activation-checkpointing mode (string): 'full' = full-block AC (AutoModel "
         "recipe default), 'selective' = TorchTitan per-op AC, 'none'/'off'/'' = disable.",
     )
-    parser.add_argument("--model.aux_loss_coef", type=float, default=0, help="MoE balancing loss")
+    parser.add_argument(
+        "--model.aux_loss_coef",
+        type=float,
+        default=0,
+        help="AutoModel-native MoE load-balancing loss coefficient",
+    )
     parser.add_argument(
         "--model.freeze_visual_encoder",
         action="store_true",
@@ -258,14 +263,10 @@ if __name__ == "__main__":
         raise ValueError("--data.dataset is required")
 
     # --- Engine-only SFT boundary ---
-    unsupported = []
     if args.fsdp.pp_size != 1:
-        unsupported.append("pipeline parallelism in Molt's trainer setup")
-    if abs(args.model.aux_loss_coef) > 1e-8:
-        unsupported.append("auxiliary-loss reporting")
-    if unsupported:
         raise NotImplementedError(
-            "Engine-only SFT does not yet support " + ", ".join(unsupported) + ". No legacy fallback remains."
+            "Engine-only SFT does not yet support pipeline parallelism in Molt's trainer setup. "
+            "No legacy fallback remains."
         )
 
     # --- Runtime ---

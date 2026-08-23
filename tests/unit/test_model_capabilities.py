@@ -20,6 +20,16 @@ class _DeclaredTHDModel(nn.Module):
         supports_thd = True
 
 
+class Gate(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.aux_loss_coeff = 0.0
+        self._track_load_balance = False
+
+
+Gate.__module__ = "nemo_automodel.components.moe.fake"
+
+
 def test_thd_support_uses_automodel_capability_declaration():
     assert _automodel_supports_thd_packing(_DeclaredTHDModel())
 
@@ -66,3 +76,19 @@ def test_automodel_full_cpu_offload_is_allowed_for_custom_moe():
     wrapped = BaseModel(model, distributed_config=SimpleNamespace(offload_policy=object()))
 
     assert wrapped.model is model
+
+
+def test_automodel_native_moe_uses_aux_loss_autograd_coefficient_without_scalar_tracking():
+    model = _DeclaredTHDModel()
+    model.gate = Gate()
+    model.config = SimpleNamespace(num_local_experts=8, router_aux_loss_coef=0.0)
+    model.moe_layer = nn.Module()
+    model.moe_layer.moe_config = SimpleNamespace(aux_loss_coeff=0.0)
+
+    wrapped = BaseModel(model, moe_aux_loss_coef=0.25)
+
+    assert wrapped.model is model
+    assert model.gate.aux_loss_coeff == pytest.approx(0.25)
+    assert model.config.router_aux_loss_coef == pytest.approx(0.25)
+    assert model.moe_layer.moe_config.aux_loss_coeff == pytest.approx(0.25)
+    assert model.gate._track_load_balance is False

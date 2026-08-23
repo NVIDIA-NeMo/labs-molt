@@ -67,8 +67,14 @@ Unsupported combinations fail before the first training batch:
   support;
 - multi-axis mRoPE with packed THD CP, which AutoModel currently rejects
   because aligned document padding and CP token reordering do not yet preserve
-  its three position axes;
-- explicit auxiliary-loss reporting.
+  its three position axes.
+
+Native custom-MoE auxiliary loss is supported through AutoModel's
+`MoEAuxLossAutoScaler`: Molt sets the native gate coefficient and AutoModel
+injects the auxiliary gradient during autograd. The reported `sft_loss` remains
+the token cross-entropy metric. Molt deliberately does not add a surfaced aux
+scalar in its loss callback, because that would apply the same auxiliary
+gradient twice.
 
 Muon and `MOLT_DEFER_GRAD_SYNC=0` use the same Engine path: Engine steps the
 already-built optimizer generically and accepts the FSDP synchronization toggle

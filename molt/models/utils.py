@@ -162,8 +162,6 @@ def configure_nemo_moe_aux_loss(model: nn.Module, aux_loss_coef: float) -> bool:
 
     for gate in gates:
         gate.aux_loss_coeff = coef
-        if coef > 0:
-            gate._track_load_balance = True
 
     config = getattr(model, "config", None)
     if config is not None and hasattr(config, "router_aux_loss_coef"):
