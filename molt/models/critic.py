@@ -23,11 +23,18 @@ raw ``head(hidden)`` tensor and do not surface hidden states, so making the head
 one-wide is what turns that tensor into the per-token value directly.
 """
 
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
+
 import torch
 import torch.nn as nn
+from nemo_automodel.components.datasets.datum import Datum
 
 from .base import BaseModel
 from .utils import unshard_dtensor
+
+if TYPE_CHECKING:
+    from molt.trainer.algorithm.experience import Experience
 
 
 class _ValueHead(nn.Linear):
@@ -43,8 +50,8 @@ class _ValueHead(nn.Linear):
       head still sees the full hidden_size and computes correct values — a bare
       ``to_local()`` would have silently used only this rank's shard.
 
-    This mirrors the policy loss function's ``unshard_dtensor(logits)`` and
-    collapses only the TP dimension; Engine owns CP output restoration.
+    This materializes only the value head's TP/SP hidden input; Engine owns
+    context-parallel token layout and output restoration separately.
     AutoModel installs this head before FSDP, so its parameters participate in the
     same reduction, clipping, optimizer, and checkpoint lifecycle as the backbone.
     ``unshard_dtensor`` is a no-op at TP=1 (input already plain).
@@ -133,3 +140,33 @@ class Critic(BaseModel):
             # across an existing AutoModel FSDP boundary.
             super().__init__(*args, **kwargs)
             _install_value_head(self.model)
+
+    def make_value_datums(
+        self,
+        experience: "Experience",
+        *,
+        old_values: torch.Tensor,
+        returns: torch.Tensor,
+        routed_experts: torch.Tensor | None = None,
+    ) -> list[Datum]:
+        """Build one critic microbatch with its value-regression inputs."""
+        return self._make_datums(
+            experience,
+            side_inputs={
+                "weights": experience.action_mask.float(),
+                "old_values": old_values,
+                "returns": returns,
+            },
+            routed_experts=routed_experts,
+        )
+
+    @staticmethod
+    def compute_values(output: Any, _inputs: Mapping[str, torch.Tensor]) -> torch.Tensor:
+        """Return one fp32 scalar value for each token in a model batch."""
+        if torch.is_tensor(output):
+            values = output
+        elif isinstance(output, Mapping):
+            values = output["logits"]
+        else:
+            values = output.logits
+        return unshard_dtensor(values).squeeze(-1).float()

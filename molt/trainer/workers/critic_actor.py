@@ -36,13 +36,12 @@ from typing import Dict
 import ray
 import torch
 from nemo_automodel.components.distributed.mesh import MeshContext
-from nemo_automodel.engine import Engine, LossFnOutputBatch, PerTokenOutput
+from nemo_automodel.engine import Engine, LossOutput
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from molt.models import Critic, ValueLoss
-from molt.models.utils import unshard_dtensor
 from molt.trainer.algorithm.experience import Experience, get_model_parallel_size
 from molt.trainer.fsdp import FsdpStrategy
 from molt.utils import get_tokenizer
@@ -51,12 +50,6 @@ from molt.utils.logging_utils import init_logger
 
 from ..algorithm import NaiveReplayBuffer
 from .actor_group import BaseModelActor
-from .engine_utils import (
-    extract_model_logits,
-    prepare_rl_engine_datum,
-    resolve_rl_engine_collation,
-    run_rl_engine_forward,
-)
 
 logger = init_logger(__name__)
 
@@ -96,17 +89,16 @@ class CriticTrainer:
         raw_model = self.critic.model
         padding_token_id = getattr(getattr(raw_model, "config", None), "pad_token_id", None) or 0
         max_grad_norm = self.args.critic.max_norm
-        collate_fn, engine_microbatch_size = resolve_rl_engine_collation(
-            self.critic, self.tokenizer, strategy, micro_train_batch_size
-        )
+        mesh_names = getattr(strategy.device_mesh, "mesh_dim_names", ()) or ()
+        cp_mesh = strategy.device_mesh["cp"] if "cp" in mesh_names else None
+        cp_size = cp_mesh.size() if cp_mesh is not None else 1
         self.engine = Engine(
             raw_model,
             device=torch.device("cuda", torch.cuda.current_device()),
             mesh_context=MeshContext.from_meshes(strategy.device_mesh, strategy.moe_mesh),
-            microbatch_size=engine_microbatch_size,
-            collate_fn=collate_fn,
+            collate_fn=self.critic.datum_collator(self.tokenizer, cp_size=cp_size),
             padding_token_id=padding_token_id,
-            batch_context_fn=getattr(self.critic, "_routing_replay_adapter", None),
+            batch_context_fn=self.critic.routing_replay_context,
             defer_fsdp_grad_sync=self._defer_grad_sync,
             optimizers=self.critic_optim,
             max_grad_norm=max_grad_norm if max_grad_norm and max_grad_norm > 0 else None,
@@ -176,52 +168,41 @@ class CriticTrainer:
                 )
                 if not window_end:
                     continue
-                prepared_window = []
+                datum_batches = []
                 for exp in window:
                     # Full per-sequence lengths drive the FLOP estimate (the forward
                     # processes the whole sequence, not just action tokens).
                     seqlens = exp.attention_mask.sum(dim=-1)
                     local_seq_count += float(seqlens.numel())
                     local_token_sum += float(seqlens.sum())
-                    prepared_window.append(
-                        prepare_rl_engine_datum(
+                    datum_batches.append(
+                        self.critic.make_value_datums(
                             exp,
-                            self.critic,
-                            loss_fields={"old_values": exp.values, "returns": exp.returns},
+                            old_values=exp.values,
+                            returns=exp.returns,
                             routed_experts=exp.routed_experts,
                         )
                     )
 
-                engine_datums = [datum for prepared in prepared_window for datum in prepared.datums]
                 if self.dataloader_pin_memory and window[0].sequences.device.type == "cpu":
-                    for datum in engine_datums:
-                        datum.pin_memory()
+                    for datums in datum_batches:
+                        for datum in datums:
+                            datum.pin_memory()
                 result = self.engine.forward_backward(
-                    engine_datums,
+                    datum_batches,
                     self.compute_critic_loss,
-                    microbatch_sizes=[prepared.num_datums for prepared in prepared_window],
                 )
                 self.strategy._maybe_debug_grad_stats(self.critic, "critic")
-                optim_result = self.engine.optim_step()
+                optim_result = self.engine.step()
                 # Transformers LambdaLR.step() takes an absolute epoch when passed
                 # an argument; AutoModel schedulers use step(1) as an increment.
                 self.critic_scheduler.step()
                 last_grad_norm = float(optim_result.grad_norm)
                 last_lr = self.critic_scheduler.get_last_lr()[0]
 
-                expected_outputs = sum(prepared.num_datums for prepared in prepared_window)
-                if len(result.loss_fn_outputs) != expected_outputs:
-                    raise RuntimeError(
-                        f"Critic Engine returned {len(result.loss_fn_outputs)} outputs for {expected_outputs} Datums"
-                    )
-                output_offset = 0
-                for exp, prepared in zip(window, prepared_window):
-                    output_records = result.loss_fn_outputs[output_offset : output_offset + prepared.num_datums]
-                    output_offset += prepared.num_datums
+                for exp, token_outputs in zip(window, result.token_outputs):
                     exp.to_device(device)
-                    action_values = prepared.restore_token_outputs(
-                        [record["action_values"] for record in output_records]
-                    )
+                    action_values = exp.align_action_outputs(token_outputs["action_values"])
                     _, reported_value_loss, value_clip_frac = self.value_loss_fn(
                         action_values,
                         exp.values,
@@ -256,7 +237,7 @@ class CriticTrainer:
         return status
 
     def compute_critic_loss(self, output, loss_inputs):
-        values = unshard_dtensor(extract_model_logits(output)).squeeze(-1).float()
+        values = self.critic.compute_values(output, loss_inputs)
         weights = loss_inputs["weights"]
         local_tokens = weights.sum()
         value_loss, _, _ = self.value_loss_fn(
@@ -270,9 +251,7 @@ class CriticTrainer:
         # ValueLoss returns a local token mean. Engine expects a scalar local
         # weighted numerator and applies the one global window denominator.
         numerator = value_loss * local_tokens
-        return numerator, LossFnOutputBatch(
-            per_token={"action_values": PerTokenOutput(values * weights, fill_value=0.0)}
-        )
+        return LossOutput(loss_sum=numerator, token_outputs={"action_values": values})
 
 
 @ray.remote(num_gpus=1)
@@ -363,25 +342,9 @@ class CriticModelActor(BaseModelActor):
         Experience. reload() first fetches the sample's heavy tensors from the producing runner's
         shared-memory store. Called per sample by execute_batch; the controller attaches values."""
         experience = experience.reload()
-        prepared = prepare_rl_engine_datum(
-            experience,
-            self.critic,
-            loss_fields={},
-            routed_experts=experience.routed_experts,
-        )
-        self.critic.eval()
-        try:
-            output = run_rl_engine_forward(
-                self.trainer.engine,
-                prepared,
-                "action_values",
-                lambda model_output, _loss_inputs: (
-                    unshard_dtensor(extract_model_logits(model_output)).squeeze(-1).float()
-                ),
-            )
-        finally:
-            self.critic.train()
-        return output.to("cpu")
+        datums = self.critic.make_scoring_datums(experience, routed_experts=experience.routed_experts)
+        outputs = self.trainer.engine.forward(datums, self.critic.compute_values)
+        return experience.align_action_outputs(outputs).to("cpu")
 
     def append(self, experience: Experience):
         # reload() fetches the sample's heavy tensors from the producing runner's shared-memory

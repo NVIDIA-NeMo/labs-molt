@@ -17,17 +17,26 @@
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
 import os
+from collections.abc import Mapping
+from functools import partial
 from importlib.util import find_spec
-from typing import Literal, Union
+from typing import TYPE_CHECKING, Literal, Union
 
 import torch
 import torch.nn as nn
+from nemo_automodel._transformers.utils import resolve_get_rope_index
+from nemo_automodel.components.datasets.datum import Datum, LossInputLayout, collate_datums, collate_vlm_datums
 
 from .utils import (
     configure_nemo_moe_aux_loss,
     is_automodel_custom_model,
     resolve_ac_mode,
 )
+
+if TYPE_CHECKING:
+    from nemo_automodel.components.moe.router_replay import RouterReplayAdapter
+
+    from molt.trainer.algorithm.experience import Experience
 
 
 def _config_is_moe(config) -> bool:
@@ -144,20 +153,6 @@ def _automodel_supports_thd_packing(model_or_path) -> bool:
         return query_capabilities(model_or_path, trust_remote_code=True).supports_thd
     except Exception:
         return False
-
-
-def _first_token_id(config, *attr_names):
-    """First integer token id among ``attr_names`` on the VLM config, else None.
-
-    VLM families name the media placeholder id differently (image_token_id /
-    image_token_index / img_context_token_id). Uses ``isinstance(int)`` (not
-    truthiness) so a valid id of 0 is not skipped.
-    """
-    for name in attr_names:
-        tid = getattr(config, name, None)
-        if isinstance(tid, int):
-            return tid
-    return None
 
 
 def _mtp_off_kwargs(pretrain_or_model) -> dict:
@@ -478,18 +473,159 @@ class BaseModel(nn.Module):
         # Use `model.generate(use_cache=True)` instead.
         self.model.config.use_cache = False
 
-        if self.is_vlm:
-            vlm_config = self.model.config
-            self._image_token_id = _first_token_id(
-                vlm_config, "image_token_id", "image_token_index", "img_context_token_id"
-            )
-            self._video_token_id = _first_token_id(
-                vlm_config, "video_token_id", "video_token_index", "video_context_token_id"
-            )
-
     def _enable_routing_replay(self) -> None:
         """Bind AutoModel's model-scoped rollout routing adapter."""
         from nemo_automodel.components.moe.router_replay import RouterReplayAdapter
 
         self._routing_replay_adapter = RouterReplayAdapter(self.model)
         print(f"[R3] Routing replay enabled at global layer ids {list(self._routing_replay_adapter.layer_ids)}.")
+
+    @property
+    def routing_replay_context(self) -> "RouterReplayAdapter | None":
+        """Return the model-scoped AutoModel context used to replay rollout routes."""
+        return self._routing_replay_adapter
+
+    def datum_collator(self, processor, *, cp_size: int = 1):
+        """Return the AutoModel collator for this model's token and media layout."""
+        packed_thd = self.packing_layout == "thd"
+        indexed_mask = "indexed_mask" if self.packing_layout == "indexed_mask" else None
+        if not self.is_vlm:
+            return partial(collate_datums, packed=packed_thd, packing_layout=indexed_mask)
+        if processor is None or not hasattr(processor, "image_processor"):
+            raise ValueError("VLM training requires the model's AutoProcessor")
+
+        get_rope_index = resolve_get_rope_index(self.model) if self.packing_layout is not None else None
+        if self.packing_layout is not None and cp_size > 1 and get_rope_index is not None:
+            raise NotImplementedError(
+                "AutoModel does not yet support multi-axis mRoPE with packed THD context parallelism; "
+                "use cp_size=1 or disable VLM packing."
+            )
+        if packed_thd and cp_size > 1 and not bool(getattr(self.model, "supports_cp_with_sequence_packing", False)):
+            raise NotImplementedError(
+                f"{type(self.model).__name__} does not support VLM sequence packing with "
+                f"context parallelism (cp_size={cp_size}) on its active attention backend."
+            )
+        return partial(
+            collate_vlm_datums,
+            processor=processor,
+            packed=packed_thd,
+            packing_layout=indexed_mask,
+            get_rope_index=get_rope_index,
+            sequence_alignment=2 * cp_size if packed_thd and cp_size > 1 else 1,
+        )
+
+    def make_scoring_datums(
+        self,
+        experience: "Experience",
+        *,
+        routed_experts: torch.Tensor | None = None,
+    ) -> list[Datum]:
+        """Build model inputs for collection-time log-probability or value scoring."""
+        return self._make_datums(experience, side_inputs={}, routed_experts=routed_experts)
+
+    def _make_datums(
+        self,
+        experience: "Experience",
+        *,
+        side_inputs: Mapping[str, torch.Tensor],
+        include_sequence_ids: bool = False,
+        routed_experts: torch.Tensor | None = None,
+    ) -> list[Datum]:
+        """Convert a dense replay microbatch into processor-ready model items.
+
+        ``Experience`` keeps RL's dense coordinates. Each returned Datum contains
+        one unpadded sample; AutoModel subsequently owns physical collation,
+        packing, context-parallel layout, and output restoration.
+        """
+        sequences = experience.sequences
+        attention_mask = experience.attention_mask
+        action_mask = experience.action_mask
+        if not all(
+            isinstance(value, torch.Tensor) and value.ndim == 2 for value in (sequences, attention_mask, action_mask)
+        ):
+            raise ValueError("RL model inputs require 2-D sequences, attention_mask, and action_mask tensors")
+
+        batch, full_sequence = sequences.shape
+        sequence = full_sequence - 1
+        if sequence <= 0 or tuple(attention_mask.shape) != (batch, full_sequence):
+            raise ValueError("RL model inputs require matching token and attention axes with at least two tokens")
+        if tuple(action_mask.shape) != (batch, sequence):
+            raise ValueError(
+                f"action_mask must have shape {(batch, sequence)} for sequences {tuple(sequences.shape)}, "
+                f"got {tuple(action_mask.shape)}"
+            )
+
+        prediction_mask = attention_mask[:, :-1].bool() & attention_mask[:, 1:].bool()
+        if bool((action_mask.bool() & ~prediction_mask).any()):
+            raise ValueError("action_mask may select only real-token -> real-token transitions")
+
+        task_inputs: dict[str, torch.Tensor] = {"target_tokens": sequences[:, 1:], **side_inputs}
+        for name, value in task_inputs.items():
+            if value.ndim < 2 or tuple(value.shape[:2]) != (batch, sequence):
+                raise ValueError(
+                    f"RL token input {name!r} must start with {(batch, sequence)}, got {tuple(value.shape)}"
+                )
+
+        pad_values: dict[str, int | float | bool] = {}
+        if include_sequence_ids:
+            sequence_ids = torch.arange(batch, device=sequences.device).unsqueeze(1).expand(batch, sequence).clone()
+            task_inputs["sequence_ids"] = sequence_ids.masked_fill(~prediction_mask, -1)
+            pad_values["sequence_ids"] = -1
+        if routed_experts is not None:
+            adapter = self.routing_replay_context
+            if adapter is None:
+                raise RuntimeError("routed_experts requires a model constructed with routing_replay=True")
+            if (
+                routed_experts.ndim != 4
+                or routed_experts.shape[0] != batch
+                or routed_experts.shape[-1] != full_sequence
+            ):
+                raise ValueError("rollout routed_experts must have shape [batch, global_layers, topk, full_sequence]")
+            routes = adapter.prepare_routed_experts(routed_experts[..., :-1])
+            task_inputs["routed_experts"] = routes.masked_fill(~prediction_mask[..., None, None], -1)
+            pad_values["routed_experts"] = -1
+
+        shared_inputs = {"num_sequences": torch.tensor(batch, device=sequences.device)} if include_sequence_ids else {}
+        media = experience.mm_train_inputs or [None] * batch
+        if self.is_vlm and len(media) != batch:
+            raise ValueError(f"VLM mm_train_inputs must contain {batch} per-sample entries, got {len(media)}")
+
+        datums = []
+        for row in range(batch):
+            valid = attention_mask[row].bool().nonzero(as_tuple=False).flatten()
+            if valid.numel() < 2:
+                raise ValueError("RL Datums require at least two contiguous real tokens per sample")
+            start = int(valid[0])
+            stop = int(valid[-1]) + 1
+            if valid.numel() != stop - start:
+                raise ValueError("RL Datums require a contiguous real-token attention span")
+
+            if self.is_vlm:
+                input_ids = sequences[row, start:stop]
+                model_inputs = {
+                    "input_ids": input_ids,
+                    "attention_mask": torch.ones_like(input_ids, dtype=attention_mask.dtype),
+                }
+                media_inputs = {} if media[row] is None else media[row]
+                if not isinstance(media_inputs, Mapping) or not all(
+                    isinstance(value, torch.Tensor) for value in media_inputs.values()
+                ):
+                    raise TypeError("each VLM mm_train_inputs item must be a mapping of tensors or None")
+                model_inputs.update(media_inputs)
+            else:
+                model_inputs = {"input_ids": sequences[row, start : stop - 1]}
+
+            sample_inputs = {name: value[row, start : stop - 1] for name, value in task_inputs.items()}
+            sample_inputs.update(shared_inputs)
+            datums.append(
+                Datum(
+                    model_inputs=model_inputs,
+                    loss_fn_inputs=sample_inputs,
+                    loss_fn_input_layouts={
+                        **{name: LossInputLayout.PER_TOKEN for name in task_inputs},
+                        **{name: LossInputLayout.REPLICATED for name in shared_inputs},
+                    },
+                    loss_fn_input_pad_values=pad_values,
+                )
+            )
+        return datums

@@ -38,7 +38,6 @@ from molt.trainer.algorithm.experience import (
     remove_padding_in_sequences,
 )
 from molt.trainer.workers.critic_actor import CriticModelActor
-from molt.trainer.workers.engine_utils import prepare_rl_engine_datum, run_rl_engine_forward
 
 L, K = 3, 2  # MoE layers, top-k
 
@@ -199,24 +198,22 @@ def test_critic_engine_forward_replays_routes_through_automodel_adapter():
         routed_experts=routed,
         mm_train_inputs=[],
     )
-    prepared = prepare_rl_engine_datum(
-        experience,
-        wrapped,
-        loss_fields={},
-        routed_experts=routed,
-    )
+    datums = wrapped.make_scoring_datums(experience, routed_experts=routed)
     engine = Engine(
         model,
         device="cpu",
-        microbatch_size=1,
         collate_fn=collate_prebatched,
-        batch_context_fn=wrapped._routing_replay_adapter,
+        batch_context_fn=wrapped.routing_replay_context,
     )
 
-    restored = run_rl_engine_forward(engine, prepared, "tokens", lambda output, _inputs: output)
+    def token_values(output, _inputs):
+        return output
+
+    outputs = engine.forward(datums, token_values)
+    restored = experience.align_action_outputs(outputs)
 
     assert torch.equal(restored, torch.tensor([[10.0, 11.0]]))
-    assert wrapped._routing_replay_adapter.layer_ids == (1,)
+    assert wrapped.routing_replay_context.layer_ids == (1,)
     assert torch.equal(model.selected, torch.tensor([[2, 3], [4, 5]]))
 
 

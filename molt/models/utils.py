@@ -103,59 +103,12 @@ def compute_approx_kl(
     return log_ratio.clamp(min=-10, max=10)
 
 
-def log_probs_from_logits(logits: torch.Tensor, labels: torch.Tensor, temperature: float = 1.0) -> torch.Tensor:
-    batch_dim = logits.shape[:-1]
-    last_dim = logits.shape[-1]
-    flat_logits = logits.reshape(-1, last_dim)
-    flat_labels = labels.reshape(-1)
-
-    # Both paths below scale at fp32, never on a bf16 input: rounding the quotient back to bf16
-    # costs ~1 ULP per logit on top of the logits' own quantization. Non-inplace — callers keep
-    # the tensor in `output["logits"]` for the entropy path.
-    #
-    # Fast path: fused triton CE kernel only supports fp32/fp64.
-    # https://github.com/OpenRLHF/OpenRLHF/pull/718#issuecomment-2641081881
-    if logits.dtype in [torch.float32, torch.float64]:
-        try:
-            from flash_attn.ops.triton.cross_entropy import cross_entropy_loss
-
-            scaled = flat_logits / temperature if temperature != 1.0 else flat_logits
-            output = cross_entropy_loss(scaled, flat_labels)
-            return (-output[0]).view(*batch_dim)
-        except ImportError:
-            pass
-
-    # Chunked fp32 logsumexp+gather. Bounds peak memory at
-    # chunk_size * vocab * 4 bytes (256 * 152K * 4 ≈ 156 MiB) and avoids the
-    # [B*S, V] fp32 spike that OOMs at long sequences with large vocab models
-    # like Qwen3.6 (152K vocab) when callers pass bf16 logits. Empirically a
-    # 1024 chunk OOMs on 80GB H100 once optimizer+activations are loaded.
-    n_rows = flat_logits.shape[0]
-    out = torch.empty(n_rows, device=logits.device, dtype=torch.float32)
-    chunk_size = 256
-    for s_idx in range(0, n_rows, chunk_size):
-        end_idx = min(s_idx + chunk_size, n_rows)
-        chunk = flat_logits[s_idx:end_idx].float()
-        if temperature != 1.0:
-            chunk = chunk / temperature
-        gathered = chunk.gather(dim=-1, index=flat_labels[s_idx:end_idx].unsqueeze(-1)).squeeze(-1)
-        lse = torch.logsumexp(chunk, dim=-1)
-        out[s_idx:end_idx] = gathered - lse
-    return out.view(*batch_dim)
-
-
 def masked_mean(tensor: torch.Tensor, mask: Optional[torch.Tensor], dim: int = None) -> torch.Tensor:
     if mask is None:
         return tensor.mean(dim=dim)
     valid = torch.where(mask.bool(), tensor, torch.zeros_like(tensor))
     denom = mask.sum(dim=dim).clamp_min(1)
     return valid.sum(dim=dim) / denom
-
-
-@torch.compile
-def compute_entropy(logits: torch.Tensor):
-    pd = torch.nn.functional.softmax(logits, dim=-1)
-    return torch.logsumexp(logits, dim=-1) - torch.sum(pd * logits, dim=-1)
 
 
 def _iter_nemo_moe_gates(model: nn.Module):

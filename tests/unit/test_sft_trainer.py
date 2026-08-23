@@ -9,6 +9,7 @@ import torch.nn.functional as F
 from nemo_automodel.components.datasets.datum import Datum, LossInputLayout, collate_datums, collate_vlm_datums
 
 from molt.datasets.sft_dataset import SFTDataset
+from molt.models.base import BaseModel
 from molt.trainer.sft_trainer import SFTTrainer
 
 
@@ -67,13 +68,19 @@ class _RawLM(torch.nn.Module):
 
 
 class _Actor(torch.nn.Module):
-    def __init__(self, model=None, packing_layout=None):
+    def __init__(self, model=None, packing_layout=None, is_vlm=False):
         super().__init__()
         self.model = model or _RawLM()
+        if torch.cuda.is_available():
+            self.model.cuda()
         self.packing_layout = packing_layout
+        self.is_vlm = is_vlm
 
     def forward(self, *args, **kwargs):
         raise AssertionError("Engine SFT must bypass the outer Actor wrapper")
+
+    def datum_collator(self, processor, *, cp_size=1):
+        return BaseModel.datum_collator(self, processor, cp_size=cp_size)
 
 
 class _Scheduler:
@@ -119,11 +126,16 @@ def _args(batch_size=3):
 
 
 def _reference_loss(model, batches):
-    numerator = torch.zeros(())
-    denominator = torch.zeros(())
+    device = next(model.parameters()).device
+    numerator = torch.zeros((), device=device)
+    denominator = torch.zeros((), device=device)
     for batch in batches:
         model_inputs, loss_inputs = collate_datums(batch)
-        labels = loss_inputs["labels"]
+        model_inputs = {
+            name: value.to(device) if isinstance(value, torch.Tensor) else value
+            for name, value in model_inputs.items()
+        }
+        labels = loss_inputs["labels"].to(device)
         output = model(
             model_inputs["input_ids"],
             attention_mask=model_inputs["attention_mask"],
@@ -136,7 +148,7 @@ def _reference_loss(model, batches):
             ignore_index=-100,
             reduction="sum",
         )
-        denominator = denominator + loss_inputs["weights"].sum()
+        denominator = denominator + loss_inputs["weights"].to(device).sum()
     return numerator / denominator
 
 
@@ -172,7 +184,7 @@ def _vlm_datum(input_ids, weights, **media_inputs):
 def test_trainer_uses_automodel_vlm_collater_and_preserves_processor_fields():
     processor = SimpleNamespace(image_processor=object(), tokenizer=SimpleNamespace(pad_token_id=9))
     strategy = _Strategy(accumulated_gradient=1)
-    actor = _Actor()
+    actor = _Actor(is_vlm=True)
     optimizer = torch.optim.SGD(actor.parameters(), lr=0.05)
     trainer = SFTTrainer(actor, strategy, optimizer, [], None, _Scheduler(optimizer, []), tokenizer=processor)
     datums = [
@@ -215,7 +227,7 @@ def test_trainer_selects_automodel_vlm_packing_collater():
     processor = SimpleNamespace(image_processor=object(), tokenizer=SimpleNamespace(pad_token_id=0))
     strategy = _Strategy(accumulated_gradient=1)
     strategy.args.fsdp.packing_samples = True
-    actor = _Actor(packing_layout="thd")
+    actor = _Actor(packing_layout="thd", is_vlm=True)
     optimizer = torch.optim.SGD(actor.parameters(), lr=0.05)
     trainer = SFTTrainer(actor, strategy, optimizer, [], None, _Scheduler(optimizer, []), tokenizer=processor)
 
@@ -247,7 +259,7 @@ def test_trainer_rejects_mrope_vlm_packing_with_context_parallelism():
     strategy = _Strategy(accumulated_gradient=1)
     strategy.args.fsdp.packing_samples = True
     strategy.device_mesh = _CpMesh()
-    actor = _Actor(_MropeLM(), packing_layout="thd")
+    actor = _Actor(_MropeLM(), packing_layout="thd", is_vlm=True)
     optimizer = torch.optim.SGD(actor.parameters(), lr=0.05)
 
     with pytest.raises(NotImplementedError, match="multi-axis mRoPE"):
@@ -279,7 +291,7 @@ def test_trainer_selects_automodel_text_packing_collater():
 def test_trainer_selects_indexed_mask_packing_collater(processor):
     strategy = _Strategy(accumulated_gradient=1)
     strategy.args.fsdp.packing_samples = True
-    actor = _Actor(packing_layout="indexed_mask")
+    actor = _Actor(packing_layout="indexed_mask", is_vlm=processor is not None)
     optimizer = torch.optim.SGD(actor.parameters(), lr=0.05)
 
     trainer = SFTTrainer(actor, strategy, optimizer, [], None, _Scheduler(optimizer, []), tokenizer=processor)
@@ -319,26 +331,26 @@ def test_engine_only_sft_matches_full_window_masked_update(tensor_output):
     assert strategy.messages[-1] == "[SFT] backend=engine"
 
     real_forward_backward = trainer.engine.forward_backward
-    real_optim_step = trainer.engine.optim_step
+    real_step = trainer.engine.step
     engine_grads = []
 
     def tracked_forward_backward(*args, **kwargs):
         strategy.events.append("forward_backward")
         return real_forward_backward(*args, **kwargs)
 
-    def tracked_optim_step(*args, **kwargs):
+    def tracked_step(*args, **kwargs):
         engine_grads.append(actor.model.logits.grad.detach().clone())
-        strategy.events.append("optim_step")
-        return real_optim_step(*args, **kwargs)
+        strategy.events.append("step")
+        return real_step(*args, **kwargs)
 
     trainer.engine.forward_backward = tracked_forward_backward
-    trainer.engine.optim_step = tracked_optim_step
+    trainer.engine.step = tracked_step
     logged = []
     trainer.save_logs_and_checkpoints = lambda a, step, bar, logs=None, states=None: logged.append(
         (step, dict(logs), dict(states))
     )
 
-    reference = _RawLM(tensor_output=tensor_output)
+    reference = _RawLM(tensor_output=tensor_output).to(actor.model.logits.device)
     reference.load_state_dict(initial)
     reference_optimizer = torch.optim.SGD(reference.parameters(), lr=0.05)
     expected_loss = _reference_loss(reference, batches)
@@ -347,7 +359,7 @@ def test_engine_only_sft_matches_full_window_masked_update(tensor_output):
 
     trainer.fit(_args(), num_update_steps_per_epoch=1)
 
-    assert strategy.events == ["forward_backward", "debug", "optim_step", "scheduler"]
+    assert strategy.events == ["forward_backward", "debug", "step", "scheduler"]
     assert scheduler.step_calls == 1
     assert strategy.reductions == []
     assert len(logged) == 1
@@ -359,7 +371,7 @@ def test_engine_only_sft_matches_full_window_masked_update(tensor_output):
     torch.testing.assert_close(engine_grads[0], reference.logits.grad)
     torch.testing.assert_close(actor.model.logits, reference.logits)
     torch.testing.assert_close(
-        actor.model.seen_position_ids[0],
+        actor.model.seen_position_ids[0].cpu(),
         torch.tensor([[0, 1, 1, 1], [0, 1, 2, 3]]),
     )
 
@@ -380,7 +392,7 @@ def test_sft_loss_does_not_double_count_native_moe_aux_loss():
     assert aux_loss.grad is None
 
 
-def test_eval_uses_engine_forward_and_one_dataset_reduction():
+def test_eval_uses_engine_evaluate_and_one_dataset_reduction():
     strategy = _Strategy(accumulated_gradient=1)
     actor = _Actor()
     optimizer = torch.optim.SGD(actor.parameters(), lr=0.05)
@@ -392,15 +404,15 @@ def test_eval_uses_engine_forward_and_one_dataset_reduction():
     trainer = SFTTrainer(actor, strategy, optimizer, [], _Loader(batches), scheduler)
     writer = _Writer()
     trainer._tensorboard = writer
-    real_forward = trainer.engine.forward
+    real_evaluate = trainer.engine.evaluate
     forward_calls = 0
 
     def tracked_forward(*args, **kwargs):
         nonlocal forward_calls
         forward_calls += 1
-        return real_forward(*args, **kwargs)
+        return real_evaluate(*args, **kwargs)
 
-    trainer.engine.forward = tracked_forward
+    trainer.engine.evaluate = tracked_forward
     expected = _reference_loss(actor.model, batches).item()
     actor.model.seen_position_ids.clear()
 
@@ -419,20 +431,21 @@ def test_eval_uses_engine_forward_and_one_dataset_reduction():
     assert actor.model.logits.grad is None
 
 
-def test_eval_rejects_zero_supervised_tokens_and_restores_train_mode():
+def test_eval_rejects_zero_supervised_tokens_and_preserves_model_mode():
     strategy = _Strategy(accumulated_gradient=1)
     actor = _Actor()
     optimizer = torch.optim.SGD(actor.parameters(), lr=0.05)
     trainer = SFTTrainer(actor, strategy, optimizer, [], None, _Scheduler(optimizer, []))
     batch = _batch([[0, 1, 2]], [[1, 1, 1]], [[0.0, 0.0, 0.0]])
+    actor.eval()
 
     with pytest.raises(ValueError, match="no supervised tokens"):
         trainer.evaluate(_Loader([batch]))
 
-    assert actor.training is True
+    assert actor.training is False
 
 
-def test_scheduler_does_not_advance_when_engine_optim_step_fails():
+def test_scheduler_does_not_advance_when_engine_step_fails():
     strategy = _Strategy(accumulated_gradient=1)
     actor = _Actor()
     optimizer = torch.optim.SGD(actor.parameters(), lr=0.05)
@@ -447,10 +460,10 @@ def test_scheduler_does_not_advance_when_engine_optim_step_fails():
         max_epochs=1,
     )
 
-    def fail_optim_step():
+    def fail_step():
         raise RuntimeError("optimizer failed")
 
-    trainer.engine.optim_step = fail_optim_step
+    trainer.engine.step = fail_step
     with pytest.raises(RuntimeError, match="optimizer failed"):
         trainer.fit(_args(batch_size=1), num_update_steps_per_epoch=1)
 

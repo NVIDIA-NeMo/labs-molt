@@ -51,8 +51,12 @@ def _cpu_offload_worker(rank: int, world_size: int, init_file: str) -> None:
         ]
 
         engine = Engine(model, device=device, optimizers=optimizer, max_grad_norm=1.0)
-        result = engine.forward_backward(datums, lambda output, _loss_inputs: output.square())
-        optim_result = engine.optim_step()
+
+        def squared_loss(output, _loss_inputs):
+            return output.square().sum()
+
+        result = engine.forward_backward([datums], squared_loss)
+        optim_result = engine.step()
 
         assert torch.isfinite(result.loss)
         assert torch.isfinite(optim_result.grad_norm)

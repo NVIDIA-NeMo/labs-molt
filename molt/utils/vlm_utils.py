@@ -281,26 +281,3 @@ def accumulate_mm_inputs(existing: Optional[Dict], new: Optional[Dict]) -> Optio
         else:
             merged[k] = new[k]
     return merged
-
-
-def merge_mm_train_inputs(mm_train_inputs_list: list, device) -> Dict[str, torch.Tensor]:
-    """Merge per-sample multimodal tensor dicts into one batched dict on *device*.
-
-    Each ``mm_train_inputs_list`` element is a per-sample dict (or list of dicts,
-    or None). Tensors are concatenated along dim=0; pixel_values is padded to a
-    common HxW first when entries have ndim==4.
-    """
-    merged: Dict[str, list] = {}
-    for item in mm_train_inputs_list:
-        for mm_dict in item if isinstance(item, list) else [item]:
-            if mm_dict is None:
-                continue
-            for key, val in mm_dict.items():
-                merged.setdefault(key, []).append(val if isinstance(val, torch.Tensor) else torch.tensor(val))
-
-    output = {}
-    for key, values in merged.items():
-        if key == "pixel_values" and all(torch.is_tensor(v) and v.ndim == 4 for v in values):
-            values = _pad_to_common_hw(values)
-        output[key] = torch.cat(values, dim=0).to(device)
-    return output

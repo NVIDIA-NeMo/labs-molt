@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import itertools
+from collections.abc import Sequence
 from dataclasses import dataclass, field, fields
 from typing import Any, List, Union
 
@@ -181,6 +182,35 @@ class Experience:
                 setattr(self, name, to(value, device))
 
         return self
+
+    def align_action_outputs(self, outputs: Sequence[torch.Tensor]) -> torch.Tensor:
+        """Align per-sample token outputs with this batch's dense action axis."""
+        if self.attention_mask.ndim != 2 or self.action_mask.ndim != 2:
+            raise ValueError("action output alignment requires a batched Experience")
+        batch, sequence = self.action_mask.shape
+        if len(outputs) != batch:
+            raise ValueError(f"Experience has {batch} samples but received {len(outputs)} token outputs")
+        if not outputs:
+            raise ValueError("Experience batches cannot be empty")
+
+        trailing_shape = outputs[0].shape[1:]
+        restored = outputs[0].new_zeros((batch, sequence, *trailing_shape))
+        for row, output in enumerate(outputs):
+            valid = self.attention_mask[row].bool().nonzero(as_tuple=False).flatten()
+            if valid.numel() < 2:
+                raise ValueError("action output alignment requires at least two real tokens per sample")
+            indices = valid[:-1]
+            if output.shape[1:] != trailing_shape or output.shape[0] != indices.numel():
+                raise ValueError(
+                    "model output does not match its sample's prediction axis: "
+                    f"output={tuple(output.shape)}, predictions={indices.numel()}"
+                )
+            restored[row].index_copy_(0, indices.to(output.device), output)
+
+        action_mask = self.action_mask.to(device=restored.device, dtype=torch.bool)
+        for _ in trailing_shape:
+            action_mask = action_mask.unsqueeze(-1)
+        return restored.masked_fill(~action_mask, 0)
 
 
 # Batch manipulation utilities

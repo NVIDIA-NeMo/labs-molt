@@ -34,13 +34,6 @@ from molt.trainer.fsdp import FsdpStrategy
 from molt.trainer.placement import get_bundle_indices, ray_noset_visible_devices
 from molt.utils import get_tokenizer
 
-from .engine_utils import (
-    action_log_probs_from_output,
-    prepare_rl_engine_datum,
-    resolve_rl_engine_collation,
-    run_rl_engine_forward,
-)
-
 
 class BaseDistributedActor:
     def __init__(self, world_size, rank, master_addr, master_port):
@@ -167,18 +160,13 @@ class ReferenceModelActor(BaseModelActor):
         padding_token_id = getattr(text_tokenizer, "pad_token_id", None)
         if padding_token_id is None:
             padding_token_id = getattr(getattr(raw_model, "config", None), "pad_token_id", None) or 0
-        collate_fn, microbatch_size = resolve_rl_engine_collation(
-            self.model,
-            self.tokenizer,
-            strategy,
-            strategy.args.train.micro_batch_size,
-        )
+        mesh_names = getattr(strategy.device_mesh, "mesh_dim_names", ()) or ()
+        cp_size = strategy.device_mesh["cp"].size() if "cp" in mesh_names else 1
         self.engine = Engine(
             raw_model,
             device=torch.device("cuda", torch.cuda.current_device()),
             mesh_context=MeshContext.from_meshes(strategy.device_mesh, strategy.moe_mesh),
-            microbatch_size=microbatch_size,
-            collate_fn=collate_fn,
+            collate_fn=self.model.datum_collator(self.tokenizer, cp_size=cp_size),
             padding_token_id=padding_token_id,
         )
 
@@ -188,20 +176,9 @@ class ReferenceModelActor(BaseModelActor):
         this rank straight from the runner, never through the controller. Called per sample by
         execute_batch; the controller attaches the result as base_action_log_probs."""
         experience = experience.reload()
-        prepared = prepare_rl_engine_datum(
-            experience,
-            self.model,
-            loss_fields={},
-        )
-        output = run_rl_engine_forward(
-            self.engine,
-            prepared,
-            "action_log_probs",
-            lambda model_output, loss_inputs: action_log_probs_from_output(
-                model_output, loss_inputs, self.model.temperature
-            ),
-        )
-        return output.to("cpu")
+        datums = self.model.make_scoring_datums(experience)
+        outputs = self.engine.forward(datums, self.model.compute_action_log_probs)
+        return experience.align_action_outputs(outputs).to("cpu")
 
 
 class RayActorGroup:

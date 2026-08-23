@@ -27,8 +27,7 @@ import ray
 import torch
 import torch.distributed
 from nemo_automodel.components.distributed.mesh import MeshContext
-from nemo_automodel.components.loss import vocab_parallel_entropy
-from nemo_automodel.engine import Engine, LossFnOutputBatch, PerTokenOutput
+from nemo_automodel.engine import Engine, LossOutput
 from torch.distributed.tensor import DTensor
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
@@ -36,7 +35,7 @@ from tqdm import tqdm
 
 from molt.models import Actor, PolicyLoss
 from molt.models.loss import masked_sum
-from molt.models.utils import compute_approx_kl, compute_entropy, masked_mean
+from molt.models.utils import compute_approx_kl, masked_mean
 from molt.trainer.algorithm.experience import Experience, get_model_parallel_size
 from molt.trainer.fsdp import FsdpStrategy
 from molt.trainer.fsdp.refit import gather_full_param
@@ -46,13 +45,6 @@ from molt.utils.logging_utils import init_logger
 
 from ..algorithm import NaiveReplayBuffer
 from .actor_group import BaseModelActor
-from .engine_utils import (
-    action_log_probs_from_output,
-    extract_model_logits,
-    prepare_rl_engine_datum,
-    resolve_rl_engine_collation,
-    run_rl_engine_forward,
-)
 
 logger = init_logger(__name__)
 
@@ -131,23 +123,20 @@ class PolicyTrainer:
         raw_model = self.actor.model
         padding_token_id = getattr(getattr(raw_model, "config", None), "pad_token_id", None) or 0
         max_grad_norm = self.args.actor.max_norm
-        collate_fn, engine_microbatch_size = resolve_rl_engine_collation(
-            self.actor, self.tokenizer, strategy, micro_train_batch_size
-        )
+        mesh_names = getattr(strategy.device_mesh, "mesh_dim_names", ()) or ()
+        cp_mesh = strategy.device_mesh["cp"] if "cp" in mesh_names else None
+        cp_size = cp_mesh.size() if cp_mesh is not None else 1
         self.engine = Engine(
             raw_model,
             device=torch.device("cuda", torch.cuda.current_device()),
             mesh_context=MeshContext.from_meshes(strategy.device_mesh, strategy.moe_mesh),
-            microbatch_size=engine_microbatch_size,
-            collate_fn=collate_fn,
+            collate_fn=self.actor.datum_collator(self.tokenizer, cp_size=cp_size),
             padding_token_id=padding_token_id,
-            batch_context_fn=getattr(self.actor, "_routing_replay_adapter", None),
+            batch_context_fn=self.actor.routing_replay_context,
             defer_fsdp_grad_sync=self._defer_grad_sync,
             optimizers=self.actor_optim,
             max_grad_norm=max_grad_norm if max_grad_norm and max_grad_norm > 0 else None,
         )
-        mesh_names = getattr(strategy.device_mesh, "mesh_dim_names", ()) or ()
-        cp_mesh = strategy.device_mesh["cp"] if "cp" in mesh_names else None
         self._sequence_group = cp_mesh.get_group() if cp_mesh is not None and cp_mesh.size() > 1 else None
         self._needs_sequence_ids = (
             self.args.actor.loss_mode == "gspo" or self.args.algo.advantage.is_correction_level in {"seq", "geo"}
@@ -335,60 +324,43 @@ class PolicyTrainer:
                 if not window_end:
                     continue
 
-                prepared_window = []
+                datum_batches = []
                 for exp in window:
                     # Full per-sequence lengths drive the FLOP estimate (forward
                     # processes the whole sequence, not just action tokens).
                     seqlens = exp.attention_mask.sum(dim=-1)
                     local_seq_count += float(seqlens.numel())
                     local_token_sum += float(seqlens.sum())
-                    prepared_window.append(
-                        prepare_rl_engine_datum(
+                    datum_batches.append(
+                        self.actor.make_policy_datums(
                             exp,
-                            self.actor,
-                            loss_fields={
-                                "old_action_log_probs": exp.action_log_probs,
-                                "advantages": exp.advantages,
-                                "base_action_log_probs": exp.base_action_log_probs,
-                                "rollout_log_probs": exp.rollout_log_probs,
-                            },
+                            old_action_log_probs=exp.action_log_probs,
+                            advantages=exp.advantages,
+                            base_action_log_probs=exp.base_action_log_probs,
+                            rollout_log_probs=exp.rollout_log_probs,
                             include_sequence_ids=self._needs_sequence_ids,
                             routed_experts=exp.routed_experts,
                         )
                     )
 
-                engine_datums = [datum for prepared in prepared_window for datum in prepared.datums]
                 if self.dataloader_pin_memory and window[0].sequences.device.type == "cpu":
-                    for datum in engine_datums:
-                        datum.pin_memory()
+                    for datums in datum_batches:
+                        for datum in datums:
+                            datum.pin_memory()
                 result = self.engine.forward_backward(
-                    engine_datums,
+                    datum_batches,
                     partial(self.compute_policy_loss, kl_ctl=kl_ctl),
-                    microbatch_sizes=[prepared.num_datums for prepared in prepared_window],
                 )
                 self.strategy._maybe_debug_grad_stats(self.actor, "actor")
-                optim_result = self.engine.optim_step()
+                optim_result = self.engine.step()
                 # Keep the HF scheduler out of Engine: LambdaLR.step(1) means
                 # absolute epoch 1, whereas AutoModel schedulers use an increment.
                 self.actor_scheduler.step()
-                expected_outputs = sum(prepared.num_datums for prepared in prepared_window)
-                if len(result.loss_fn_outputs) != expected_outputs:
-                    raise RuntimeError(
-                        f"Policy Engine returned {len(result.loss_fn_outputs)} outputs for {expected_outputs} Datums"
-                    )
-
-                output_offset = 0
-                for idx, (exp, prepared) in enumerate(zip(window, prepared_window)):
-                    output_records = result.loss_fn_outputs[output_offset : output_offset + prepared.num_datums]
-                    output_offset += prepared.num_datums
+                for idx, (exp, token_outputs) in enumerate(zip(window, result.token_outputs)):
                     exp.to_device(device)
-                    action_log_probs = prepared.restore_token_outputs(
-                        [record["action_log_probs"] for record in output_records]
-                    )
+                    action_log_probs = exp.align_action_outputs(token_outputs["action_log_probs"])
                     entropy = (
-                        prepared.restore_token_outputs([record["entropy"] for record in output_records])
-                        if output_records and "entropy" in output_records[0]
-                        else None
+                        exp.align_action_outputs(token_outputs["entropy"]) if "entropy" in token_outputs else None
                     )
                     status = self._collect_metrics(
                         exp,
@@ -428,8 +400,7 @@ class PolicyTrainer:
         return status_mean
 
     def compute_policy_loss(self, output, loss_inputs, *, kl_ctl: float):
-        logits = extract_model_logits(output)
-        action_log_probs = action_log_probs_from_output(output, loss_inputs, self.actor.temperature)
+        action_log_probs = self.actor.compute_action_log_probs(output, loss_inputs)
 
         weights = loss_inputs["weights"]
         local_tokens = weights.sum()
@@ -458,24 +429,16 @@ class PolicyTrainer:
             )
             numerator = numerator + masked_sum(approx_kl, weights.bool()) * kl_ctl
 
-        token_outputs = {
-            "action_log_probs": PerTokenOutput(action_log_probs * weights, fill_value=0.0),
-        }
+        token_outputs = {"action_log_probs": action_log_probs}
         if bool(self.args.actor.entropy_coef):
-            if isinstance(logits, DTensor):
-                entropy = vocab_parallel_entropy(logits, temperature=self.actor.temperature)
-            else:
-                entropy_logits = logits.float()
-                if self.actor.temperature != 1.0:
-                    entropy_logits = entropy_logits / self.actor.temperature
-                entropy = compute_entropy(entropy_logits)
+            entropy = self.actor.compute_entropy(output, loss_inputs)
             numerator = numerator - masked_sum(entropy, weights.bool()) * self.args.actor.entropy_coef
-            token_outputs["entropy"] = PerTokenOutput(entropy, fill_value=0.0)
+            token_outputs["entropy"] = entropy
 
         # Native AutoModel MoE gates inject their configured auxiliary gradient
         # through MoEAuxLossAutoScaler; Engine sets its window/CP scale. Adding the
         # scalar output here would double-count it.
-        return numerator, LossFnOutputBatch(per_token=token_outputs)
+        return LossOutput(loss_sum=numerator, token_outputs=token_outputs)
 
     def _collect_metrics(
         self,
@@ -872,25 +835,9 @@ class PolicyModelActor(BaseModelActor):
         the controller. Called per sample by execute_batch; the controller attaches the result as
         action_log_probs."""
         experience = experience.reload()
-        prepared = prepare_rl_engine_datum(
-            experience,
-            self.actor,
-            loss_fields={},
-            routed_experts=experience.routed_experts,
-        )
-        self.actor.eval()
-        try:
-            output = run_rl_engine_forward(
-                self.trainer.engine,
-                prepared,
-                "action_log_probs",
-                lambda model_output, loss_inputs: action_log_probs_from_output(
-                    model_output, loss_inputs, self.actor.temperature
-                ),
-            )
-        finally:
-            self.actor.train()
-        return output.to("cpu")
+        datums = self.actor.make_scoring_datums(experience, routed_experts=experience.routed_experts)
+        outputs = self.trainer.engine.forward(datums, self.actor.compute_action_log_probs)
+        return experience.align_action_outputs(outputs).to("cpu")
 
     def broadcast_to_vllm(self):
         self.trainer.broadcast_to_vllm()

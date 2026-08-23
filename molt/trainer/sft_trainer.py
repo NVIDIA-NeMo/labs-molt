@@ -17,11 +17,8 @@
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
 import os
-from functools import partial
 
 import torch
-from nemo_automodel._transformers.utils import resolve_get_rope_index
-from nemo_automodel.components.datasets.datum import collate_datums, collate_vlm_datums
 from nemo_automodel.components.distributed.mesh import MeshContext
 from nemo_automodel.components.loss.masked_ce import MaskedCrossEntropy
 from nemo_automodel.engine import Engine
@@ -72,38 +69,8 @@ class SFTTrainer:
         self.save_hf_ckpt = save_hf_ckpt
         clip_norm = max_norm if max_norm and max_norm > 0 else None
         raw_model = model.model
-        processor = tokenizer if hasattr(tokenizer, "image_processor") else None
-        packing_layout = model.packing_layout
-        packing_samples = packing_layout is not None
-        packed_thd = packing_layout == "thd"
         mesh_names = getattr(strategy.device_mesh, "mesh_dim_names", ()) or ()
         cp_size = strategy.device_mesh["cp"].size() if "cp" in mesh_names else 1
-        if processor is not None:
-            get_rope_index = resolve_get_rope_index(raw_model) if packing_samples else None
-            if packing_samples and cp_size > 1 and get_rope_index is not None:
-                raise NotImplementedError(
-                    "AutoModel does not yet support multi-axis mRoPE with packed THD context parallelism; "
-                    "use cp_size=1 or disable VLM packing."
-                )
-            if packed_thd and cp_size > 1 and not bool(getattr(raw_model, "supports_cp_with_sequence_packing", False)):
-                raise NotImplementedError(
-                    f"{type(raw_model).__name__} does not support VLM sequence packing with "
-                    f"context parallelism (cp_size={cp_size}) on its active attention backend."
-                )
-            collate_fn = partial(
-                collate_vlm_datums,
-                processor=processor,
-                packed=packed_thd,
-                packing_layout="indexed_mask" if packing_layout == "indexed_mask" else None,
-                get_rope_index=get_rope_index,
-                sequence_alignment=2 * cp_size if packed_thd and cp_size > 1 else 1,
-            )
-        else:
-            collate_fn = partial(
-                collate_datums,
-                packed=packed_thd,
-                packing_layout="indexed_mask" if packing_layout == "indexed_mask" else None,
-            )
         text_tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
         padding_token_id = getattr(text_tokenizer, "pad_token_id", None)
         if padding_token_id is None:
@@ -112,8 +79,7 @@ class SFTTrainer:
             raw_model,
             device=torch.device("cuda", torch.cuda.current_device()),
             mesh_context=MeshContext.from_meshes(strategy.device_mesh, strategy.moe_mesh),
-            microbatch_size=strategy.args.train.micro_batch_size,
-            collate_fn=collate_fn,
+            collate_fn=model.datum_collator(tokenizer, cp_size=cp_size),
             padding_token_id=padding_token_id,
             defer_fsdp_grad_sync=os.environ.get("MOLT_DEFER_GRAD_SYNC", "1") == "1",
             optimizers=optim,
@@ -202,7 +168,7 @@ class SFTTrainer:
             accum_microbatches = 0
             accum_steps = self.strategy.accumulated_gradient
             for batch in self.train_dataloader:
-                accum_window.extend(batch)
+                accum_window.append(batch)
                 accum_microbatches += 1
                 if accum_microbatches < accum_steps:
                     continue
@@ -210,7 +176,7 @@ class SFTTrainer:
                 window_size = accum_microbatches
                 result = self.engine.forward_backward(accum_window, self.compute_sft_loss)
                 self.strategy._maybe_debug_grad_stats(self.model, "model")
-                optim_result = self.engine.optim_step()
+                optim_result = self.engine.step()
                 self.scheduler.step()
 
                 logs_dict = {
@@ -280,40 +246,35 @@ class SFTTrainer:
                 self.strategy.prune_checkpoints(hf_root, tag, args.ckpt.max_num, args.ckpt.max_mem)
 
     def evaluate(self, eval_dataloader, steps=0):
-        self.model.eval()
-        try:
-            loss_sum = None
-            token_sum = None
-            step_bar = tqdm(
-                range(eval_dataloader.__len__()),
-                desc="Eval stage of steps %d" % steps,
-                disable=not self.strategy.is_rank_0(),
-            )
+        loss_sum = None
+        token_sum = None
+        step_bar = tqdm(
+            range(eval_dataloader.__len__()),
+            desc="Eval stage of steps %d" % steps,
+            disable=not self.strategy.is_rank_0(),
+        )
 
-            with torch.no_grad():
-                for batch in eval_dataloader:
-                    result = self.engine.forward(batch, self.compute_sft_loss)
-                    batch_loss_sum = result.loss_sum
-                    batch_token_sum = result.weight_sum
-                    loss_sum = batch_loss_sum if loss_sum is None else loss_sum + batch_loss_sum
-                    token_sum = batch_token_sum if token_sum is None else token_sum + batch_token_sum
-                    step_bar.update()
-                    step_bar.set_postfix({"eval sft_loss": (batch_loss_sum / batch_token_sum.clamp_min(1)).item()})
+        for batch in eval_dataloader:
+            result = self.engine.evaluate([batch], self.compute_sft_loss)
+            batch_loss_sum = result.loss_sum
+            batch_token_sum = result.weight_sum
+            loss_sum = batch_loss_sum if loss_sum is None else loss_sum + batch_loss_sum
+            token_sum = batch_token_sum if token_sum is None else token_sum + batch_token_sum
+            step_bar.update()
+            step_bar.set_postfix({"eval sft_loss": (batch_loss_sum / batch_token_sum.clamp_min(1)).item()})
 
-            if loss_sum is None or token_sum is None:
-                raise ValueError("evaluation dataloader produced no batches")
-            loss_sum, token_sum = self.strategy.all_reduce(torch.stack((loss_sum, token_sum)), op="sum")
-            if token_sum.item() <= 0:
-                raise ValueError("evaluation produced no supervised tokens")
-            last_logs = {"eval sft_loss": (loss_sum / token_sum).item()}
-            step_bar.set_postfix(last_logs)
+        if loss_sum is None or token_sum is None:
+            raise ValueError("evaluation dataloader produced no batches")
+        loss_sum, token_sum = self.strategy.all_reduce(torch.stack((loss_sum, token_sum)), op="sum")
+        if token_sum.item() <= 0:
+            raise ValueError("evaluation produced no supervised tokens")
+        last_logs = {"eval sft_loss": (loss_sum / token_sum).item()}
+        step_bar.set_postfix(last_logs)
 
-            if self.strategy.is_rank_0():
-                if self._wandb is not None:
-                    wandb_logs = {"eval/%s" % k: v for k, v in {**last_logs, "global_step": steps}.items()}
-                    self._wandb.log(wandb_logs)
-                elif self._tensorboard is not None:
-                    for k, v in last_logs.items():
-                        self._tensorboard.add_scalar(f"eval/{k}", v, steps)
-        finally:
-            self.model.train()
+        if self.strategy.is_rank_0():
+            if self._wandb is not None:
+                wandb_logs = {"eval/%s" % k: v for k, v in {**last_logs, "global_step": steps}.items()}
+                self._wandb.log(wandb_logs)
+            elif self._tensorboard is not None:
+                for k, v in last_logs.items():
+                    self._tensorboard.add_scalar(f"eval/{k}", v, steps)
