@@ -90,7 +90,7 @@ class Experience:
     rollout_log_probs: torch.Tensor = tensor_field("step", default=None)  # (B, T-1) log pi_old(a|s)
     # R3 rollout routing replay: the rollout router's top-k expert ids per token, one row
     # per MoE layer. Stored seq-LAST as (B, num_moe_layers, topk, T) so it rides the same
-    # right-pad/concat/stack machinery as the (B, T) step tensors; the actor forward
+    # right-pad/concat/stack machinery as the (B, T) step tensors; the model forward
     # permutes it back to token-major and replays it. None when R3 off.
     routed_experts: torch.Tensor = tensor_field("step", default=None)
 

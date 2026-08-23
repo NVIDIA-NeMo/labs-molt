@@ -108,6 +108,12 @@ offload uses the same path. Hugging Face fallback THD packing still fails
 explicitly. The existing Transformers scheduler remains Molt-owned for the
 same `step()` versus `step(1)` protocol reason as SFT.
 
+With routing replay enabled, critic old-value collection and value training
+consume the same actor rollout routes through AutoModel's model-scoped adapter.
+The critic must use the actor checkpoint: AutoModel validates numeric route
+shapes and ranges, but cannot prove semantic compatibility with an unrelated
+MoE topology.
+
 ## RL policy actor
 
 Policy optimization is Engine-only as well. Each text replay-buffer microbatch
@@ -163,7 +169,6 @@ debugging.
 | Full CPU offload | Delegated to AutoModel's `CPUOffloadPolicy` for multi-rank dense and native custom-MoE models | AutoModel still skips `fully_shard` for a size-one world/mesh, so single-GPU full offload is not supported |
 | Transformers scheduler | Supported through one explicit Molt `step()` after `optim_step()` | Engine schedulers use incremental `step(1)`, while HF `LambdaLR` interprets the argument as absolute epoch 1 |
 | Pipeline parallelism | Molt CLI fails fast at `pp_size > 1` | `FsdpStrategy` still constructs an eager model rather than `AutoPipeline`; AutoModel also lacks managed task-head hooks and packed HybridEP equalization under PP |
-| Critic routing replay | Not wired; R3 currently applies only to the policy | The critic must pass rollout routes and an Engine `batch_context_fn` if critic route replay is required |
 | Critic checkpoint resume | AutoModel checkpoint and managed-head primitives exist | A Molt save/restart/next-step parity smoke has not been run |
 | HF fallback packing | Model construction fails fast | The old FlashAttention varlen packing implementation was deleted; packed training requires AutoModel's native THD Datum contract |
 | HF fallback MoE | Model construction always fails fast, independent of auxiliary-loss settings or EP size | All MoE training requires an AutoModel-native implementation; the old scalar auxiliary-loss branch was deleted |
@@ -193,8 +198,9 @@ updated parameters.
 Critic H100 smokes with a real Qwen3 checkpoint passed Engine backward and
 optimizer update for DP=2, TP=2 with sequence parallelism, CP=2, and TP=2+CP=2;
 the managed value head was FSDP-wrapped, received a finite nonzero global
-gradient, updated, and remained replica-consistent. Critic R3 is not yet wired;
-checkpoint-resume parity remains to be run.
+gradient, updated, and remained replica-consistent. Critic R3 is wired through
+the same adapter as the policy; custom-MoE route parity and checkpoint-resume
+parity remain to be run.
 
 Actor and critic H100 EP=8 smokes with Qwen3-VL-30B-A3B passed native TE THD
 packing of two processor-ready VLM Datums, Engine loss/backward/clip/optimizer

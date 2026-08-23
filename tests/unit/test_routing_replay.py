@@ -24,18 +24,20 @@ gate's token order for the non-CP regimes.
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 from nemo_automodel.components.moe.router_replay import replay_selection
 from nemo_automodel.engine import Engine, collate_prebatched
 from torch import nn
 
 from molt.agents.base import Trajectory
-from molt.models.base import BaseModel
+from molt.models import Critic
 from molt.trainer.algorithm.experience import (
     Experience,
     make_experience_batch,
     remove_padding_in_sequences,
 )
+from molt.trainer.workers.critic_actor import CriticModelActor
 from molt.trainer.workers.engine_utils import prepare_rl_engine_datum, run_rl_engine_forward
 
 L, K = 3, 2  # MoE layers, top-k
@@ -142,7 +144,7 @@ def test_make_experience_batch_pads_routed_experts_with_sentinel():
     assert batch.sequences[1, 2].item() == 0  # sequences still pad with 0
 
 
-def test_engine_forward_replays_routes_through_automodel_adapter():
+def test_critic_engine_forward_replays_routes_through_automodel_adapter():
     class ReplayGate(nn.Module):
         def __init__(self):
             super().__init__()
@@ -171,7 +173,15 @@ def test_engine_forward_replays_routes_through_automodel_adapter():
         def __init__(self):
             super().__init__()
             self.model = ReplayDecoder()
+            self.config = SimpleNamespace(initializer_range=0.02, tie_word_embeddings=True)
+            self.lm_head = nn.Linear(1, 8, bias=False)
             self.selected = None
+
+        def get_output_embeddings(self):
+            return self.lm_head
+
+        def set_output_embeddings(self, head):
+            self.lm_head = head
 
         def forward(self, input_ids, **_kwargs):
             live = torch.tensor([[0, 1]], device=input_ids.device).expand(input_ids.numel(), -1)
@@ -179,7 +189,7 @@ def test_engine_forward_replays_routes_through_automodel_adapter():
             return input_ids.float()
 
     model = ReplayModel()
-    wrapped = BaseModel(model, routing_replay=True)
+    wrapped = Critic(model, routing_replay=True)
     routed = torch.full((1, L, K, 3), -1, dtype=torch.int16)
     routed[0, 1] = torch.tensor([[2, 4, 6], [3, 5, 7]], dtype=torch.int16)
     experience = Experience(
@@ -208,6 +218,20 @@ def test_engine_forward_replays_routes_through_automodel_adapter():
     assert torch.equal(restored, torch.tensor([[10.0, 11.0]]))
     assert wrapped._routing_replay_adapter.layer_ids == (1,)
     assert torch.equal(model.selected, torch.tensor([[2, 3], [4, 5]]))
+
+
+def test_critic_routing_replay_rejects_an_unrelated_checkpoint():
+    actor_cls = getattr(CriticModelActor, "__ray_actor_class__", CriticModelActor)
+    worker = object.__new__(actor_cls)
+    strategy = SimpleNamespace(
+        args=SimpleNamespace(
+            critic=SimpleNamespace(model_name_or_path="critic-checkpoint"),
+            train=SimpleNamespace(routing_replay=True),
+        )
+    )
+
+    with pytest.raises(ValueError, match="critic routing replay requires the critic to use the actor checkpoint"):
+        actor_cls.init_model_from_pretrained(worker, strategy, "actor-checkpoint")
 
 
 def test_make_experience_batch_mixed_none_routed_experts():

@@ -281,7 +281,7 @@ def prepare_rl_engine_datum(
     if routed_experts is not None:
         adapter = getattr(model_wrapper, "_routing_replay_adapter", None)
         if adapter is None:
-            raise RuntimeError("routed_experts requires an Actor constructed with routing_replay=True")
+            raise RuntimeError("routed_experts requires a model constructed with routing_replay=True")
         if routed_experts.ndim != 4 or routed_experts.shape[0] != batch or routed_experts.shape[-1] != full_sequence:
             raise ValueError("rollout routed_experts must have shape [batch, global_layers, topk, full_sequence]")
         prepared_routes = adapter.prepare_routed_experts(routed_experts[..., :-1])

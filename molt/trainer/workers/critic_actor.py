@@ -106,6 +106,7 @@ class CriticTrainer:
             microbatch_size=engine_microbatch_size,
             collate_fn=collate_fn,
             padding_token_id=padding_token_id,
+            batch_context_fn=getattr(self.critic, "_routing_replay_adapter", None),
             defer_fsdp_grad_sync=self._defer_grad_sync,
             optimizers=self.critic_optim,
             max_grad_norm=max_grad_norm if max_grad_norm and max_grad_norm > 0 else None,
@@ -187,6 +188,7 @@ class CriticTrainer:
                             exp,
                             self.critic,
                             loss_fields={"old_values": exp.values, "returns": exp.returns},
+                            routed_experts=exp.routed_experts,
                         )
                     )
 
@@ -277,10 +279,12 @@ class CriticTrainer:
 class CriticModelActor(BaseModelActor):
     def init_model_from_pretrained(self, strategy: FsdpStrategy, pretrain, max_steps=None):
         args = strategy.args
-        self._setup_distributed(strategy)
         # Init from the critic checkpoint (a reward model / value model) when given,
         # else from the actor checkpoint. `pretrain` is already the actor path.
         critic_pretrain = args.critic.model_name_or_path or pretrain
+        if getattr(args.train, "routing_replay", False) and critic_pretrain != pretrain:
+            raise ValueError("critic routing replay requires the critic to use the actor checkpoint")
+        self._setup_distributed(strategy)
         critic = Critic(
             critic_pretrain,
             attn_implementation=args.fsdp.attn_implementation,
@@ -297,6 +301,7 @@ class CriticModelActor(BaseModelActor):
             freeze_moe_router=getattr(args.critic, "freeze_moe_router", False)
             or getattr(args.actor, "freeze_moe_router", False),
             moe_aux_loss_coef=args.actor.aux_loss_coef,
+            routing_replay=getattr(args.train, "routing_replay", False),
         )
         strategy.print(critic)
         self.tokenizer = get_tokenizer(
@@ -362,6 +367,7 @@ class CriticModelActor(BaseModelActor):
             experience,
             self.critic,
             loss_fields={},
+            routed_experts=experience.routed_experts,
         )
         self.critic.eval()
         try:
