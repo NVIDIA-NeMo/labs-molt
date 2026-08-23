@@ -80,6 +80,7 @@ class SFTTrainer:
             device=torch.device("cuda", torch.cuda.current_device()),
             mesh_context=MeshContext.from_meshes(strategy.device_mesh, strategy.moe_mesh),
             collate_fn=model.datum_collator(tokenizer, cp_size=cp_size),
+            pin_memory=True,
             padding_token_id=padding_token_id,
             defer_fsdp_grad_sync=os.environ.get("MOLT_DEFER_GRAD_SYNC", "1") == "1",
             optimizers=optim,

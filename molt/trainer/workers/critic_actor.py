@@ -66,13 +66,12 @@ class CriticTrainer:
         micro_train_batch_size: int = 8,
         buffer_cpu_offload: bool = True,
         tokenizer=None,
-        dataloader_pin_memory: bool = True,
+        pin_memory: bool = True,
     ):
         self.strategy = strategy
         self.args = strategy.args
         self._defer_grad_sync = os.environ.get("MOLT_DEFER_GRAD_SYNC", "1") == "1"
         self.tokenizer = tokenizer
-        self.dataloader_pin_memory = dataloader_pin_memory
         self.critic = critic
         self.critic_optim = critic_optim
         self.critic_scheduler = critic_scheduler
@@ -97,6 +96,7 @@ class CriticTrainer:
             device=torch.device("cuda", torch.cuda.current_device()),
             mesh_context=MeshContext.from_meshes(strategy.device_mesh, strategy.moe_mesh),
             collate_fn=self.critic.datum_collator(self.tokenizer, cp_size=cp_size),
+            pin_memory=pin_memory,
             padding_token_id=padding_token_id,
             batch_context_fn=self.critic.routing_replay_context,
             defer_fsdp_grad_sync=self._defer_grad_sync,
@@ -184,10 +184,6 @@ class CriticTrainer:
                         )
                     )
 
-                if self.dataloader_pin_memory and window[0].sequences.device.type == "cpu":
-                    for datums in datum_batches:
-                        for datum in datums:
-                            datum.pin_memory()
                 result = self.engine.forward_backward(
                     datum_batches,
                     self.compute_critic_loss,

@@ -177,8 +177,8 @@ debugging.
 
 ## Dependency and validation status
 
-Source and Docker installs pin AutoModel revision `c9f551f6f`, which contains
-the current Datum Engine, processor-ready recursive Datum pinning, padded and
+Source and Docker installs pin AutoModel revision `a06df38f8`, which contains
+the current Datum Engine, final-batch pinning after physical collation, padded and
 packed VLM Datum collation with arbitrary layout-aware task inputs, HF FA2
 indexed-mask packing, and per-Datum token-output restoration. Its public
 execution API separates scoring (`forward`), evaluation (`evaluate`), training

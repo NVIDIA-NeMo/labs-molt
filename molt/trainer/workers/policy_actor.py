@@ -73,7 +73,7 @@ class PolicyTrainer:
         buffer_limit: int = 0,
         buffer_cpu_offload: bool = True,
         tokenizer=None,
-        dataloader_pin_memory: bool = True,
+        pin_memory: bool = True,
         vllm_engines: List = None,
         **kwargs,
     ):
@@ -92,7 +92,6 @@ class PolicyTrainer:
         # comm for higher peak memory, so set =0 for memory-bound runs that OOM.
         self._defer_grad_sync = os.environ.get("MOLT_DEFER_GRAD_SYNC", "1") == "1"
         self.tokenizer = tokenizer
-        self.dataloader_pin_memory = dataloader_pin_memory
 
         self.actor = actor
         self.actor_optim = actor_optim
@@ -131,6 +130,7 @@ class PolicyTrainer:
             device=torch.device("cuda", torch.cuda.current_device()),
             mesh_context=MeshContext.from_meshes(strategy.device_mesh, strategy.moe_mesh),
             collate_fn=self.actor.datum_collator(self.tokenizer, cp_size=cp_size),
+            pin_memory=pin_memory,
             padding_token_id=padding_token_id,
             batch_context_fn=self.actor.routing_replay_context,
             defer_fsdp_grad_sync=self._defer_grad_sync,
@@ -343,10 +343,6 @@ class PolicyTrainer:
                         )
                     )
 
-                if self.dataloader_pin_memory and window[0].sequences.device.type == "cpu":
-                    for datums in datum_batches:
-                        for datum in datums:
-                            datum.pin_memory()
                 result = self.engine.forward_backward(
                     datum_batches,
                     partial(self.compute_policy_loss, kl_ctl=kl_ctl),
