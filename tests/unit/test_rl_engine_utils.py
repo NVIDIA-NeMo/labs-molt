@@ -448,14 +448,14 @@ def test_policy_entropy_delegates_vocab_sharded_logits_to_automodel(monkeypatch)
         "advantages": torch.ones_like(log_probs),
     }
 
-    numerator, outputs = trainer._engine_loss({"logits": logits}, loss_inputs, kl_ctl=0.0)
+    numerator, outputs = trainer.compute_policy_loss({"logits": logits}, loss_inputs, kl_ctl=0.0)
 
     torch.testing.assert_close(numerator, -expected_entropy.sum() * 0.1)
     torch.testing.assert_close(outputs.per_token["action_log_probs"].tensor, log_probs)
     assert outputs.per_token["entropy"].tensor is expected_entropy
 
 
-def test_policy_callback_runs_engine_backward_and_optimizer_step(monkeypatch):
+def test_policy_loss_runs_engine_backward_and_optimizer_step(monkeypatch):
     # The production helper selects a CUDA-only fused CE kernel when flash-attn
     # is installed. Keep this Engine contract test CPU-only.
     monkeypatch.setattr(
@@ -520,7 +520,7 @@ def test_policy_callback_runs_engine_backward_and_optimizer_step(monkeypatch):
 
     result = engine.forward_backward(
         prepared.datums,
-        lambda output, inputs: trainer._engine_loss(output, inputs, kl_ctl=0.1),
+        lambda output, inputs: trainer.compute_policy_loss(output, inputs, kl_ctl=0.1),
         microbatch_sizes=(prepared.num_datums,),
     )
     optim_result = engine.optim_step()

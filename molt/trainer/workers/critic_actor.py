@@ -198,7 +198,7 @@ class CriticTrainer:
                         datum.pin_memory()
                 result = self.engine.forward_backward(
                     engine_datums,
-                    self._engine_loss,
+                    self.compute_critic_loss,
                     microbatch_sizes=[prepared.num_datums for prepared in prepared_window],
                 )
                 self.strategy._maybe_debug_grad_stats(self.critic, "critic")
@@ -255,7 +255,7 @@ class CriticTrainer:
         )
         return status
 
-    def _engine_loss(self, output, loss_inputs):
+    def compute_critic_loss(self, output, loss_inputs):
         values = unshard_dtensor(extract_model_logits(output)).squeeze(-1).float()
         weights = loss_inputs["weights"]
         local_tokens = weights.sum()

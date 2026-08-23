@@ -44,7 +44,7 @@ class _ValueHead(nn.Linear):
       head still sees the full hidden_size and computes correct values — a bare
       ``to_local()`` would have silently used only this rank's shard.
 
-    This mirrors the policy loss callback's ``unshard_dtensor(logits)`` and
+    This mirrors the policy loss function's ``unshard_dtensor(logits)`` and
     collapses only the TP dimension; Engine owns CP output restoration.
     AutoModel installs this head before FSDP, so its parameters participate in the
     same reduction, clipping, optimizer, and checkpoint lifecycle as the backbone.

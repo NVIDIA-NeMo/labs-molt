@@ -105,7 +105,7 @@ def extract_model_logits(output):
 
 
 def action_log_probs_from_output(output, loss_inputs, temperature: float) -> torch.Tensor:
-    """Compute realized next-token log-probabilities from an Engine callback."""
+    """Compute realized next-token log-probabilities from Engine model output."""
 
     logits = extract_model_logits(output)
     target_tokens = loss_inputs["target_tokens"]

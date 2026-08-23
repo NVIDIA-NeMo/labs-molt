@@ -363,7 +363,7 @@ class PolicyTrainer:
                         datum.pin_memory()
                 result = self.engine.forward_backward(
                     engine_datums,
-                    partial(self._engine_loss, kl_ctl=kl_ctl),
+                    partial(self.compute_policy_loss, kl_ctl=kl_ctl),
                     microbatch_sizes=[prepared.num_datums for prepared in prepared_window],
                 )
                 self.strategy._maybe_debug_grad_stats(self.actor, "actor")
@@ -427,7 +427,7 @@ class PolicyTrainer:
         )
         return status_mean
 
-    def _engine_loss(self, output, loss_inputs, *, kl_ctl: float):
+    def compute_policy_loss(self, output, loss_inputs, *, kl_ctl: float):
         logits = extract_model_logits(output)
         action_log_probs = action_log_probs_from_output(output, loss_inputs, self.actor.temperature)
 

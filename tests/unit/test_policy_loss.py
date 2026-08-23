@@ -448,7 +448,7 @@ def test_segmented_packed_sequence_objectives_match_dense(loss_mode, correction_
     )[0]
     dense_loss.backward()
 
-    # The packed callback sees one THD token stream, so sequence_ids preserve
+    # The packed loss function sees one THD token stream, so sequence_ids preserve
     # the row boundaries needed by GSPO and seq/geo correction.
     packed_log_probs = dense_log_probs.detach().reshape(1, -1).requires_grad_(True)
     packed_mask = action_mask.reshape(1, -1)

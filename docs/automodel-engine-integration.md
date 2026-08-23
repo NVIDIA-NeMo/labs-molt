@@ -31,13 +31,13 @@ accumulation window maps to one `forward_backward([datum0, datum1, ...])` call
 and one `optim_step()`.
 
 Engine calls AutoModel's `MaskedCrossEntropy(reduction="sum")` through a small
-output-normalization callback because HF models return `.logits` while native
+output-normalization loss function because HF models return `.logits` while native
 AutoModel models may return the logits tensor directly. Engine owns the global
 weight denominator, model-parallel loss reductions, gradient synchronization,
 clipping, optimizer update, and `zero_grad` lifecycle.
 
 For RL, Molt still owns target and action-mask semantics, advantages, and
-PPO/KL/GSPO objectives. Its callbacks delegate selected-token log probabilities
+PPO/KL/GSPO objectives. Its loss functions delegate selected-token log probabilities
 and exact entropy for vocab-sharded DTensor logits to AutoModel's tensor-parallel
 loss primitives, without gathering the full vocabulary.
 
@@ -78,7 +78,7 @@ Native custom-MoE auxiliary loss is supported through AutoModel's
 `MoEAuxLossAutoScaler`: Molt sets the native gate coefficient and AutoModel
 injects the auxiliary gradient during autograd. The reported `sft_loss` remains
 the token cross-entropy metric. Molt deliberately does not add a surfaced aux
-scalar in its loss callback, because that would apply the same auxiliary
+scalar in its loss function, because that would apply the same auxiliary
 gradient twice.
 
 Muon and `MOLT_DEFER_GRAD_SYNC=0` use the same Engine path: Engine steps the
@@ -90,7 +90,7 @@ directly.
 Critic optimization is also Engine-only. Text replay-buffer microbatches become
 one prebatched Datum; VLM microbatches become processor-ready per-sample Datums
 whose padding, media, packing, and PPO side channels are collated by AutoModel.
-Molt provides only the clipped value-loss callback. Engine returns detached
+Molt provides only the clipped value-loss function. Engine returns detached
 token values, which Molt restores to the replay buffer's dense coordinates for
 epoch-level metrics. The value projection is installed through AutoModel's
 `pre_fsdp_hook`, before parameter discovery and FSDP wrap; the old
@@ -121,10 +121,10 @@ becomes one prebatched Datum. Each VLM sample becomes a processor-ready Datum;
 AutoModel aligns its shifted target tokens, action weights,
 old/base/rollout log-probabilities, advantages, optional rollout routes, and
 media while padding or THD-packing the batch. A complete optimizer window is
-one `forward_backward` call followed by one `optim_step`; Molt's callback
+one `forward_backward` call followed by one `optim_step`; Molt's policy loss function
 contains only PPO/GSPO/CISPO, KL, and entropy numerators.
 
-Typed per-token callback outputs let Engine restore action log-probabilities and
+Typed per-token loss outputs let Engine restore action log-probabilities and
 entropy from CP or packed THD order before Molt computes dense replay-buffer
 metrics. For GSPO and sequence/geometric IS correction, Molt supplies sequence
 IDs as a `PER_TOKEN` side channel and reduces detached per-sequence statistics
@@ -134,8 +134,8 @@ packing and CP sharding without gathering differentiable log-probabilities.
 AutoModel's `RouterReplayAdapter` consumes rollout routes only after Engine has
 applied packing and CP layout, and its context covers forward, activation-
 checkpoint recomputation, and backward. Native AutoModel MoE gates keep their
-`MoEAuxLossAutoScaler` path; adding the surfaced scalar aux loss in the callback
-would count that gradient twice.
+`MoEAuxLossAutoScaler` path; adding the surfaced scalar aux loss in the policy
+loss function would count that gradient twice.
 
 Padded text and VLM, native text and VLM THD packing, TP, CP, EP, sequence
 parallelism, R3, entropy regularization, and PPO/GSPO/CISPO all use this path.
@@ -152,7 +152,7 @@ The policy's Transformers scheduler remains Molt-owned and advances once after a
 successful Engine optimizer update.
 
 Collection-time policy, reference, and critic scoring also use
-`Engine.forward`. Molt retains only the RL callback semantics and dense replay
+`Engine.forward`. Molt retains only the RL loss semantics and dense replay
 coordinate restoration; it no longer has a separate collection-time input-
 layout implementation.
 

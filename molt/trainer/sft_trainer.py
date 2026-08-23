@@ -150,7 +150,7 @@ class SFTTrainer:
             log_dir = os.path.join(self.strategy.args.logger.tensorboard_dir, strategy.args.logger.wandb.run_name)
             self._tensorboard = SummaryWriter(log_dir=log_dir)
 
-    def _engine_loss(self, output, loss_inputs):
+    def compute_sft_loss(self, output, loss_inputs):
         if not torch.is_tensor(output):
             output = output["logits"] if isinstance(output, dict) else output.logits
         return self.loss_fn(output, loss_inputs["labels"])
@@ -205,7 +205,7 @@ class SFTTrainer:
                     continue
 
                 window_size = accum_microbatches
-                result = self.engine.forward_backward(accum_window, self._engine_loss)
+                result = self.engine.forward_backward(accum_window, self.compute_sft_loss)
                 self.strategy._maybe_debug_grad_stats(self.model, "model")
                 optim_result = self.engine.optim_step()
                 self.scheduler.step()
@@ -289,7 +289,7 @@ class SFTTrainer:
 
             with torch.no_grad():
                 for batch in eval_dataloader:
-                    result = self.engine.forward(batch, self._engine_loss)
+                    result = self.engine.forward(batch, self.compute_sft_loss)
                     batch_loss_sum = result.loss_sum
                     batch_token_sum = result.weight_sum
                     loss_sum = batch_loss_sum if loss_sum is None else loss_sum + batch_loss_sum
