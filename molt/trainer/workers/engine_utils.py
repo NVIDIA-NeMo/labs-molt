@@ -113,9 +113,9 @@ def resolve_rl_engine_collation(model_wrapper, tokenizer, strategy, micro_train_
         get_rope_index=get_rope_index,
         sequence_alignment=2 * cp_size if packing_samples and cp_size > 1 else 1,
     )
-    # Fixed-size replay microbatches are flattened to individual VLM Datums and
-    # regrouped here. Dynamic batches have variable sample counts, so use one
-    # Datum per forward to preserve their token-budget memory bound.
+    # Callers pass each replay microbatch's actual Datum count to Engine. Keep
+    # the dynamic default at one so an omitted explicit boundary stays within
+    # the replay buffer's token-budget memory bound.
     engine_microbatch_size = 1 if strategy.args.train.dynamic_batch_enable else micro_train_batch_size
     return collate_fn, engine_microbatch_size
 
@@ -160,7 +160,7 @@ def run_rl_engine_forward(
             per_token={output_key: PerTokenOutput(token_output * weights, fill_value=0.0)}
         )
 
-    result = engine.forward(prepared.datums, loss_fn)
+    result = engine.forward(prepared.datums, loss_fn, microbatch_sizes=(prepared.num_datums,))
     if len(result.loss_fn_outputs) != prepared.num_datums:
         raise RuntimeError(
             f"Engine returned {len(result.loss_fn_outputs)} collection outputs for {prepared.num_datums} Datums"

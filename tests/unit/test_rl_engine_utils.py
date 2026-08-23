@@ -68,7 +68,7 @@ def test_vlm_engine_collation_uses_automodel_and_preserves_fixed_sample_batching
     assert microbatch_size == 3
 
 
-def test_dynamic_vlm_engine_collation_uses_one_datum_per_forward():
+def test_dynamic_vlm_engine_collation_defaults_to_one_datum():
     processor = SimpleNamespace(image_processor=object())
     wrapper = _wrapper(is_vlm=True, packing_samples=False)
 
@@ -237,13 +237,14 @@ def test_packed_vlm_rl_datums_collate_side_channels_and_restore_dense_outputs():
     engine = Engine(
         model,
         device="cpu",
-        microbatch_size=2,
+        microbatch_size=1,
         collate_fn=partial(collate_vlm_datums, processor=processor, packed=True, sequence_alignment=4),
     )
 
-    seen = {}
+    seen = {"calls": 0}
 
     def token_output(output, loss_inputs):
+        seen["calls"] += 1
         values = output.squeeze(-1)
         seen["routes"] = loss_inputs["routed_experts"]
         return values
@@ -251,6 +252,7 @@ def test_packed_vlm_rl_datums_collate_side_channels_and_restore_dense_outputs():
     restored = run_rl_engine_forward(engine, prepared, "values", token_output)
 
     torch.testing.assert_close(restored, torch.tensor([[0.0, 9.9, 1.2, 0.0], [2.0, 2.1, 0.0, 0.0]]))
+    assert seen["calls"] == 1
     assert seen["routes"].shape == (8, 1, 2)
     assert bool((seen["routes"] == -1).any())
 

@@ -362,7 +362,11 @@ class PolicyTrainer:
                 if self.dataloader_pin_memory and window[0].sequences.device.type == "cpu":
                     for datum in engine_datums:
                         datum.pin_memory()
-                result = self.engine.forward_backward(engine_datums, partial(self._engine_loss, kl_ctl=kl_ctl))
+                result = self.engine.forward_backward(
+                    engine_datums,
+                    partial(self._engine_loss, kl_ctl=kl_ctl),
+                    microbatch_sizes=[prepared.num_datums for prepared in prepared_window],
+                )
                 self.strategy._maybe_debug_grad_stats(self.actor, "actor")
                 optim_result = self.engine.optim_step()
                 # Keep the HF scheduler out of Engine: LambdaLR.step(1) means

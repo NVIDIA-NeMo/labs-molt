@@ -195,7 +195,11 @@ class CriticTrainer:
                 if self.dataloader_pin_memory and window[0].sequences.device.type == "cpu":
                     for datum in engine_datums:
                         datum.pin_memory()
-                result = self.engine.forward_backward(engine_datums, self._engine_loss)
+                result = self.engine.forward_backward(
+                    engine_datums,
+                    self._engine_loss,
+                    microbatch_sizes=[prepared.num_datums for prepared in prepared_window],
+                )
                 self.strategy._maybe_debug_grad_stats(self.critic, "critic")
                 optim_result = self.engine.optim_step()
                 # Transformers LambdaLR.step() takes an absolute epoch when passed
