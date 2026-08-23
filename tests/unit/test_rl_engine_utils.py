@@ -373,9 +373,7 @@ def test_per_sample_rl_datums_run_one_engine_backward_window():
         microbatch_sizes=(prepared.num_datums,),
     )
     expected_sum = (0.5 * (expected_values - experience.returns).pow(2) * experience.action_mask).sum()
-    restored_values = prepared.restore_token_outputs(
-        [record["action_values"] for record in result.loss_fn_outputs]
-    )
+    restored_values = prepared.restore_token_outputs([record["action_values"] for record in result.loss_fn_outputs])
 
     assert torch.allclose(result.loss_sum, expected_sum.double())
     assert torch.allclose(result.loss, expected_sum.double() / experience.action_mask.sum())
