@@ -134,7 +134,6 @@ class CriticTrainer:
             batch_size=self.replay_buffer.sample_batch_size,
             shuffle=should_shuffle,
             drop_last=True,
-            pin_memory=self.dataloader_pin_memory,
             collate_fn=self.replay_buffer.collate_fn,
         )
         device = torch.cuda.current_device()
@@ -193,6 +192,9 @@ class CriticTrainer:
                     )
 
                 engine_datums = [datum for prepared in prepared_window for datum in prepared.datums]
+                if self.dataloader_pin_memory and window[0].sequences.device.type == "cpu":
+                    for datum in engine_datums:
+                        datum.pin_memory()
                 result = self.engine.forward_backward(engine_datums, self._engine_loss)
                 self.strategy._maybe_debug_grad_stats(self.critic, "critic")
                 optim_result = self.engine.optim_step()

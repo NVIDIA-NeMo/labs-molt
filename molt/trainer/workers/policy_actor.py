@@ -283,7 +283,6 @@ class PolicyTrainer:
             batch_size=self.replay_buffer.sample_batch_size,
             shuffle=should_shuffle,
             drop_last=True,
-            pin_memory=self.dataloader_pin_memory,
             collate_fn=self.replay_buffer.collate_fn,
         )
         device = torch.cuda.current_device()
@@ -360,6 +359,9 @@ class PolicyTrainer:
                     )
 
                 engine_datums = [datum for prepared in prepared_window for datum in prepared.datums]
+                if self.dataloader_pin_memory and window[0].sequences.device.type == "cpu":
+                    for datum in engine_datums:
+                        datum.pin_memory()
                 result = self.engine.forward_backward(engine_datums, partial(self._engine_loss, kl_ctl=kl_ctl))
                 self.strategy._maybe_debug_grad_stats(self.actor, "actor")
                 optim_result = self.engine.optim_step()
