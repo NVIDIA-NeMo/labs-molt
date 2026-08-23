@@ -133,6 +133,10 @@ would count that gradient twice.
 
 Padded text and VLM, native text and VLM THD packing, TP, CP, EP, sequence
 parallelism, R3, entropy regularization, and PPO/GSPO/CISPO all use this path.
+Text replay microbatches contain one Datum per sample, so AutoModel owns both
+padded and THD collation instead of receiving a Molt-built physical batch.
+Explicit `microbatch_sizes` preserve each dynamic replay-buffer group while
+still allowing all samples inside that group to be packed together.
 Packed VLM CP is accepted only when AutoModel declares support for the active
 model/backend; multi-axis mRoPE with packed THD CP remains intentionally
 unsupported. HF-fallback THD packing and every HF-fallback MoE model fail
@@ -141,9 +145,10 @@ kwargs nor an HF MoE training or scalar auxiliary-loss optimization branch.
 The policy's Transformers scheduler remains Molt-owned and advances once after a
 successful Engine optimizer update.
 
-The legacy `Actor.forward` input-layout code remains only for collection-time
-old/reference log-probability inference. It no longer owns policy backward,
-gradient synchronization, clipping, or optimizer mutation.
+Collection-time policy, reference, and critic scoring also use
+`Engine.forward`. Molt retains only the RL callback semantics and dense replay
+coordinate restoration; it no longer has a separate collection-time input-
+layout implementation.
 
 With SFT, critic, and policy updates all on Engine, `FsdpStrategy` no longer
 contains its duplicate `backward`, accumulation/sync, clipping,
@@ -155,10 +160,11 @@ debugging.
 
 | Boundary | Current behavior | Missing contract |
 | --- | --- | --- |
-| Full CPU offload | Delegated to AutoModel's `CPUOffloadPolicy` for dense and native custom-MoE models | Molt retains only policy injection and CUDA staging for vLLM refit |
+| Full CPU offload | Delegated to AutoModel's `CPUOffloadPolicy` for multi-rank dense and native custom-MoE models | AutoModel still skips `fully_shard` for a size-one world/mesh, so single-GPU full offload is not supported |
 | Transformers scheduler | Supported through one explicit Molt `step()` after `optim_step()` | Engine schedulers use incremental `step(1)`, while HF `LambdaLR` interprets the argument as absolute epoch 1 |
-| Pipeline parallelism | Molt CLI fails fast at `pp_size > 1` | Engine and R3 now support per-inner-microbatch contexts, but `FsdpStrategy` still constructs an eager model rather than `AutoPipeline` |
-| Dynamic VLM replay batching | Functionally supported with one VLM Datum per Engine forward | Molt does not yet pass the replay buffer's variable groups through Engine's explicit `microbatch_sizes`; fixed-size replay batches still pack samples together |
+| Pipeline parallelism | Molt CLI fails fast at `pp_size > 1` | `FsdpStrategy` still constructs an eager model rather than `AutoPipeline`; AutoModel also lacks managed task-head hooks and packed HybridEP equalization under PP |
+| Critic routing replay | Not wired; R3 currently applies only to the policy | The critic must pass rollout routes and an Engine `batch_context_fn` if critic route replay is required |
+| Critic checkpoint resume | AutoModel checkpoint and managed-head primitives exist | A Molt save/restart/next-step parity smoke has not been run |
 | HF fallback packing | Model construction fails fast | The old FlashAttention varlen packing implementation was deleted; packed training requires AutoModel's native THD Datum contract |
 | HF fallback MoE | Model construction always fails fast, independent of auxiliary-loss settings or EP size | All MoE training requires an AutoModel-native implementation; the old scalar auxiliary-loss branch was deleted |
 | Multi-axis mRoPE + packed THD CP | Intentionally unsupported and fail-fast | The agreed scope excludes this combination; AutoModel also rejects 3-D packed position IDs when CP/PP reorders or splits the token stream |
@@ -187,8 +193,8 @@ updated parameters.
 Critic H100 smokes with a real Qwen3 checkpoint passed Engine backward and
 optimizer update for DP=2, TP=2 with sequence parallelism, CP=2, and TP=2+CP=2;
 the managed value head was FSDP-wrapped, received a finite nonzero global
-gradient, updated, and remained replica-consistent. Critic R3 and
-checkpoint-resume smokes remain to be run.
+gradient, updated, and remained replica-consistent. Critic R3 is not yet wired;
+checkpoint-resume parity remains to be run.
 
 Actor and critic H100 EP=8 smokes with Qwen3-VL-30B-A3B passed native TE THD
 packing of two processor-ready VLM Datums, Engine loss/backward/clip/optimizer
