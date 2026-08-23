@@ -18,7 +18,7 @@
 
 import os
 from importlib.util import find_spec
-from typing import Union
+from typing import Literal, Union
 
 import torch
 import torch.nn as nn
@@ -116,9 +116,7 @@ def _will_use_hf_model(pretrain_or_model, default: bool = True) -> bool:
         return default
 
 
-def _reject_hf_fallback_features(
-    *, is_hf_model: bool, is_moe: bool, packing_samples: bool, moe_aux_loss_coef: float
-) -> None:
+def _reject_hf_fallback_features(*, is_hf_model: bool, is_moe: bool, moe_aux_loss_coef: float) -> None:
     """Reject features whose old HF-specific implementations were removed."""
     if not is_hf_model:
         return
@@ -126,8 +124,6 @@ def _reject_hf_fallback_features(
     unsupported = []
     if is_moe:
         unsupported.append("MoE model training")
-    if packing_samples:
-        unsupported.append("THD sequence packing")
     if not is_moe and abs(float(moe_aux_loss_coef or 0.0)) > 1e-8:
         unsupported.append("MoE auxiliary loss")
     if unsupported:
@@ -226,7 +222,7 @@ class BaseModel(nn.Module):
             unexpected = ", ".join(sorted(kwargs))
             raise TypeError(f"Unexpected {type(self).__name__} keyword argument(s): {unexpected}")
         self.temperature = temperature
-        self.packing_samples = packing_samples
+        self.packing_layout: Literal["thd", "indexed_mask"] | None = None
         self._routing_replay_adapter = None
 
         if not isinstance(pretrain_or_model, str):
@@ -239,7 +235,6 @@ class BaseModel(nn.Module):
             _reject_hf_fallback_features(
                 is_hf_model=not is_native_model,
                 is_moe=is_moe,
-                packing_samples=self.packing_samples,
                 moe_aux_loss_coef=moe_aux_loss_coef,
             )
             if is_native_model:
@@ -248,11 +243,35 @@ class BaseModel(nn.Module):
                     raise ValueError(
                         "MoE auxiliary loss was requested, but the AutoModel model has no native MoE gates."
                     )
-            if self.packing_samples and not _automodel_supports_thd_packing(self.model):
-                raise ValueError(
-                    "This pre-instantiated AutoModel custom model does not declare THD packing support. "
-                    "Use an AutoModel custom TE model or disable --fsdp.packing_samples."
-                )
+            if packing_samples:
+                if is_native_model:
+                    if not _automodel_supports_thd_packing(self.model):
+                        raise ValueError(
+                            "This pre-instantiated AutoModel custom model does not declare THD packing support. "
+                            "Use an AutoModel custom TE model or disable --fsdp.packing_samples."
+                        )
+                    self.packing_layout = "thd"
+                else:
+                    mesh_names = getattr(device_mesh, "mesh_dim_names", ()) or ()
+                    cp_size = device_mesh["cp"].size() if "cp" in mesh_names else 1
+                    pp_size = device_mesh["pp"].size() if "pp" in mesh_names else 1
+                    if moe_mesh is not None or cp_size > 1 or pp_size > 1:
+                        raise NotImplementedError(
+                            "Hugging Face indexed-mask packing requires cp_size=1, pp_size=1, and ep_size=1."
+                        )
+                    from nemo_automodel.components.models.common.packing import (
+                        configure_packing,
+                        get_attn_implementation,
+                    )
+
+                    actual_attn = get_attn_implementation(None, model=self.model)
+                    if actual_attn != "flash_attention_2":
+                        raise RuntimeError(
+                            "Hugging Face indexed-mask packing requires the model to use flash_attention_2; "
+                            f"got {actual_attn!r}."
+                        )
+                    configure_packing("flash_attention_2")
+                    self.packing_layout = "indexed_mask"
             if routing_replay:
                 self._enable_routing_replay()
             return
@@ -269,7 +288,6 @@ class BaseModel(nn.Module):
         _reject_hf_fallback_features(
             is_hf_model=use_hf_model,
             is_moe=is_moe,
-            packing_samples=packing_samples,
             moe_aux_loss_coef=moe_aux_loss_coef,
         )
         if is_moe and not ep_active:
@@ -285,7 +303,17 @@ class BaseModel(nn.Module):
                 "whose `architectures` is natively registered (e.g. omni3: NemotronH_Nano_Omni_Reasoning_V3, "
                 "the official GA model — not a renamed alias), or run with ep_size=1."
             )
-        if packing_samples and not _automodel_supports_thd_packing(pretrain_or_model):
+        if packing_samples and use_hf_model:
+            if attn_implementation != "flash_attention_2":
+                raise ValueError(
+                    "Hugging Face fallback packing requires --fsdp.attn_implementation flash_attention_2."
+                )
+            mesh_names = getattr(device_mesh, "mesh_dim_names", ()) or ()
+            cp_size = device_mesh["cp"].size() if "cp" in mesh_names else 1
+            pp_size = device_mesh["pp"].size() if "pp" in mesh_names else 1
+            if cp_size > 1 or pp_size > 1:
+                raise NotImplementedError("Hugging Face indexed-mask packing requires cp_size=1 and pp_size=1.")
+        if packing_samples and not use_hf_model and not _automodel_supports_thd_packing(pretrain_or_model):
             raise ValueError(
                 "AutoModel custom implementation for this architecture does not declare THD packing support; "
                 "use --fsdp.attn_implementation te with a THD-capable custom model or disable packing."
@@ -398,17 +426,34 @@ class BaseModel(nn.Module):
         _reject_hf_fallback_features(
             is_hf_model=not is_native_model,
             is_moe=_detect_moe_arch(self.model),
-            packing_samples=packing_samples,
             moe_aux_loss_coef=moe_aux_loss_coef,
         )
+        if packing_samples:
+            if is_native_model:
+                if attn_implementation not in {"te", "tilelang"}:
+                    raise ValueError("AutoModel-native packing requires --fsdp.attn_implementation te or tilelang.")
+                if not _automodel_supports_thd_packing(self.model):
+                    raise ValueError("The loaded AutoModel-native model does not declare THD packing support.")
+                self.packing_layout = "thd"
+            else:
+                from nemo_automodel.components.models.common.packing import configure_packing, get_attn_implementation
+
+                actual_attn = get_attn_implementation(None, model=self.model)
+                if actual_attn != "flash_attention_2":
+                    raise RuntimeError(
+                        "Hugging Face indexed-mask packing requires the loaded model to use flash_attention_2; "
+                        f"got {actual_attn!r}."
+                    )
+                configure_packing("flash_attention_2")
+                self.packing_layout = "indexed_mask"
         if is_native_model:
             configured_aux = configure_nemo_moe_aux_loss(self.model, moe_aux_loss_coef)
             if abs(float(moe_aux_loss_coef or 0.0)) > 1e-8 and not configured_aux:
                 raise ValueError("MoE auxiliary loss was requested, but the AutoModel model has no native MoE gates.")
         if routing_replay:
             self._enable_routing_replay()
-        if self.packing_samples:
-            print("[Packing] Using AutoModel THD/TE packed path.")
+        if self.packing_layout is not None:
+            print(f"[Packing] Using AutoModel {self.packing_layout} packed path.")
 
         # Optionally freeze the MoE router/gate (keeps vLLM-vs-actor routing identical,
         # stabilizes training). Match by isinstance(Gate), NOT by name: the path varies by

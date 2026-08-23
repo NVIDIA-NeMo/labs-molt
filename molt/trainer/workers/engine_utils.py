@@ -56,12 +56,15 @@ class PreparedRLEngineDatum:
 def resolve_rl_engine_collation(model_wrapper, tokenizer, strategy, micro_train_batch_size: int):
     """Select the AutoModel collater and outer Datum batch size for RL."""
 
+    packing_layout = model_wrapper.packing_layout
+    packed_thd = packing_layout == "thd"
+    indexed_mask = "indexed_mask" if packing_layout == "indexed_mask" else None
     if not bool(getattr(model_wrapper, "is_vlm", False)):
-        return partial(collate_datums, packed=bool(model_wrapper.packing_samples)), micro_train_batch_size
+        return partial(collate_datums, packed=packed_thd, packing_layout=indexed_mask), micro_train_batch_size
     if tokenizer is None or not hasattr(tokenizer, "image_processor"):
         raise ValueError("RL VLM training requires the model's AutoProcessor")
 
-    packing_samples = bool(model_wrapper.packing_samples)
+    packing_samples = packing_layout is not None
     mesh_names = getattr(strategy.device_mesh, "mesh_dim_names", ()) or ()
     cp_size = strategy.device_mesh["cp"].size() if "cp" in mesh_names else 1
     get_rope_index = resolve_get_rope_index(model_wrapper.model) if packing_samples else None
@@ -71,7 +74,7 @@ def resolve_rl_engine_collation(model_wrapper, tokenizer, strategy, micro_train_
             "use cp_size=1 or disable VLM packing."
         )
     if (
-        packing_samples
+        packed_thd
         and cp_size > 1
         and not bool(getattr(model_wrapper.model, "supports_cp_with_sequence_packing", False))
     ):
@@ -83,9 +86,10 @@ def resolve_rl_engine_collation(model_wrapper, tokenizer, strategy, micro_train_
     collate_fn = partial(
         collate_vlm_datums,
         processor=tokenizer,
-        packed=packing_samples,
+        packed=packed_thd,
+        packing_layout=indexed_mask,
         get_rope_index=get_rope_index,
-        sequence_alignment=2 * cp_size if packing_samples and cp_size > 1 else 1,
+        sequence_alignment=2 * cp_size if packed_thd and cp_size > 1 else 1,
     )
     # Callers pass each replay microbatch's actual Datum count to Engine. Keep
     # the dynamic default at one so an omitted explicit boundary stays within

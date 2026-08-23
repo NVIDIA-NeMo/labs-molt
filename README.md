@@ -120,7 +120,7 @@ RL on vLLM. Read every line that touches your gradients, in plain PyTorch.
 | RL | vLLM-backed online RL via `molt.cli.train_rl_ray` |
 | Runtime | Ray placement, async rollout queues, vLLM engines, partial rollout sync |
 | Model scale | AutoModel + FSDP2 with TP / EP / CP, MoE-native — e.g. DeepSeek-V3 at `--fsdp.ep_size 256` |
-| Model backend | **NVIDIA AutoModel is the primary path** — native CP / EP / TP, custom MoE+EP parallelizer, TE fused attention; everything model-side aligns with AutoModel's own recipes. The HF transformers path is a **non-preferred fallback** for padded text models only; packing, MoE auxiliary loss, CP, EP, and TP require a native AutoModel implementation. |
+| Model backend | **NVIDIA AutoModel is the primary path** — native CP / EP / TP, custom MoE+EP parallelizer, TE fused attention; everything model-side aligns with AutoModel's own recipes. The HF transformers path is a **non-preferred dense fallback**; FA2 packing uses AutoModel indexed masks at CP1/PP1/EP1, while MoE auxiliary loss, CP, and EP require a native implementation. |
 | Optimizer | `adam` (default), with AutoModel full CPU offload for the largest actors (`--fsdp.offload full`). `muon` (Newton–Schulz via Dion: Muon for 2D weights and grouped MoE experts, AdamW for embeddings / head / norms) is **experimental** — runs distributed (FSDP / EP) but has shown no consistent win over `adam` yet, which stays the recommended default |
 
 ### Agents & rewards
@@ -520,9 +520,9 @@ model gets the sharding its attention backend needs — round-robin for hybrid
 SSM / linear-attention models (Nemotron Omni, Qwen3.5-MoE), flat THD streams for
 sparse-attention models (GLM-5.2 DSA). VLM vision towers and routing replay shard
 with the sequence, so `--fsdp.cp_size` composes with `--data.image_key` and
-`--train.routing_replay`. RL sample packing (`--fsdp.packing_samples`) remains
-text-only and off by default; Engine-backed SFT additionally supports AutoModel's
-native packed-VLM THD path. Multi-axis mRoPE with packed THD CP is rejected until
+`--train.routing_replay`. RL sample packing (`--fsdp.packing_samples`) is off by
+default and supports text and VLM through native THD or dense-HF FA2 indexed
+masks. Multi-axis mRoPE with packed THD CP is rejected until
 AutoModel can preserve its position layout through aligned CP sharding.
 
 ### ⚡ MTP rollout (speculative decoding)

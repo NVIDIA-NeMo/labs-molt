@@ -1042,12 +1042,13 @@ if __name__ == "__main__":
 
     if args.fsdp.packing_samples:
         assert args.vllm.num_engines > 0, "Only support `--fsdp.packing_samples` with vLLM."
-        # DSA (glm_moe_dsa) is THD-native and uses tilelang; other native
-        # packed models use Transformer Engine.
-        if args.fsdp.attn_implementation not in {"te", "tilelang"}:
+        # Native models use THD through TE/tilelang. Dense HF fallback models
+        # use AutoModel's indexed-mask FA2 path; BaseModel rejects every other
+        # backend and parallelism combination after resolving the actual model.
+        if args.fsdp.attn_implementation not in {"te", "tilelang", "flash_attention_2"}:
             raise ValueError(
-                "--fsdp.packing_samples requires an AutoModel-native THD backend: "
-                "--fsdp.attn_implementation te or tilelang."
+                "--fsdp.packing_samples requires te/tilelang for an AutoModel-native model or "
+                "flash_attention_2 for a dense Hugging Face fallback model."
             )
 
     # --- Training / rollout sizing ---

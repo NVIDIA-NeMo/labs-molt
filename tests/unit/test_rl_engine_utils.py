@@ -33,7 +33,9 @@ def _experience():
 
 
 def _wrapper(**kwargs):
-    defaults = {"model": nn.Linear(1, 1), "is_vlm": False}
+    defaults = {"model": nn.Linear(1, 1), "is_vlm": False, "packing_layout": None}
+    if kwargs.get("packing_samples"):
+        defaults["packing_layout"] = "thd"
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
 
@@ -65,6 +67,7 @@ def test_vlm_engine_collation_uses_automodel_and_preserves_fixed_sample_batching
 
     assert collate_fn.func is collate_vlm_datums
     assert collate_fn.keywords["packed"] is True
+    assert collate_fn.keywords["packing_layout"] is None
     assert microbatch_size == 3
 
 
@@ -101,7 +104,26 @@ def test_text_engine_collation_delegates_padding_and_packing_to_automodel(packed
     )
 
     assert collate_fn.func is collate_datums
-    assert collate_fn.keywords == {"packed": packed}
+    assert collate_fn.keywords == {
+        "packed": packed,
+        "packing_layout": None,
+    }
+    assert microbatch_size == 3
+
+
+@pytest.mark.parametrize("is_vlm", [False, True])
+def test_engine_collation_selects_indexed_mask_layout(is_vlm):
+    processor = SimpleNamespace(image_processor=object()) if is_vlm else None
+    wrapper = _wrapper(is_vlm=is_vlm, packing_samples=True, packing_layout="indexed_mask")
+
+    collate_fn, microbatch_size = resolve_rl_engine_collation(
+        wrapper, processor, _vlm_collation_strategy(), micro_train_batch_size=3
+    )
+
+    expected = collate_vlm_datums if is_vlm else collate_datums
+    assert collate_fn.func is expected
+    assert collate_fn.keywords["packed"] is False
+    assert collate_fn.keywords["packing_layout"] == "indexed_mask"
     assert microbatch_size == 3
 
 

@@ -73,7 +73,9 @@ class SFTTrainer:
         clip_norm = max_norm if max_norm and max_norm > 0 else None
         raw_model = model.model
         processor = tokenizer if hasattr(tokenizer, "image_processor") else None
-        packing_samples = strategy.args.fsdp.packing_samples
+        packing_layout = model.packing_layout
+        packing_samples = packing_layout is not None
+        packed_thd = packing_layout == "thd"
         mesh_names = getattr(strategy.device_mesh, "mesh_dim_names", ()) or ()
         cp_size = strategy.device_mesh["cp"].size() if "cp" in mesh_names else 1
         if processor is not None:
@@ -83,11 +85,7 @@ class SFTTrainer:
                     "AutoModel does not yet support multi-axis mRoPE with packed THD context parallelism; "
                     "use cp_size=1 or disable VLM packing."
                 )
-            if (
-                packing_samples
-                and cp_size > 1
-                and not bool(getattr(raw_model, "supports_cp_with_sequence_packing", False))
-            ):
+            if packed_thd and cp_size > 1 and not bool(getattr(raw_model, "supports_cp_with_sequence_packing", False)):
                 raise NotImplementedError(
                     f"{type(raw_model).__name__} does not support VLM sequence packing with "
                     f"context parallelism (cp_size={cp_size}) on its active attention backend."
@@ -95,12 +93,17 @@ class SFTTrainer:
             collate_fn = partial(
                 collate_vlm_datums,
                 processor=processor,
-                packed=packing_samples,
+                packed=packed_thd,
+                packing_layout="indexed_mask" if packing_layout == "indexed_mask" else None,
                 get_rope_index=get_rope_index,
-                sequence_alignment=2 * cp_size if packing_samples and cp_size > 1 else 1,
+                sequence_alignment=2 * cp_size if packed_thd and cp_size > 1 else 1,
             )
         else:
-            collate_fn = partial(collate_datums, packed=packing_samples)
+            collate_fn = partial(
+                collate_datums,
+                packed=packed_thd,
+                packing_layout="indexed_mask" if packing_layout == "indexed_mask" else None,
+            )
         text_tokenizer = getattr(tokenizer, "tokenizer", tokenizer)
         padding_token_id = getattr(text_tokenizer, "pad_token_id", None)
         if padding_token_id is None:

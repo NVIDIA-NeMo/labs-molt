@@ -67,9 +67,10 @@ class _RawLM(torch.nn.Module):
 
 
 class _Actor(torch.nn.Module):
-    def __init__(self, model=None):
+    def __init__(self, model=None, packing_layout=None):
         super().__init__()
         self.model = model or _RawLM()
+        self.packing_layout = packing_layout
 
     def forward(self, *args, **kwargs):
         raise AssertionError("Engine SFT must bypass the outer Actor wrapper")
@@ -214,7 +215,7 @@ def test_trainer_selects_automodel_vlm_packing_collater():
     processor = SimpleNamespace(image_processor=object(), tokenizer=SimpleNamespace(pad_token_id=0))
     strategy = _Strategy(accumulated_gradient=1)
     strategy.args.fsdp.packing_samples = True
-    actor = _Actor()
+    actor = _Actor(packing_layout="thd")
     optimizer = torch.optim.SGD(actor.parameters(), lr=0.05)
     trainer = SFTTrainer(actor, strategy, optimizer, [], None, _Scheduler(optimizer, []), tokenizer=processor)
 
@@ -224,6 +225,7 @@ def test_trainer_selects_automodel_vlm_packing_collater():
 
     assert trainer.engine.collate_fn.func is collate_vlm_datums
     assert trainer.engine.collate_fn.keywords["packed"] is True
+    assert trainer.engine.collate_fn.keywords["packing_layout"] is None
     assert model_inputs["qkv_format"] == "thd"
     assert model_inputs["input_ids"].shape == (1, 3)
     assert loss_inputs["weights"].sum().item() == 3
@@ -245,7 +247,7 @@ def test_trainer_rejects_mrope_vlm_packing_with_context_parallelism():
     strategy = _Strategy(accumulated_gradient=1)
     strategy.args.fsdp.packing_samples = True
     strategy.device_mesh = _CpMesh()
-    actor = _Actor(_MropeLM())
+    actor = _Actor(_MropeLM(), packing_layout="thd")
     optimizer = torch.optim.SGD(actor.parameters(), lr=0.05)
 
     with pytest.raises(NotImplementedError, match="multi-axis mRoPE"):
@@ -255,7 +257,7 @@ def test_trainer_rejects_mrope_vlm_packing_with_context_parallelism():
 def test_trainer_selects_automodel_text_packing_collater():
     strategy = _Strategy(accumulated_gradient=1)
     strategy.args.fsdp.packing_samples = True
-    actor = _Actor()
+    actor = _Actor(packing_layout="thd")
     optimizer = torch.optim.SGD(actor.parameters(), lr=0.05)
     trainer = SFTTrainer(actor, strategy, optimizer, [], None, _Scheduler(optimizer, []))
 
@@ -271,6 +273,21 @@ def test_trainer_selects_automodel_text_packing_collater():
     assert model_inputs["input_ids"].shape == (1, 5)
     assert loss_inputs["labels"].shape == (1, 5)
     assert loss_inputs["weights"].sum().item() == 4
+
+
+@pytest.mark.parametrize("processor", [None, SimpleNamespace(image_processor=object(), tokenizer=None)])
+def test_trainer_selects_indexed_mask_packing_collater(processor):
+    strategy = _Strategy(accumulated_gradient=1)
+    strategy.args.fsdp.packing_samples = True
+    actor = _Actor(packing_layout="indexed_mask")
+    optimizer = torch.optim.SGD(actor.parameters(), lr=0.05)
+
+    trainer = SFTTrainer(actor, strategy, optimizer, [], None, _Scheduler(optimizer, []), tokenizer=processor)
+
+    expected = collate_vlm_datums if processor is not None else collate_datums
+    assert trainer.engine.collate_fn.func is expected
+    assert trainer.engine.collate_fn.keywords["packed"] is False
+    assert trainer.engine.collate_fn.keywords["packing_layout"] == "indexed_mask"
 
 
 @pytest.mark.parametrize("tensor_output", [False, True])
