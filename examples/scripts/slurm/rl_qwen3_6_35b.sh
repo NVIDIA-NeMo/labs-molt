@@ -51,11 +51,8 @@ export GRAD_CHECKPOINT="${GRAD_CHECKPOINT-full}"
 # works at any cp, including cp=1.
 export CP_SIZE="${CP_SIZE:-8}"
 export MAX_LENGTH="${MAX_LENGTH:-32768}"
-# Offload OFF — fit te+CP8 via EP + CP + activation checkpointing (and, if it OOMs,
-# MOLT_MOE_RESHARD_AFTER_FWD=1, which reshards MoE experts after the forward). Adam
-# offload (OFFLOAD_OPTIMIZER) is available but off by default; full FSDP param
-# offload (FSDP_CPU_OFFLOAD) hits Qwen3.5-MoE upstream device-mismatch bugs.
-export OFFLOAD_OPTIMIZER="${OFFLOAD_OPTIMIZER:-0}"
+# Full AutoModel FSDP2 CPU offload is available but off by default. Fit te+CP8 via
+# EP + CP + activation checkpointing first; enable it when additional headroom is needed.
 export FSDP_CPU_OFFLOAD="${FSDP_CPU_OFFLOAD:-0}"
 export TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-64}"
 export ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-8}"
@@ -459,17 +456,8 @@ if [ "${PARTIAL_ROLLOUT:-0}" = "1" ]; then
   RL_ARGS+=(--train.partial_rollout_enable)
 fi
 
-# CPU-offload level (--fsdp.offload). Resolved from the env knobs:
-#   OFFLOAD_OPTIMIZER=1 -> 'optimizer': run the AdamW step on CPU (fp32 master + Adam
-#     moments off-GPU during the step, shrinking the optimizer-step peak); params stay on
-#     GPU for the forward, so it's safe on Qwen3.6 MoE. AdamW only.
-#   FSDP_CPU_OFFLOAD=1  -> 'full': FSDP2 CPUOffloadPolicy also streams the params to CPU
-#     (~15GB/rank for 30B MoE in bf16, but breaks Qwen3.6 MoE and slows the forward).
-# They are a nested progression, so at most one level applies (optimizer takes priority).
-FSDP_OFFLOAD=none
-[ "${FSDP_CPU_OFFLOAD:-0}" = "1" ] && FSDP_OFFLOAD=full
-[ "${OFFLOAD_OPTIMIZER:-0}" = "1" ] && FSDP_OFFLOAD=optimizer
-[ "$FSDP_OFFLOAD" != "none" ] && RL_ARGS+=(--fsdp.offload "$FSDP_OFFLOAD")
+# Delegate full parameter, gradient, and optimizer-state offload to AutoModel FSDP2.
+[ "${FSDP_CPU_OFFLOAD:-0}" = "1" ] && RL_ARGS+=(--fsdp.offload full)
 
 # Sequence parallelism within the TP region is OFF by default (matches AutoModel's
 # omni / Qwen3.5-MoE recipes; SP gives norm weights a _NormPartial placement that

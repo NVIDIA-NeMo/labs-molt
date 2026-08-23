@@ -49,12 +49,9 @@ export GRAD_CHECKPOINT="${GRAD_CHECKPOINT-full}"
 # ROLLOUT_BATCH_SIZE * N_SAMPLES is 64, which balance_experiences rejects outright.
 export CP_SIZE="${CP_SIZE:-16}"
 export MAX_LENGTH="${MAX_LENGTH:-16384}"
-# Adam optimizer offload (fp32 master + Adam moments on CPU during the step).
-# Essential to fit the ~750B optimizer state off-GPU without PP.
-export OFFLOAD_OPTIMIZER="${OFFLOAD_OPTIMIZER:-1}"
-# FSDP param CPU offload OFF (full param offload hits upstream device-mismatch bugs
-# on these custom-MoE models). Control GPU memory via EP + adam-offload + AC.
-export FSDP_CPU_OFFLOAD="${FSDP_CPU_OFFLOAD:-0}"
+# Full AutoModel FSDP2 offload is essential to fit parameters and optimizer state
+# off-GPU without PP.
+export FSDP_CPU_OFFLOAD="${FSDP_CPU_OFFLOAD:-1}"
 
 # GLM-5.2 is a TEXT model (GlmMoeDsaForCausalLM, no vision) — no visual encoder.
 export FREEZE_VISUAL_ENCODER="${FREEZE_VISUAL_ENCODER:-0}"
@@ -450,13 +447,8 @@ if [ "${PARTIAL_ROLLOUT:-0}" = "1" ]; then
   RL_ARGS+=(--train.partial_rollout_enable)
 fi
 
-# CPU-offload level (--fsdp.offload), from the env knobs (optimizer takes priority):
-#   OFFLOAD_OPTIMIZER=1 -> 'optimizer': AdamW step on CPU, params stay on GPU (MoE-safe).
-#   FSDP_CPU_OFFLOAD=1  -> 'full': also stream params to CPU (~15GB/rank, but breaks MoE).
-FSDP_OFFLOAD=none
-[ "${FSDP_CPU_OFFLOAD:-0}" = "1" ] && FSDP_OFFLOAD=full
-[ "${OFFLOAD_OPTIMIZER:-0}" = "1" ] && FSDP_OFFLOAD=optimizer
-[ "$FSDP_OFFLOAD" != "none" ] && RL_ARGS+=(--fsdp.offload "$FSDP_OFFLOAD")
+# Delegate full parameter, gradient, and optimizer-state offload to AutoModel FSDP2.
+[ "${FSDP_CPU_OFFLOAD:-0}" = "1" ] && RL_ARGS+=(--fsdp.offload full)
 
 # Sequence parallelism within the TP region is OFF by default (matches AutoModel's
 # omni / Qwen3.5-MoE recipes; SP gives norm weights a _NormPartial placement that

@@ -44,7 +44,7 @@ def add_fsdp_args(parser) -> None:
         help="CPU-offload mode. "
         "'none': everything on GPU. "
         "'full': use AutoModel's FSDP2 CPUOffloadPolicy to stream parameters and optimizer "
-        "state to CPU (maximal saving, slower forward); custom MoE models remain unsupported.",
+        "state to CPU (maximal saving, slower forward).",
     )
     parser.add_argument(
         "--fsdp.param_dtype",

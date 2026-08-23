@@ -55,11 +55,11 @@ this SFT execution integration.
 
 There is no legacy SFT fallback. Padded text and VLM input, text THD packing,
 VLM THD packing on supported native models, TP, CP, EP, and sequence
-parallelism all stay on the same Engine path. Unsupported combinations fail
-before the first training batch:
+parallelism all stay on the same Engine path. Full CPU offload, including for
+native custom-MoE models, is delegated to AutoModel's FSDP2
+`CPUOffloadPolicy`; the old optimizer-only implementation has been removed.
+Unsupported combinations fail before the first training batch:
 
-- custom MoE full CPU offload; dense full offload uses AutoModel's FSDP2
-  `CPUOffloadPolicy`. The old optimizer-only implementation was removed;
 - PP, because Molt's shared strategy does not yet construct an `AutoPipeline`;
 - THD packing on a Hugging Face fallback model; Molt's old FA2 packing adapter
   has been removed and model construction fails before loading that path;
@@ -92,9 +92,9 @@ checkpoints. Molt therefore uses the same critic path with TP, CP, EP, and seque
 parallelism; PP remains unsupported. Molt does not expose critic PEFT,
 quantization, FP8, or QAT options, so those AutoModel capabilities are not Molt
 feature claims. Dense critic full CPU offload uses AutoModel; custom-MoE full
-offload and Hugging Face fallback THD packing fail explicitly. The old
-optimizer-only offload implementation was removed. The existing Transformers scheduler remains
-Molt-owned for the same `step()` versus `step(1)` protocol reason as SFT.
+offload uses the same path. Hugging Face fallback THD packing still fails
+explicitly. The existing Transformers scheduler remains Molt-owned for the
+same `step()` versus `step(1)` protocol reason as SFT.
 
 ## RL policy actor
 
@@ -143,7 +143,7 @@ debugging.
 
 | Boundary | Current behavior | Missing contract |
 | --- | --- | --- |
-| CPU offload | Dense full offload uses AutoModel's `CPUOffloadPolicy`; custom MoE full offload fails fast; optimizer-only mode was removed | AutoModel does not provide Molt's former MoE-safe optimizer-only mutation contract |
+| Full CPU offload | Delegated to AutoModel's `CPUOffloadPolicy` for dense and native custom-MoE models | Molt retains only policy injection and CUDA staging for vLLM refit |
 | Transformers scheduler | Supported through one explicit Molt `step()` after `optim_step()` | Engine schedulers use incremental `step(1)`, while HF `LambdaLR` interprets the argument as absolute epoch 1 |
 | Pipeline parallelism | Molt CLI fails fast at `pp_size > 1` | Engine and R3 now support per-inner-microbatch contexts, but `FsdpStrategy` still constructs an eager model rather than `AutoPipeline` |
 | Dynamic VLM replay batching | Functionally supported with one VLM Datum per Engine forward | Engine currently has one fixed outer microbatch size, so preserving a variable replay-buffer sample group as one cross-sample VLM pack needs a variable grouping contract; fixed-size replay batches pack samples together |
@@ -153,7 +153,7 @@ debugging.
 
 ## Dependency and validation status
 
-Source and Docker installs pin AutoModel revision `fbf186640`, which contains
+Source and Docker installs pin AutoModel revision `0d7037876`, which contains
 the current Datum Engine, processor-ready recursive Datum pinning, padded and
 packed VLM Datum collation with arbitrary layout-aware loss side channels,
 pipeline batch contexts, model-scoped routing replay across local pipeline
@@ -184,8 +184,10 @@ VLM routing-replay side channels and their `-1` alignment sentinel.
 
 A two-GPU dense FSDP2 smoke passed AutoModel Engine backward, CPU-resident
 gradient clipping and optimizer mutation under `CPUOffloadPolicy`, followed by
-Molt's CUDA-staged DTensor gather for vLLM refit.
+Molt's CUDA-staged DTensor gather for vLLM refit. A two-GPU custom Qwen3.5-MoE
+HybridEP smoke passed the same Engine path with all expert DTensor shards
+resident on CPU between model calls.
 
-AutoModel revision `fbf186640` is available on the remote integration branch,
+AutoModel revision `0d7037876` is available on the remote integration branch,
 so the source pin is reproducible outside this checkout. The PyPI release floor
 remains a packaging boundary until a release containing these APIs is cut.

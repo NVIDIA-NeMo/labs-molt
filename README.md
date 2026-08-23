@@ -121,7 +121,7 @@ RL on vLLM. Read every line that touches your gradients, in plain PyTorch.
 | Runtime | Ray placement, async rollout queues, vLLM engines, partial rollout sync |
 | Model scale | AutoModel + FSDP2 with TP / EP / CP, MoE-native — e.g. DeepSeek-V3 at `--fsdp.ep_size 256` |
 | Model backend | **NVIDIA AutoModel is the primary path** — native CP / EP / TP, custom MoE+EP parallelizer, TE fused attention; everything model-side aligns with AutoModel's own recipes. The HF transformers path is a **non-preferred fallback** for padded text models only; packing, MoE auxiliary loss, CP, EP, and TP require a native AutoModel implementation. |
-| Optimizer | `adam` (default), with CPU offload for the largest actors (`--fsdp.offload optimizer`). `muon` (Newton–Schulz via Dion: Muon for 2D weights and grouped MoE experts, AdamW for embeddings / head / norms) is **experimental** — runs distributed (FSDP / EP) but has shown no consistent win over `adam` yet, which stays the recommended default |
+| Optimizer | `adam` (default), with AutoModel full CPU offload for the largest actors (`--fsdp.offload full`). `muon` (Newton–Schulz via Dion: Muon for 2D weights and grouped MoE experts, AdamW for embeddings / head / norms) is **experimental** — runs distributed (FSDP / EP) but has shown no consistent win over `adam` yet, which stays the recommended default |
 
 ### Agents & rewards
 
@@ -506,7 +506,7 @@ Molt targets AutoModel custom models with FSDP2:
 | **Actor** | Tensor parallel | `--fsdp.tp_size 2` |
 | | Expert parallel | `--fsdp.ep_size 8` (e.g. `256` for DeepSeek-V3-class MoE) |
 | | Context parallel | `--fsdp.cp_size 8` (32K+ sequences), incl. VLMs and MoE routing replay |
-| | Optimizer CPU offload | `--fsdp.offload optimizer` (frees VRAM for the largest actors) |
+| | Full CPU offload | `--fsdp.offload full` (parameters and optimizer state use host memory) |
 | **vLLM rollout** | Tensor parallel | `--vllm.tensor_parallel_size 2` |
 | | Expert parallel | `--vllm.enable_expert_parallel` (EP = TP × DP) |
 | | Data parallel | `--vllm.data_parallel_size 4` (single-node mp; raises EP past TP — DeepSeek-V3-style TP8+DP4 → EP32) |

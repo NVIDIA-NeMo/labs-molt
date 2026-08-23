@@ -59,9 +59,10 @@ def test_automodel_full_cpu_offload_is_allowed_for_dense_model():
     assert isinstance(wrapped.model, _DeclaredTHDModel)
 
 
-def test_automodel_full_cpu_offload_fails_fast_for_custom_moe():
+def test_automodel_full_cpu_offload_is_allowed_for_custom_moe():
     model = _DeclaredTHDModel()
     model.config = SimpleNamespace(num_local_experts=8)
 
-    with pytest.raises(NotImplementedError, match="CPU parameter offload.*custom-MoE"):
-        BaseModel(model, distributed_config=SimpleNamespace(offload_policy=object()))
+    wrapped = BaseModel(model, distributed_config=SimpleNamespace(offload_policy=object()))
+
+    assert wrapped.model is model
