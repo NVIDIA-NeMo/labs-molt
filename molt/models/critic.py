@@ -25,7 +25,6 @@ one-wide is what turns that tensor into the per-token value directly.
 
 import torch
 import torch.nn as nn
-from nemo_automodel import PreFSDPHookResult
 
 from molt.trainer.fsdp.packing import unshard_dtensor
 
@@ -87,7 +86,7 @@ def _resolve_hidden_size(model) -> int:
     return int(getattr(emb, "embedding_dim", None) or emb.weight.shape[-1])
 
 
-def _install_value_head(model) -> PreFSDPHookResult:
+def _install_value_head(model) -> nn.Module:
     """Replace ``model``'s task head in place before AutoModel applies FSDP."""
 
     old_head = model.get_output_embeddings() if hasattr(model, "get_output_embeddings") else model.lm_head
@@ -109,7 +108,7 @@ def _install_value_head(model) -> PreFSDPHookResult:
         model.set_output_embeddings(value_head)
     else:
         model.lm_head = value_head
-    return PreFSDPHookResult(task_module=value_head)
+    return value_head
 
 
 class Critic(BaseModel):

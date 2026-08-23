@@ -7,7 +7,6 @@ from types import SimpleNamespace
 import pytest
 import torch
 import torch.nn as nn
-from nemo_automodel import PreFSDPHookResult
 from nemo_automodel.components.datasets.datum import LossInputLayout, collate_vlm_datums
 from nemo_automodel.engine import Engine, LossFnOutputBatch, PerTokenOutput, collate_prebatched
 
@@ -279,8 +278,7 @@ def test_install_value_head_replaces_task_head_before_fsdp():
 
     result = _install_value_head(model)
 
-    assert isinstance(result, PreFSDPHookResult)
-    assert result.task_module is model.lm_head
+    assert result is model.lm_head
     assert isinstance(model.lm_head, _ValueHead)
     assert model.lm_head.weight.shape == (1, 4)
     assert model.lm_head.weight.dtype == torch.float32
@@ -306,7 +304,7 @@ def test_install_value_head_follows_meta_output_head_device():
 
     result = _install_value_head(model)
 
-    assert result.task_module is model.lm_head
+    assert result is model.lm_head
     assert model.lm_head.weight.device.type == "meta"
 
 

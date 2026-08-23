@@ -85,10 +85,11 @@ epoch-level metrics. The value projection is installed through AutoModel's
 `pre_fsdp_hook`, before parameter discovery and FSDP wrap; the old
 replicated-head broadcast and manual DP gradient all-reduce have been deleted.
 
-The hook returns AutoModel's managed-task-module declaration. AutoModel keeps the
-value head replicated across TP and EP, gives it an fp32 FSDP unit over DP and CP,
-excludes it from PEFT and lower-precision transforms, and includes it in training
-checkpoints. Molt therefore uses the same critic path with TP, CP, EP, and sequence
+The hook returns the managed task module directly. AutoModel excludes the value
+head from TP and expert-specific sharding, synchronizes its TP replicas at init,
+and gives it an fp32 FSDP unit over DP and CP. It also excludes the head from PEFT
+and lower-precision transforms and includes it in training checkpoints. Molt
+therefore uses the same critic path with TP, CP, EP, and sequence
 parallelism; PP remains unsupported. Molt does not expose critic PEFT,
 quantization, FP8, or QAT options, so those AutoModel capabilities are not Molt
 feature claims. Dense critic full CPU offload uses AutoModel; custom-MoE full
@@ -146,18 +147,19 @@ debugging.
 | Full CPU offload | Delegated to AutoModel's `CPUOffloadPolicy` for dense and native custom-MoE models | Molt retains only policy injection and CUDA staging for vLLM refit |
 | Transformers scheduler | Supported through one explicit Molt `step()` after `optim_step()` | Engine schedulers use incremental `step(1)`, while HF `LambdaLR` interprets the argument as absolute epoch 1 |
 | Pipeline parallelism | Molt CLI fails fast at `pp_size > 1` | Engine and R3 now support per-inner-microbatch contexts, but `FsdpStrategy` still constructs an eager model rather than `AutoPipeline` |
-| Dynamic VLM replay batching | Functionally supported with one VLM Datum per Engine forward | Engine currently has one fixed outer microbatch size, so preserving a variable replay-buffer sample group as one cross-sample VLM pack needs a variable grouping contract; fixed-size replay batches pack samples together |
+| Dynamic VLM replay batching | Functionally supported with one VLM Datum per Engine forward | Molt does not yet pass the replay buffer's variable groups through Engine's explicit `microbatch_sizes`; fixed-size replay batches still pack samples together |
 | HF fallback packing | Model construction fails fast | The old FlashAttention varlen packing implementation was deleted; packed training requires AutoModel's native THD Datum contract |
 | HF fallback MoE | Model construction always fails fast, independent of auxiliary-loss settings or EP size | All MoE training requires an AutoModel-native implementation; the old scalar auxiliary-loss branch was deleted |
 | Multi-axis mRoPE + packed THD CP | Intentionally unsupported and fail-fast | The agreed scope excludes this combination; AutoModel also rejects 3-D packed position IDs when CP/PP reorders or splits the token stream |
 
 ## Dependency and validation status
 
-Source and Docker installs pin AutoModel revision `0d7037876`, which contains
+Source and Docker installs pin AutoModel revision `1e8e58f1c`, which contains
 the current Datum Engine, processor-ready recursive Datum pinning, padded and
 packed VLM Datum collation with arbitrary layout-aware loss side channels,
-pipeline batch contexts, model-scoped routing replay across local pipeline
-parts, and managed pre-FSDP task modules used by the critic value head.
+explicit variable microbatch groups, pipeline batch contexts, model-scoped
+routing replay across local pipeline parts, and managed pre-FSDP task modules
+used by the critic value head.
 Molt's PyPI build still replaces source pins with `nemo-automodel>=0.5.0`; no
 released version floor currently guarantees this API.
 
@@ -188,6 +190,6 @@ Molt's CUDA-staged DTensor gather for vLLM refit. A two-GPU custom Qwen3.5-MoE
 HybridEP smoke passed the same Engine path with all expert DTensor shards
 resident on CPU between model calls.
 
-AutoModel revision `0d7037876` is available on the remote integration branch,
+AutoModel revision `1e8e58f1c` is available on the remote integration branch,
 so the source pin is reproducible outside this checkout. The PyPI release floor
 remains a packaging boundary until a release containing these APIs is cut.
