@@ -6,7 +6,7 @@ einops
 grpcio>=1.74.0
 huggingface_hub>=1.0.0
 jsonlines
-nemo-automodel @ git+https://github.com/NVIDIA-NeMo/Automodel.git@faa5613ed2070e1ded82401fb260ac66a043202a
+nemo-automodel @ git+https://github.com/NVIDIA-NeMo/Automodel.git@06eafefc1ccf306692a6b3c1a30ac440bbb321f0
 optree>=0.15.0
 packaging
 peft

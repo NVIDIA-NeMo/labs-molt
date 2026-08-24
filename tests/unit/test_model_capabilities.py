@@ -55,16 +55,6 @@ def test_hf_fallback_moe_model_fails_fast_without_aux_loss_or_ep():
         BaseModel(model)
 
 
-def test_automodel_full_cpu_offload_is_allowed_for_dense_model():
-    wrapped = BaseModel(
-        _DeclaredTHDModel(),
-        distributed_config=SimpleNamespace(offload_policy=object()),
-    )
-
-    assert isinstance(wrapped.model, _DeclaredTHDModel)
-    assert wrapped.packing_layout is None
-
-
 def test_preinstantiated_native_model_records_thd_packing_layout():
     wrapped = BaseModel(_DeclaredTHDModel(), packing_samples=True)
 
@@ -141,15 +131,6 @@ def test_hf_indexed_mask_packing_rejects_non_fa2(monkeypatch):
 
     with pytest.raises(ValueError, match="flash_attention_2"):
         BaseModel("dense-model", packing_samples=True, attn_implementation="flash_attention_3")
-
-
-def test_automodel_full_cpu_offload_is_allowed_for_custom_moe():
-    model = _DeclaredTHDModel()
-    model.config = SimpleNamespace(num_local_experts=8)
-
-    wrapped = BaseModel(model, distributed_config=SimpleNamespace(offload_policy=object()))
-
-    assert wrapped.model is model
 
 
 def test_automodel_native_moe_uses_aux_loss_autograd_coefficient_without_scalar_tracking():

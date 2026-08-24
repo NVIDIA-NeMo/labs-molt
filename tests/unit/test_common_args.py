@@ -18,11 +18,11 @@ def test_fsdp_args_reject_fp16(capsys):
     assert "invalid choice: 'fp16' (choose from 'bf16')" in capsys.readouterr().err
 
 
-def test_fsdp_args_reject_removed_optimizer_only_offload(capsys):
+def test_fsdp_args_reject_removed_full_offload(capsys):
     parser = argparse.ArgumentParser()
     add_fsdp_args(parser)
 
     with pytest.raises(SystemExit):
-        parser.parse_args(["--fsdp.offload", "optimizer"])
+        parser.parse_args(["--fsdp.offload", "full"])
 
-    assert "invalid choice: 'optimizer'" in capsys.readouterr().err
+    assert "invalid choice: 'full'" in capsys.readouterr().err

@@ -113,8 +113,9 @@ Other retained boundaries are:
 - Hugging Face fallback MoE is unsupported; MoE training requires an
   AutoModel-native implementation;
 - Hugging Face indexed-mask packing requires FA2 and CP1/PP1/EP1;
-- a single-rank full-CPU-offload configuration remains unsupported until
-  AutoModel applies a size-one FSDP wrapper.
+- full parameter CPU offload is unsupported; ``--fsdp.offload optimizer`` runs
+  the AdamW step on CPU through Molt's own ``CpuOptimizerOffloader``, which
+  wraps the optimizer with the ``step()``/``zero_grad()`` surface Engine drives.
 
 ## Strategy and checkpoints
 
@@ -136,4 +137,4 @@ microbatches, THD and indexed-mask round trips, routing replay, SFT training and
 evaluation, and the Engine backward/step boundary. Distributed validation must
 continue to cover DP-global token normalization, TP vocab scoring, CP and R3
 activation-checkpoint replay, HybridEP/custom-MoE gradients, packed VLM, and
-full CPU offload.
+CPU optimizer offload.

@@ -385,7 +385,7 @@ if [ "$VLLM_ENFORCE_EAGER" = "1" ]; then
 fi
 
 # Raise MAX_LENGTH under the colocated teacher by delegating full offload to AutoModel FSDP2.
-[ "${FSDP_CPU_OFFLOAD:-0}" = "1" ] && RL_ARGS+=(--fsdp.offload full)
+[ "${FSDP_CPU_OFFLOAD:-0}" = "1" ] && RL_ARGS+=(--fsdp.offload optimizer)
 
 if [ "$VLLM_ENABLE_EXPERT_PARALLEL" = "1" ]; then
   RL_ARGS+=(--vllm.enable_expert_parallel)

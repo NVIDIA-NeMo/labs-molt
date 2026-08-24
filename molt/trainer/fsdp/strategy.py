@@ -21,7 +21,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import transformers
-from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy
+from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.tensor import DTensor
 from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers.optimization import get_scheduler
@@ -71,9 +71,9 @@ class FsdpStrategy:
         self.pp_size = getattr(fsdp, "pp_size", 1)
         self.param_dtype = getattr(fsdp, "param_dtype", "bf16")
         offload = getattr(fsdp, "offload", "none")
-        if offload not in {"none", "full"}:
-            raise ValueError(f"Unsupported --fsdp.offload mode: {offload!r}; choose none or full")
-        self.cpu_offload = offload == "full"
+        if offload not in {"none", "optimizer"}:
+            raise ValueError(f"Unsupported --fsdp.offload mode: {offload!r}; choose none or optimizer")
+        self.offload_optimizer = offload == "optimizer"
         # SP off by default (opt in via --fsdp.sequence_parallel); avoids the
         # _NormPartial 2D TP+FSDP weight-load hang on the HF-fallback path.
         self.sequence_parallel = bool(getattr(fsdp, "sequence_parallel", False))
@@ -143,8 +143,7 @@ class FsdpStrategy:
             torch.cuda.set_device(local_rank)
 
         if not dist.is_initialized():
-            backend = "cuda:nccl,cpu:gloo" if self.cpu_offload else "nccl"
-            dist.init_process_group(backend=backend, timeout=timeout)
+            dist.init_process_group(backend="nccl", timeout=timeout)
 
         self.world_size = dist.get_world_size()
         if self.pp_size > 1:
@@ -194,7 +193,6 @@ class FsdpStrategy:
         self.distributed_config = FSDP2Config(
             sequence_parallel=self.sequence_parallel,
             mp_policy=mp_policy,
-            offload_policy=CPUOffloadPolicy(pin_memory=False) if self.cpu_offload else None,
             activation_checkpointing=activation_checkpointing,
             # Engine selects the runtime accumulation-sync policy for each trainer.
             # Keep the construction default false so non-Engine forwards do not inherit
@@ -315,10 +313,24 @@ class FsdpStrategy:
         from nemo_automodel.components.distributed.mesh import MeshContext
         from nemo_automodel.engine import Engine
 
+        # Molt owns CPU optimizer offload: the offloader wraps the AdamW with the
+        # step()/zero_grad() surface Engine drives, while checkpointing and the LR
+        # scheduler keep using the wrapped optimizer itself.
+        engine_optimizer = optimizer
+        if self.offload_optimizer:
+            if kind != "adam":
+                raise ValueError(
+                    "--fsdp.offload optimizer supports AdamW only; Muon's Newton-Schulz "
+                    "iterations are impractical on CPU. Use --optim adam, or --fsdp.offload none."
+                )
+            from molt.trainer.fsdp.optimizer_offload import CpuOptimizerOffloader
+
+            engine_optimizer = CpuOptimizerOffloader(optimizer)
+
         max_grad_norm = cfg.get("max_norm", self.max_norm)
         engine = Engine(
             train_model,
-            optimizer=optimizer,
+            optimizer=engine_optimizer,
             lr_scheduler=scheduler,
             mesh_context=MeshContext.from_meshes(self.device_mesh, self.moe_mesh),
             gradient_accumulation_steps=self.accumulated_gradient,
@@ -330,6 +342,14 @@ class FsdpStrategy:
         else:
             model = engine
         return model, optimizer, scheduler
+
+    def offload_moments_to_cpu(self, optimizer) -> None:
+        """Page the Adam moments back to CPU after a checkpoint resume (DCP restores
+        them onto the model param's GPU device). No-op unless --fsdp.offload optimizer."""
+        if self.offload_optimizer:
+            from molt.trainer.fsdp.optimizer_offload import offload_moments_to_cpu
+
+            offload_moments_to_cpu(optimizer)
 
     def debug_grad_stats(self, model: nn.Module, optim_name: str) -> None:
         debug = os.environ.get("MOLT_FSDP_DEBUG_GRADS", "")

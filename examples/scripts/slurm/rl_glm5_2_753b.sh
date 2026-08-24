@@ -448,7 +448,7 @@ if [ "${PARTIAL_ROLLOUT:-0}" = "1" ]; then
 fi
 
 # Delegate full parameter, gradient, and optimizer-state offload to AutoModel FSDP2.
-[ "${FSDP_CPU_OFFLOAD:-0}" = "1" ] && RL_ARGS+=(--fsdp.offload full)
+[ "${FSDP_CPU_OFFLOAD:-0}" = "1" ] && RL_ARGS+=(--fsdp.offload optimizer)
 
 # Sequence parallelism within the TP region is OFF by default (matches AutoModel's
 # omni / Qwen3.5-MoE recipes; SP gives norm weights a _NormPartial placement that

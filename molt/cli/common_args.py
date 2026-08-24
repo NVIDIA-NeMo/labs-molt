@@ -40,11 +40,13 @@ def add_fsdp_args(parser) -> None:
         "--fsdp.offload",
         type=str,
         default="none",
-        choices=["none", "full"],
+        choices=["none", "optimizer"],
         help="CPU-offload mode. "
         "'none': everything on GPU. "
-        "'full': use AutoModel's FSDP2 CPUOffloadPolicy to stream parameters and optimizer "
-        "state to CPU (maximal saving, slower forward).",
+        "'optimizer': run the AdamW step on CPU so the fp32 master and Adam moments never "
+        "occupy GPU during the step (shrinks the optimizer-step peak, the binding one at "
+        "long context); params stay on GPU for the forward, so it is MoE-safe; AdamW only; "
+        "numerically equivalent to a GPU step.",
     )
     parser.add_argument(
         "--fsdp.param_dtype",

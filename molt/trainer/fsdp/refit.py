@@ -42,14 +42,7 @@ def gather_full_param(param: torch.Tensor, dtype: Optional[torch.dtype] = None) 
     weight refit (one-shot per training step). For very large models the async RL
     path uses per-tensor streaming with a ping-pong buffer to bound peak memory.
     """
-    if isinstance(param, DTensor):
-        # FSDP2 CPUOffloadPolicy leaves the local shard on CPU between model
-        # calls, so stage it back to CUDA before the NCCL refit all-gather.
-        if param.to_local().device.type == "cpu":
-            param = param.cuda(non_blocking=True)
-        full = param.full_tensor()
-    else:
-        full = param.data
+    full = param.full_tensor() if isinstance(param, DTensor) else param.data
     if dtype is not None and full.is_floating_point():
         full = full.to(dtype=dtype)
     return full, full.shape
