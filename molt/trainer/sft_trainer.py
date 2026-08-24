@@ -189,7 +189,7 @@ class SFTTrainer:
                 completed_steps += 1
                 global_step = completed_steps
                 client_states = {"consumed_samples": global_step * args.train.batch_size}
-                self.save_logs_and_checkpoints(args, global_step, step_bar, logs_dict, client_states)
+                self.save_logs_and_checkpoints(args, global_step, logs_dict, client_states)
 
             # Preserve the configured optimizer-window boundary across epochs.
             if accum_window:
@@ -206,7 +206,7 @@ class SFTTrainer:
             self._tensorboard.close()
 
     # logs/checkpoints/evaluation
-    def save_logs_and_checkpoints(self, args, global_step, step_bar, logs_dict=None, client_states=None):
+    def save_logs_and_checkpoints(self, args, global_step, logs_dict=None, client_states=None):
         logs_dict = logs_dict or {}
         client_states = client_states or {}
         if global_step % args.logger.logging_steps == 0:

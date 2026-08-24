@@ -59,20 +59,6 @@ class _ValueHead(nn.Linear):
         return super().forward(hidden_states.to(self.weight.dtype))
 
 
-def _resolve_hidden_size(model) -> int:
-    """Hidden size for the value head, read off the built model, not its config
-    (VLMs nest the language-model dims in arch-specific places). The ``lm_head``
-    being replaced gives the exact post-norm hidden the head consumes; fall back
-    to the token-embedding dim for models exposing no output head."""
-    head = model.get_output_embeddings() if hasattr(model, "get_output_embeddings") else None
-    if head is not None:
-        dim = getattr(head, "in_features", None) or head.weight.shape[-1]
-        if dim:
-            return int(dim)
-    emb = model.get_input_embeddings()
-    return int(getattr(emb, "embedding_dim", None) or emb.weight.shape[-1])
-
-
 def _install_value_head(model) -> nn.Module:
     """Replace ``model``'s task head in place before AutoModel applies FSDP."""
 
@@ -80,8 +66,19 @@ def _install_value_head(model) -> nn.Module:
     source_weight = getattr(old_head, "weight", None)
     if source_weight is None:
         source_weight = model.get_input_embeddings().weight
+    # Hidden size comes off the built model, not its config (VLMs nest the
+    # language-model dims in arch-specific places): the lm_head being replaced
+    # gives the exact post-norm hidden the value head consumes; fall back to
+    # the token-embedding dim for models exposing no output head.
+    if hasattr(old_head, "in_features") and old_head.in_features:
+        hidden_size = int(old_head.in_features)
+    elif getattr(old_head, "weight", None) is not None:
+        hidden_size = int(old_head.weight.shape[-1])
+    else:
+        emb = model.get_input_embeddings()
+        hidden_size = int(getattr(emb, "embedding_dim", None) or emb.weight.shape[-1])
     value_head = _ValueHead(
-        _resolve_hidden_size(model),
+        hidden_size,
         initializer_range=getattr(model.config, "initializer_range", 0.02),
         device=source_weight.device,
     )

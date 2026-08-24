@@ -333,17 +333,14 @@ def load_automodel(
     # Match by isinstance(Gate), not name: a name match would also catch the
     # gated-MLP `gate_proj`, which is not a router.
     if freeze_moe_router:
-        try:
-            from nemo_automodel.components.moe.layers import Gate
-        except ImportError:
-            Gate = None
+        from nemo_automodel.components.moe.layers import Gate
+
         n_frozen = 0
-        if Gate is not None:
-            for module in model.modules():
-                if isinstance(module, Gate):
-                    for param in module.parameters(recurse=False):
-                        param.requires_grad = False
-                        n_frozen += 1
+        for module in model.modules():
+            if isinstance(module, Gate):
+                for param in module.parameters(recurse=False):
+                    param.requires_grad = False
+                    n_frozen += 1
         if is_rank_0:
             print(f"[MoE] freeze_moe_router=True: froze {n_frozen} router param tensors")
 

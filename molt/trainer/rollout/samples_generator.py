@@ -27,7 +27,7 @@ import torch
 from tqdm import tqdm
 from vllm import SamplingParams
 
-from molt.agents.base import _first_scalar as _to_scalar  # dedupe: same tensor/list/scalar normalizer
+from molt.agents.base import first_scalar
 from molt.trainer.algorithm.experience import Experience, get_model_parallel_size
 from molt.utils.logging_utils import init_logger
 
@@ -515,8 +515,8 @@ class SamplesGenerator:
                 )
                 return None, "vlm_truncation"
 
-        reward_val = _to_scalar(response.reward)
-        score_val = _to_scalar(response.scores)
+        reward_val = first_scalar(response.reward)
+        score_val = first_scalar(response.scores)
 
         sequences = torch.tensor(trajectory_tokens, dtype=torch.long)
         attention_mask = torch.ones(len(trajectory_tokens), dtype=torch.long)
@@ -569,7 +569,7 @@ class SamplesGenerator:
         # Convert extra logs to tensors for downstream consumers. Skip non-numeric values (e.g. string
         # task ids) — `torch.tensor([str])` raises "too many dimensions 'str'".
         for key, value in (response.extra_logs or {}).items():
-            value = _to_scalar(value)
+            value = first_scalar(value)
             if isinstance(value, (int, float, bool)):
                 info[key] = torch.tensor([value])
 

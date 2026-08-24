@@ -147,7 +147,7 @@ def test_sft_matches_one_full_window_update():
     trainer, actor, raw_model, _, scheduler, strategy = _trainer(batches)
     initial = raw_model.state_dict()
     logged = []
-    trainer.save_logs_and_checkpoints = lambda args, step, bar, logs=None, states=None: logged.append(
+    trainer.save_logs_and_checkpoints = lambda args, step, logs=None, states=None: logged.append(
         (step, dict(logs), dict(states))
     )
 

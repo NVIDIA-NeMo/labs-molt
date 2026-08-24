@@ -111,21 +111,18 @@ def masked_mean(tensor: torch.Tensor, mask: Optional[torch.Tensor], dim: int = N
     return valid.sum(dim=dim) / denom
 
 
-def _iter_nemo_moe_gates(model: nn.Module):
-    for module in model.modules():
-        cls = type(module)
-        if (
-            cls.__name__ == "Gate"
-            and cls.__module__.startswith("nemo_automodel.components.moe")
-            and hasattr(module, "aux_loss_coeff")
-        ):
-            yield module
-
-
 def configure_nemo_moe_aux_loss(model: nn.Module, aux_loss_coef: float) -> bool:
     """Use NeMo's MoE aux-loss autograd path with Molt's CLI coefficient."""
     coef = float(aux_loss_coef or 0.0)
-    gates = list(_iter_nemo_moe_gates(model))
+    gates = [
+        module
+        for module in model.modules()
+        if (
+            type(module).__name__ == "Gate"
+            and type(module).__module__.startswith("nemo_automodel.components.moe")
+            and hasattr(module, "aux_loss_coeff")
+        )
+    ]
     if not gates:
         return False
 

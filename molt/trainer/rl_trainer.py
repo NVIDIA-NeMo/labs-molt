@@ -24,7 +24,7 @@ import torch
 from ray.util.queue import Queue
 from tqdm import tqdm
 
-from molt.agents.base import _first_scalar
+from molt.agents.base import first_scalar
 from molt.datasets import PromptDataset
 from molt.datasets.utils import blending_datasets
 from molt.trainer.algorithm.experience import balance_experiences
@@ -202,9 +202,9 @@ def compute_eval_metrics(eval_dataloader, samples_list, n_samples_per_prompt):
         episode = (key, s.rollout_ids[0] if getattr(s, "rollout_ids", None) else id(s))
         if episode not in seen_episodes:
             seen_episodes.add(episode)
-            grouped[key]["rewards"].append(_first_scalar(s.rewards))
-        grouped[key]["lengths"].append(_first_scalar(s.response_length))
-        grouped[key]["truncated"].append(_first_scalar(s.truncated))
+            grouped[key]["rewards"].append(first_scalar(s.rewards))
+        grouped[key]["lengths"].append(first_scalar(s.response_length))
+        grouped[key]["truncated"].append(first_scalar(s.truncated))
 
     metrics = {}
     for key in group_order:
