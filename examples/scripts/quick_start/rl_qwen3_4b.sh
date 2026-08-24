@@ -17,10 +17,10 @@
 # Single-node quick-start: Qwen3-4B dense math RL.
 #
 # 8 GPUs on one machine, split 4 actor + 4 vLLM rollout. No slurm. Same
-# standard batch / context / dataset as slurm/qwen3_4b.sh — only the topology
+# standard batch / context / dataset as slurm/rl_qwen3_4b.sh — only the topology
 # differs (1 node here, 2 nodes there).
 #
-#   MODEL_PATH=/path/to/Qwen3-4B bash examples/scripts/quick_start/qwen3_4b.sh
+#   MODEL_PATH=/path/to/Qwen3-4B bash examples/scripts/quick_start/rl_qwen3_4b.sh
 
 set -euo pipefail
 
@@ -28,7 +28,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${MOLT_PATH:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
 MODEL_PATH="${MODEL_PATH:?Set MODEL_PATH to a Qwen3-4B checkpoint.}"
 
-# Same dataset path as slurm/qwen3_4b.sh — the proRL text-math RL split.
+# Same dataset path as slurm/rl_qwen3_4b.sh — the proRL text-math RL split.
 PROMPT_DATASET="${PROMPT_DATASET:-$REPO_ROOT/.tmp/proRL_text_rl/train}"
 EVAL_DATASET="${EVAL_DATASET:-$REPO_ROOT/.tmp/proRL_text_rl/eval}"
 test -e "$PROMPT_DATASET" || { echo "PROMPT_DATASET not found: $PROMPT_DATASET — prepare proRL_text_rl first."; exit 1; }
