@@ -57,7 +57,9 @@ def add_fsdp_args(parser) -> None:
         "--fsdp.attn_implementation",
         type=str,
         default="flash_attention_2",
-        help="Attention implementation (e.g., sdpa, eager, flex, te, flash_attention_2)",
+        choices=["eager", "sdpa", "flex", "te", "tilelang", "flash_attention_2", "flash_attention_3"],
+        help="Attention implementation. te/tilelang/sdpa/flex drive AutoModel custom kernels; "
+        "the rest apply to Hugging Face fallback models.",
     )
     parser.add_argument("--fsdp.packing_samples", action="store_true", default=False)
 

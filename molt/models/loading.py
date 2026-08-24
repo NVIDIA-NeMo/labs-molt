@@ -61,19 +61,9 @@ def _detect_moe_arch(pretrain_or_model) -> bool:
         return False
 
 
-_HF_ATTN_IMPLEMENTATIONS = {"eager", "sdpa", "flash_attention_2", "flash_attention_3", "te"}
 # "tilelang" drives AutoModel's DSA (DeepSeek-style sparse attention) TileLang
 # kernels — the indexer + sparse MLA path for glm_moe_dsa / deepseek_v3.2.
 _CUSTOM_ATTN_IMPLEMENTATIONS = {"te", "sdpa", "flex", "tilelang"}
-_ALL_ATTN_IMPLEMENTATIONS = _HF_ATTN_IMPLEMENTATIONS | _CUSTOM_ATTN_IMPLEMENTATIONS
-
-
-def _validate_attn_implementation(attn_implementation: str) -> None:
-    if attn_implementation not in _ALL_ATTN_IMPLEMENTATIONS:
-        choices = ", ".join(sorted(_ALL_ATTN_IMPLEMENTATIONS))
-        raise ValueError(f"Unsupported attention implementation {attn_implementation!r}; choose one of: {choices}")
-    if attn_implementation == "te" and find_spec("transformer_engine") is None:
-        raise ValueError("--fsdp.attn_implementation te requires transformer-engine to be installed.")
 
 
 def _resolve_custom_backend_attn(attn_implementation: str, packing_samples: bool) -> str:
@@ -96,7 +86,7 @@ def _resolve_custom_backend_attn(attn_implementation: str, packing_samples: bool
     return "sdpa"
 
 
-def _will_use_hf_model(pretrain_or_model, default: bool = True) -> bool:
+def _will_use_hf_model(pretrain_or_model) -> bool:
     """True if this model would load through the plain HF transformers path.
 
     The AutoModel (NVIDIA-NeMo/Automodel) backend is the preferred path (native
@@ -113,7 +103,7 @@ def _will_use_hf_model(pretrain_or_model, default: bool = True) -> bool:
         cfg = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True)
         return get_is_hf_model(cfg, force_hf=False)
     except Exception:
-        return default
+        return True
 
 
 def _reject_hf_fallback_features(*, is_hf_model: bool, is_moe: bool, moe_aux_loss_coef: float) -> None:
@@ -200,7 +190,6 @@ def load_automodel(
     """
     from molt.utils.utils import convert_to_torch_dtype
 
-    compute_dtype = convert_to_torch_dtype(param_dtype)
     is_moe = _detect_moe_arch(pretrain)
     ep_active = moe_mesh is not None
     use_hf_model = _will_use_hf_model(pretrain)
@@ -238,11 +227,13 @@ def load_automodel(
                 "use --fsdp.attn_implementation te with a THD-capable custom model or disable packing."
             )
 
-    _validate_attn_implementation(attn_implementation)
+    # The choice list is enforced by argparse; importability is not.
+    if attn_implementation == "te" and find_spec("transformer_engine") is None:
+        raise ValueError("--fsdp.attn_implementation te requires transformer-engine to be installed.")
     # fp32 master weights, bf16 fwd/bwd via FSDP2 MixedPrecisionPolicy
     # (NVIDIA-NeMo/Automodel PR #2379): a bf16 master rounds away small-LR
     # AdamW updates.
-    torch_dtype = compute_dtype if not use_fp32_master_weights else torch.float32
+    torch_dtype = torch.float32 if use_fp32_master_weights else convert_to_torch_dtype(param_dtype)
 
     if is_vlm:
         from nemo_automodel import NeMoAutoModelForImageTextToText as ModelCls
