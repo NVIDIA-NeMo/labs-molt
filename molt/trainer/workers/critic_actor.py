@@ -217,7 +217,7 @@ class CriticTrainer:
                 routed_experts=experience.routed_experts,
                 mm_train_inputs=experience.mm_train_inputs if self.critic.is_vlm else None,
             )
-            action_values = model_output.action_values
+            action_values = model_output["action_values"]
             loss, reported_loss, clip_frac = self.value_loss_fn(
                 action_values,
                 experience.values,
@@ -337,7 +337,7 @@ class CriticModelActor(BaseModelActor):
                 mm_train_inputs=experience.mm_train_inputs if self.critic.is_vlm else None,
             )
         self.critic.train()
-        return output.action_values.to("cpu")
+        return output["action_values"].to("cpu")
 
     def append(self, experience: Experience):
         # reload() pulls the sample's heavy tensors from the producing runner's

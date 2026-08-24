@@ -28,7 +28,7 @@ from typing import Optional
 import torch
 import torch.nn as nn
 
-from .base import BaseModel, _AttrDict
+from .base import BaseModel
 from .utils import unshard_dtensor
 
 
@@ -130,7 +130,7 @@ class Critic(BaseModel):
         routed_experts: Optional[torch.Tensor] = None,
         mm_train_inputs=None,
         **mm_inputs,
-    ) -> _AttrDict:
+    ) -> dict[str, torch.Tensor]:
         """Predict dense token values and, when requested, the RL action span.
 
         Args:
@@ -149,7 +149,7 @@ class Critic(BaseModel):
             if mm_inputs:
                 raise ValueError("pass either mm_train_inputs or expanded media tensors, not both")
             mm_inputs = mm_train_inputs
-        output, _targets, cp_forward, indices, batch, seqlen = self._forward_backbone(
+        logits, _targets, cp_forward, indices, batch, seqlen = self._forward_backbone(
             sequences,
             attention_mask,
             position_ids,
@@ -157,11 +157,11 @@ class Critic(BaseModel):
             mm_inputs,
             routed_experts=routed_experts,
         )
-        values = unshard_dtensor(output["logits"]).squeeze(-1).float()
+        values = unshard_dtensor(logits).squeeze(-1).float()
         values = self._restore_full_sequence(
             values, cp_forward=cp_forward, batch=batch, seqlen=seqlen, indices=indices
         )[:, :-1]
-        result = _AttrDict(token_values=values)
+        result = {"token_values": values}
         if action_mask is not None:
             result["action_values"] = values[:, -action_mask.shape[1] :] * action_mask.float()
         return result

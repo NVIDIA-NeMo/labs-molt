@@ -363,7 +363,7 @@ class PolicyTrainer:
                 routed_experts=experience.routed_experts,
                 mm_train_inputs=experience.mm_train_inputs if self.actor.is_vlm else None,
             )
-            action_log_probs = model_output.action_log_probs
+            action_log_probs = model_output["action_log_probs"]
             old_action_log_probs = experience.action_log_probs
             if old_action_log_probs is None:
                 old_action_log_probs = action_log_probs.detach()
@@ -798,7 +798,7 @@ class PolicyModelActor(BaseModelActor):
                 mm_train_inputs=experience.mm_train_inputs if self.actor.is_vlm else None,
             )
         self.actor.train()
-        return output.action_log_probs.to("cpu")
+        return output["action_log_probs"].to("cpu")
 
     def broadcast_to_vllm(self):
         self.trainer.broadcast_to_vllm()

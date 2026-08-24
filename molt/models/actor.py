@@ -21,7 +21,7 @@ from typing import Optional
 import torch
 from nemo_automodel.components.loss import token_entropy, token_log_probs
 
-from .base import BaseModel, _AttrDict
+from .base import BaseModel
 
 
 class Actor(BaseModel):
@@ -38,7 +38,7 @@ class Actor(BaseModel):
         routed_experts: Optional[torch.Tensor] = None,
         mm_train_inputs=None,
         **mm_inputs,
-    ) -> _AttrDict:
+    ) -> dict[str, torch.Tensor]:
         """Score every next token and, when requested, the RL action span.
 
         Args:
@@ -53,15 +53,15 @@ class Actor(BaseModel):
             mm_train_inputs: One processor result per VLM sample.
 
         Returns:
-            Model output augmented with dense ``log_probs`` of shape
-            ``[batch, sequence - 1]``, optional ``entropy`` of the same shape,
-            and optional ``action_log_probs`` matching ``action_mask``.
+            Dict with dense ``log_probs`` of shape ``[batch, sequence - 1]``,
+            optional ``entropy`` of the same shape, and optional
+            ``action_log_probs`` matching ``action_mask``.
         """
         if mm_train_inputs is not None:
             if mm_inputs:
                 raise ValueError("pass either mm_train_inputs or expanded media tensors, not both")
             mm_inputs = mm_train_inputs
-        output, targets, cp_forward, indices, batch, seqlen = self._forward_backbone(
+        logits, targets, cp_forward, indices, batch, seqlen = self._forward_backbone(
             sequences,
             attention_mask,
             position_ids,
@@ -69,20 +69,19 @@ class Actor(BaseModel):
             mm_inputs,
             routed_experts=routed_experts,
         )
-        logits = output["logits"]
         log_probs = token_log_probs(logits, targets, temperature=self.temperature)
         log_probs = self._restore_full_sequence(
             log_probs, cp_forward=cp_forward, batch=batch, seqlen=seqlen, indices=indices
         )
-        output["log_probs"] = log_probs[:, :-1]
+        result = {"log_probs": log_probs[:, :-1]}
 
         if return_entropy:
             entropy = token_entropy(logits, temperature=self.temperature)
             entropy = self._restore_full_sequence(
                 entropy, cp_forward=cp_forward, batch=batch, seqlen=seqlen, indices=indices
             )
-            output["entropy"] = entropy[:, :-1]
+            result["entropy"] = entropy[:, :-1]
 
         if action_mask is not None:
-            output["action_log_probs"] = output["log_probs"][:, -action_mask.shape[1] :] * action_mask.float()
-        return output
+            result["action_log_probs"] = result["log_probs"][:, -action_mask.shape[1] :] * action_mask.float()
+        return result

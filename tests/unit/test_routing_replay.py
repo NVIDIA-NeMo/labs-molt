@@ -204,7 +204,7 @@ def test_critic_forward_replays_routes_through_automodel_adapter():
         routed_experts=experience.routed_experts,
     )
 
-    assert torch.equal(output.action_values, torch.tensor([[10.0, 11.0]]))
+    assert torch.equal(output["action_values"], torch.tensor([[10.0, 11.0]]))
     assert wrapped._routing_replay_adapter.layer_ids == (1,)
     assert torch.equal(model.selected, torch.tensor([[2, 3], [4, 5], [6, 7]]))
 

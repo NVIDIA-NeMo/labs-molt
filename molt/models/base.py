@@ -29,34 +29,6 @@ from molt.models.loading import configure_loaded_model, load_automodel
 from molt.models.packing import pack_padded_batch, unpack_to_padded
 
 
-class _AttrDict(dict):
-    """Model output with both mapping and attribute access."""
-
-    def __getattr__(self, name):
-        try:
-            return self[name]
-        except KeyError as exc:
-            raise AttributeError(name) from exc
-
-    __setattr__ = dict.__setitem__
-
-
-def _normalize_output(output):
-    if torch.is_tensor(output):
-        return _AttrDict(logits=output)
-    if isinstance(output, Mapping) and not isinstance(output, _AttrDict):
-        return _AttrDict(output)
-    return output
-
-
-def _first_token_id(config, *names):
-    for name in names:
-        token_id = getattr(config, name, None)
-        if isinstance(token_id, int):
-            return token_id
-    return None
-
-
 class BaseModel(nn.Module):
     """Shared base for the RL model wrappers (``Actor`` and ``Critic``).
 
@@ -148,12 +120,17 @@ class BaseModel(nn.Module):
 
         if self.is_vlm:
             self._vlm_config = self.model.config
-            self._image_token_id = _first_token_id(
-                self._vlm_config, "image_token_id", "image_token_index", "img_context_token_id"
-            )
-            self._video_token_id = _first_token_id(
-                self._vlm_config, "video_token_id", "video_token_index", "video_context_token_id"
-            )
+            # VLM families name the media placeholder token ids differently; probe the aliases.
+            self._image_token_id = None
+            for name in ("image_token_id", "image_token_index", "img_context_token_id"):
+                if isinstance(getattr(self._vlm_config, name, None), int):
+                    self._image_token_id = getattr(self._vlm_config, name)
+                    break
+            self._video_token_id = None
+            for name in ("video_token_id", "video_token_index", "video_context_token_id"):
+                if isinstance(getattr(self._vlm_config, name, None), int):
+                    self._video_token_id = getattr(self._vlm_config, name)
+                    break
 
     def _enable_routing_replay(self) -> None:
         """Bind AutoModel's model-scoped rollout routing adapter."""
@@ -358,10 +335,9 @@ class BaseModel(nn.Module):
         position_ids: Optional[torch.Tensor],
         cp_context_stack,
         mm_inputs,
-        output_hidden_states: bool = False,
         routed_experts: Optional[torch.Tensor] = None,
     ):
-        """Prepare physical model inputs and run the backbone.
+        """Prepare physical model inputs, run the backbone, return its logits.
 
         ``sequences`` and optional ``attention_mask`` have shape ``[batch,
         sequence]``. ``position_ids`` has shape ``[batch, sequence]`` or the
@@ -506,8 +482,6 @@ class BaseModel(nn.Module):
             "input_ids": sequences,
             **model_kwargs,
         }
-        if output_hidden_states:
-            forward_kwargs["output_hidden_states"] = True
 
         replay_ctx = nullcontext()
         if routed_experts is not None:
@@ -521,4 +495,8 @@ class BaseModel(nn.Module):
 
         with forward_ctx, replay_ctx:
             output = self.model(**forward_kwargs)
-        return _normalize_output(output), rolled_sequences, cp_forward, indices, batch, seqlen
+        if torch.is_tensor(output):
+            logits = output
+        else:
+            logits = output["logits"] if isinstance(output, Mapping) else output.logits
+        return logits, rolled_sequences, cp_forward, indices, batch, seqlen

@@ -49,10 +49,10 @@ def test_actor_returns_dense_log_probs_aligned_to_the_action_span():
     logits = backbone(sequences).float() / 0.7
     next_tokens = sequences.roll(-1, dims=1)
     expected = F.log_softmax(logits, dim=-1).gather(-1, next_tokens.unsqueeze(-1)).squeeze(-1)[:, :-1]
-    torch.testing.assert_close(output.log_probs, expected)
-    torch.testing.assert_close(output.action_log_probs, expected[:, -3:] * action_mask)
-    assert output.entropy.shape == output.log_probs.shape
-    assert not output.action_log_probs.requires_grad
+    torch.testing.assert_close(output["log_probs"], expected)
+    torch.testing.assert_close(output["action_log_probs"], expected[:, -3:] * action_mask)
+    assert output["entropy"].shape == output["log_probs"].shape
+    assert not output["action_log_probs"].requires_grad
 
 
 def test_packed_vlm_forward_restores_each_sample_to_dense_coordinates():
@@ -79,7 +79,7 @@ def test_packed_vlm_forward_restores_each_sample_to_dense_coordinates():
     logits = backbone.output(backbone.embedding(sequences)).float()
     targets = sequences.roll(-1, dims=1)
     expected = F.log_softmax(logits, dim=-1).gather(-1, targets.unsqueeze(-1)).squeeze(-1)[:, :-1]
-    torch.testing.assert_close(output.log_probs, expected * attention_mask[:, 1:])
+    torch.testing.assert_close(output["log_probs"], expected * attention_mask[:, 1:])
     assert backbone.last_inputs["qkv_format"] == "thd"
     assert torch.equal(backbone.last_inputs["seq_lens"], torch.tensor([[3, 2]], dtype=torch.int32))
     assert backbone.last_inputs["pixel_values"].shape == (1, 3, 2, 2)
@@ -97,7 +97,7 @@ def test_packed_vlm_accepts_a_text_only_batch_without_media_inputs():
 
     output = actor(sequences, attention_mask=torch.ones_like(sequences), mm_train_inputs=None)
 
-    assert output.log_probs.shape == (1, 2)
+    assert output["log_probs"].shape == (1, 2)
     assert "pixel_values" not in backbone.last_inputs
 
 
@@ -165,7 +165,7 @@ def test_padded_vlm_cp_leaves_missing_position_ids_to_the_model_sharder(monkeypa
         mm_train_inputs=[None],
     )
 
-    assert output.log_probs.shape == (1, 2)
+    assert output["log_probs"].shape == (1, 2)
 
 
 def test_policy_loss_runs_through_engine_backward_and_accumulated_step():
@@ -197,8 +197,8 @@ def test_policy_loss_runs_through_engine_backward_and_accumulated_step():
     for index, (sequences, action_mask, advantages) in enumerate(microbatches):
         output = actor(sequences, action_mask, attention_mask=torch.ones_like(sequences))
         loss, *_ = policy_loss(
-            output.action_log_probs,
-            output.action_log_probs.detach(),
+            output["action_log_probs"],
+            output["action_log_probs"].detach(),
             advantages,
             action_mask=action_mask,
             batch_num_tokens=window_tokens,
@@ -328,8 +328,8 @@ def test_critic_installs_value_head_and_returns_dense_action_values():
     assert critic.model.lm_head.weight.dtype == torch.float32
     assert not critic.model.config.tie_word_embeddings
     assert not critic.model.config.text_config.tie_word_embeddings
-    assert torch.equal(output.token_values, torch.tensor([[1.0, 2.0, 3.0], [5.0, 6.0, 0.0]]))
-    assert torch.equal(output.action_values, torch.tensor([[0.0, 2.0, 3.0], [5.0, 0.0, 0.0]]))
+    assert torch.equal(output["token_values"], torch.tensor([[1.0, 2.0, 3.0], [5.0, 6.0, 0.0]]))
+    assert torch.equal(output["action_values"], torch.tensor([[0.0, 2.0, 3.0], [5.0, 0.0, 0.0]]))
 
 
 def test_value_head_upcasts_hidden_states_and_follows_meta_device():
