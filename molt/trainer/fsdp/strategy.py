@@ -101,25 +101,16 @@ class FsdpStrategy:
         for k in self._UNPICKLABLE_ATTRS:
             self.__dict__.setdefault(k, None)
 
-    def _get_automodel_mesh(self, name: str, required: bool = False):
+    def _get_automodel_mesh(self, name: str):
         if self.device_mesh is None:
             return None
         from nemo_automodel.components.distributed.mesh_utils import get_flat_mesh
 
-        try:
-            return get_flat_mesh(self.device_mesh, name)
-        except (KeyError, RuntimeError, AttributeError):
-            if required:
-                raise
-            return None
-
-    def _get_automodel_group(self, name: str):
-        mesh = self._get_automodel_mesh(name, required=self.device_mesh is not None)
-        return mesh.get_group() if mesh is not None else None
+        return get_flat_mesh(self.device_mesh, name)
 
     def _get_dp_group(self, include_cp: bool = False):
-        name = "dp_cp" if include_cp and self.cp_size > 1 else "dp"
-        return self._get_automodel_group(name)
+        mesh = self._get_automodel_mesh("dp_cp" if include_cp and self.cp_size > 1 else "dp")
+        return mesh.get_group() if mesh is not None else None
 
     def _get_dp_group_size(self, include_cp: bool = False) -> int:
         group = self._get_dp_group(include_cp=include_cp)
@@ -128,7 +119,7 @@ class FsdpStrategy:
         return dist.get_world_size(group=group)
 
     def _get_automodel_rank(self, name: str) -> int:
-        mesh = self._get_automodel_mesh(name, required=self.device_mesh is not None)
+        mesh = self._get_automodel_mesh(name)
         return mesh.get_local_rank() if mesh is not None else 0
 
     def _get_dp_rank(self, include_cp: bool = False) -> int:
