@@ -64,7 +64,6 @@ class BaseModel(nn.Module):
             raise TypeError(f"Unexpected {type(self).__name__} keyword argument(s): {unexpected}")
         self.temperature = temperature
         self.device_mesh = device_mesh
-        self._moe_mesh = moe_mesh
         self._routing_replay_adapter = None
         mesh_dims = getattr(device_mesh, "mesh_dim_names", ()) or ()
         cp_mesh = device_mesh["cp"] if device_mesh is not None and "cp" in mesh_dims else None
