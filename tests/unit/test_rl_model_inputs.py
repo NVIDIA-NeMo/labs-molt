@@ -13,7 +13,7 @@ from nemo_automodel.engine import Engine
 from molt.models.actor import Actor
 from molt.models.critic import Critic, _ValueHead
 from molt.models.loss import PolicyLoss
-from molt.trainer.fsdp.packing import pack_padded_batch, unpack_to_padded
+from molt.models.packing import pack_padded_batch, unpack_to_padded
 from molt.utils.vlm_utils import merge_mm_train_inputs
 
 

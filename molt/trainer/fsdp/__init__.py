@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""FSDP strategy, checkpointing, packing, and optimizer utilities."""
+"""FSDP strategy, checkpointing, and optimizer utilities."""
 
 from molt.trainer.fsdp.strategy import FsdpStrategy
 

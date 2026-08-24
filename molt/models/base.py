@@ -27,7 +27,7 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 
-from molt.trainer.fsdp.packing import pack_padded_batch, unpack_to_padded
+from molt.models.packing import pack_padded_batch, unpack_to_padded
 
 from .utils import (
     configure_nemo_moe_aux_loss,
@@ -268,9 +268,6 @@ class BaseModel(nn.Module):
 
         from molt.utils.utils import convert_to_torch_dtype, is_vlm_model
 
-        # Trainable actors keep fp32 master weights unless the architecture
-        # requires compute-dtype parameters. FSDP2 handles bf16 fwd/bwd via
-        # MixedPrecisionPolicy.
         compute_dtype = convert_to_torch_dtype(param_dtype)
         is_moe = _detect_moe_arch(pretrain_or_model)
         ep_active = moe_mesh is not None
