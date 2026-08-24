@@ -55,7 +55,6 @@ class BaseModel(nn.Module):
         use_fp32_master_weights: bool = True,
         moe_aux_loss_coef: float = 0.0,
         routing_replay: bool = False,
-        pre_fsdp_hook=None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -89,11 +88,8 @@ class BaseModel(nn.Module):
                 freeze_moe_router=freeze_moe_router,
                 use_fp32_master_weights=use_fp32_master_weights,
                 moe_aux_loss_coef=moe_aux_loss_coef,
-                pre_fsdp_hook=pre_fsdp_hook,
             )
         else:
-            if pre_fsdp_hook is not None:
-                raise ValueError("pre_fsdp_hook requires loading the model through NeMoAutoModel")
             self.model = pretrain_or_model
             self.is_vlm = False
             # Pre-instantiated models (tests, inference utilities) skip the CLI

@@ -295,24 +295,28 @@ def test_critic_installs_value_head_and_returns_dense_action_values():
     with torch.no_grad():
         critic.model.embed_tokens.weight.zero_()
         critic.model.embed_tokens.weight[:, 0] = torch.arange(16)
-        critic.model.lm_head.weight.zero_()
-        critic.model.lm_head.weight[0, 0] = 1
+        critic.model.lm_head.proj.weight.zero_()
+        critic.model.lm_head.proj.weight[0, 0] = 1
 
     sequences = torch.tensor([[1, 2, 3, 4], [5, 6, 0, 0]])
     action_mask = torch.tensor([[False, True, True], [True, False, False]])
     output = critic(sequences, action_mask, attention_mask=(sequences != 0).long())
 
     assert isinstance(critic.model.lm_head, _ValueHead)
-    assert critic.model.lm_head.weight.dtype == torch.float32
+    assert critic.model.lm_head.proj.weight.dtype == torch.float32
+    assert critic.value_head_parameters() == [critic.model.lm_head.proj.weight]
     assert not critic.model.config.tie_word_embeddings
     assert not critic.model.config.text_config.tie_word_embeddings
     assert torch.equal(output["token_values"], torch.tensor([[1.0, 2.0, 3.0], [5.0, 6.0, 0.0]]))
     assert torch.equal(output["action_values"], torch.tensor([[0.0, 2.0, 3.0], [5.0, 0.0, 0.0]]))
 
 
-def test_value_head_upcasts_hidden_states_and_follows_meta_device():
+def test_value_head_upcasts_hidden_states_and_stays_materialized_for_meta_models():
     head = _ValueHead(4)
     assert head(torch.ones(2, 4, dtype=torch.bfloat16)).dtype == torch.float32
 
+    # The post-wrap head is created and initialized for real even when the
+    # backbone is still on meta, so it never needs a deferred reset.
     critic = Critic(_TinyValueModel().to(device="meta"))
-    assert critic.model.lm_head.weight.device.type == "meta"
+    assert critic.model.lm_head.proj.weight.device.type == "cpu"
+    assert critic.model.lm_head.proj.weight.dtype == torch.float32

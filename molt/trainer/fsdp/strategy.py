@@ -343,6 +343,31 @@ class FsdpStrategy:
             model = engine
         return model, optimizer, scheduler
 
+    def sync_replicated_grads(self, params) -> None:
+        """Mean-all-reduce gradients of replicated (non-FSDP-wrapped) params over the
+        data-parallel(+CP) group.
+
+        FSDP2 only reduces grads of params inside its wrapped modules; a module added
+        after wrapping (e.g. the critic's scalar value head) is replicated with a local
+        grad per rank, so it must be averaged over the same ``dp_cp`` group FSDP uses.
+        Call right before the Engine's optimizer step. Assumes a flat DP mesh (no
+        HSDP/``dp_replicate``).
+        """
+        group = self._get_dp_group(include_cp=True)
+        if group is None:
+            return
+        world = dist.get_world_size(group=group)
+        if world == 1:
+            return
+        from molt.trainer.fsdp.optimizer_offload import local_shard
+
+        for p in params:
+            if p.grad is None:
+                continue
+            grad = local_shard(p.grad)
+            dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=group)
+            grad.div_(world)
+
     def offload_moments_to_cpu(self, optimizer) -> None:
         """Page the Adam moments back to CPU after a checkpoint resume (DCP restores
         them onto the model param's GPU device). No-op unless --fsdp.offload optimizer."""

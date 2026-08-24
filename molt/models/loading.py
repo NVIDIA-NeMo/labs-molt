@@ -178,7 +178,6 @@ def load_automodel(
     freeze_moe_router: bool,
     use_fp32_master_weights: bool,
     moe_aux_loss_coef: float,
-    pre_fsdp_hook,
 ) -> torch.nn.Module:
     """Load and distribute a checkpoint through NeMo AutoModel.
 
@@ -312,7 +311,6 @@ def load_automodel(
         use_liger_kernel=False,
         has_packed_sequence=packing_samples,
         force_hf=False,
-        pre_fsdp_hook=pre_fsdp_hook,
         freeze_config={"freeze_vision_tower": True} if freeze_visual_encoder else None,
         # Disable the MTP head via AutoModel's config-override deep-merge (see
         # _mtp_off_kwargs); no-op without MTP.

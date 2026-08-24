@@ -229,6 +229,9 @@ class CriticTrainer:
             self.critic.model.backward(loss, scale_wrt_gas=False)
 
         if is_optimizer_step:
+            # The replicated value head is not covered by FSDP's reduce — sync it
+            # over the DP(+CP) group before stepping (mean commutes with accum).
+            self.strategy.sync_replicated_grads(self.critic.value_head_parameters())
             self.strategy.debug_grad_stats(self.critic, "critic")
         self.critic.model.step()
         grad_norm = self.critic.model.get_global_grad_norm() if is_optimizer_step else None

@@ -26,96 +26,84 @@ one-wide is what turns that tensor into the per-token value directly.
 from typing import Optional
 
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 
 from .base import BaseModel
 from .utils import unshard_dtensor
 
 
-class _ValueHead(nn.Linear):
+class _ValueHead(nn.Module):
     """Scalar value projection over the backbone's last hidden state.
 
     Replaces the vocab ``lm_head`` so the model's "logits" are per-token values.
     Under TP/SP the hidden state can arrive as a sharded DTensor, so it is
     materialized via ``unshard_dtensor`` first (a bare ``to_local()`` would
-    silently use only this rank's shard; at TP=1 this is a no-op). Installed
-    before FSDP, so its parameters share the backbone's reduction, clipping,
-    optimizer, and checkpoint lifecycle.
+    silently use only this rank's shard; at TP=1 this is a no-op). The head
+    stays a plain replicated module added after the FSDP wrap, so its weight
+    gradient is a plain tensor the critic trainer DP-all-reduces.
     """
 
-    def __init__(self, hidden_size: int, initializer_range: float = 0.02, device=None):
-        self.initializer_range = initializer_range
-        # The head stays fp32; its scalar output makes the extra compute negligible.
-        super().__init__(hidden_size, 1, bias=False, device=device, dtype=torch.float32)
-
-    def reset_parameters(self) -> None:
-        nn.init.normal_(self.weight, mean=0.0, std=self.initializer_range)
+    def __init__(self, hidden_size: int):
+        super().__init__()
+        # fp32 to match the fp32 master-weight convention; the head is tiny.
+        self.proj = nn.Linear(hidden_size, 1, bias=False, dtype=torch.float32)
 
     def forward(self, hidden_states):
-        # Gather any TP/SP sharding (no-op for a replicated DTensor or a plain tensor).
         hidden_states = unshard_dtensor(hidden_states)
-        # No forward autocast anymore, so align the bf16 backbone hidden to the
-        # fp32 value-head weight explicitly instead of relying on autocast.
-        return super().forward(hidden_states.to(self.weight.dtype))
-
-
-def _install_value_head(model) -> nn.Module:
-    """Replace ``model``'s task head in place before AutoModel applies FSDP."""
-
-    old_head = model.get_output_embeddings() if hasattr(model, "get_output_embeddings") else model.lm_head
-    source_weight = getattr(old_head, "weight", None)
-    if source_weight is None:
-        source_weight = model.get_input_embeddings().weight
-    # Hidden size comes off the built model, not its config (VLMs nest the
-    # language-model dims in arch-specific places): the lm_head being replaced
-    # gives the exact post-norm hidden the value head consumes; fall back to
-    # the token-embedding dim for models exposing no output head.
-    if hasattr(old_head, "in_features") and old_head.in_features:
-        hidden_size = int(old_head.in_features)
-    elif getattr(old_head, "weight", None) is not None:
-        hidden_size = int(old_head.weight.shape[-1])
-    else:
-        emb = model.get_input_embeddings()
-        hidden_size = int(getattr(emb, "embedding_dim", None) or emb.weight.shape[-1])
-    value_head = _ValueHead(
-        hidden_size,
-        initializer_range=getattr(model.config, "initializer_range", 0.02),
-        device=source_weight.device,
-    )
-    # The value head is NOT tied to the vocabulary embeddings. Keeping this flag
-    # set would make checkpoint export deduplicate or later re-tie incompatible
-    # [1,H] and [vocab,H] tensors.
-    for cfg in (model.config, getattr(model.config, "text_config", None)):
-        if cfg is not None:
-            cfg.tie_word_embeddings = False
-    if hasattr(model, "set_output_embeddings"):
-        model.set_output_embeddings(value_head)
-    else:
-        model.lm_head = value_head
-    return value_head
+        return self.proj(hidden_states.to(self.proj.weight.dtype))
 
 
 class Critic(BaseModel):
     """``BaseModel`` with the vocab head swapped for a scalar value head.
 
-    For checkpoint-backed construction the vocabulary projection is replaced in
-    AutoModel's ``pre_fsdp_hook``. The scalar head is consequently part of the model
-    before FSDP discovers parameters, so normal FSDP gradient reduction, clipping,
-    checkpointing, and optimizer handling all include it.
+    The value head is a plain (replicated) module added *after* the FSDP wrap.
+    Every rank initializes it and rank 0's weights are broadcast so the replicas
+    are identical; FSDP does not cover its gradient, so the critic trainer
+    DP-all-reduces it each optimizer step (``value_head_parameters`` +
+    ``FsdpStrategy.sync_replicated_grads``). Under TP/EP the head consumes the
+    replicated post-norm hidden state, so only the DP(+CP) reduction matters.
     """
 
     def __init__(self, *args, **kwargs):
-        pretrain_or_model = args[0] if args else kwargs.get("pretrain_or_model")
-        if isinstance(pretrain_or_model, str):
-            if kwargs.get("pre_fsdp_hook") is not None:
-                raise TypeError("Critic owns pre_fsdp_hook; callers must not override it")
-            kwargs["pre_fsdp_hook"] = _install_value_head
-            super().__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
+        # Hidden size comes off the built model, not its config (VLMs nest the
+        # language-model dims in arch-specific places): the lm_head being
+        # replaced gives the exact post-norm hidden the value head consumes.
+        old_head = self.model.get_output_embeddings() if hasattr(self.model, "get_output_embeddings") else None
+        if old_head is not None and getattr(old_head, "in_features", None):
+            hidden_size = int(old_head.in_features)
+        elif getattr(old_head, "weight", None) is not None:
+            hidden_size = int(old_head.weight.shape[-1])
         else:
-            # Pre-instantiated models (tests, inference utilities) are not FSDP
-            # wrapped by us, so the head can be installed after construction.
-            super().__init__(*args, **kwargs)
-            _install_value_head(self.model)
+            emb = self.model.get_input_embeddings()
+            hidden_size = int(getattr(emb, "embedding_dim", None) or emb.weight.shape[-1])
+
+        value_head = _ValueHead(hidden_size)
+        # HF's standard fresh-head init, so |V| ~ O(1) from step 1.
+        nn.init.normal_(value_head.proj.weight, mean=0.0, std=getattr(self.model.config, "initializer_range", 0.02))
+        device = next((p.device for p in self.model.parameters() if p.device.type != "meta"), None)
+        if device is not None:
+            value_head = value_head.to(device)
+        # Make every rank's replica identical (rank 0 wins); a head defined inside
+        # the model would get this for free from the pre-FSDP seeded init.
+        if dist.is_initialized() and value_head.proj.weight.is_cuda:
+            dist.broadcast(value_head.proj.weight.data, src=0)
+        # The value head is NOT a tied vocab head: clear tie_word_embeddings so the
+        # checkpointer saves it as its own tensor and nothing later re-ties the
+        # [1, hidden] head to the [vocab, hidden] embeddings.
+        for cfg in (self.model.config, getattr(self.model.config, "text_config", None)):
+            if cfg is not None and getattr(cfg, "tie_word_embeddings", False):
+                cfg.tie_word_embeddings = False
+        if hasattr(self.model, "set_output_embeddings"):
+            self.model.set_output_embeddings(value_head)
+        else:
+            self.model.lm_head = value_head
+        self.value_head = value_head
+
+    def value_head_parameters(self):
+        """Params the critic trainer must DP-all-reduce (FSDP does not cover them)."""
+        return list(self.value_head.parameters())
 
     def forward(
         self,
