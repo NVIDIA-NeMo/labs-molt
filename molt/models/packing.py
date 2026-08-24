@@ -113,3 +113,108 @@ def unpack_to_padded(packed: torch.Tensor, indices: torch.Tensor, batch: int, se
     output = values.new_zeros((batch * seqlen, *values.shape[1:]))
     output.index_copy_(0, indices[valid], values[valid])
     return output.view(batch, seqlen, *values.shape[1:])
+
+
+def pack_vlm_batch(
+    sequences: torch.Tensor,
+    attention_mask: torch.Tensor,
+    media: list,
+    *,
+    module,
+    layout: str,
+    cp_size: int,
+    image_token_id: int | None,
+    video_token_id: int | None,
+    padding_token_id: int = 0,
+):
+    """Pack a padded VLM batch and retain dense-output restore indices.
+
+    ``sequences`` and ``attention_mask`` have shape ``[batch, sequence]``;
+    ``media`` contains one processor mapping per sample; ``module`` is the
+    backbone whose mRoPE index fn and collate contract apply. Returned model
+    inputs use THD or indexed-mask packing, targets follow the same token
+    order, and restore indices map real predictions back to the dense batch.
+    """
+    from nemo_automodel.components.datasets.vlm import pack_vlm_samples, resolve_get_rope_index
+
+    if not isinstance(media, list) or len(media) != sequences.shape[0]:
+        raise ValueError("packed VLM forward requires one mm_train_inputs entry per sequence")
+    if image_token_id is None:
+        raise ValueError("packed VLM forward requires an image placeholder token id in the model config")
+    get_rope_index = resolve_get_rope_index(module)
+    has_mrope = get_rope_index is not None
+    if has_mrope and cp_size > 1:
+        raise NotImplementedError(
+            "Multi-axis mRoPE with packed THD context parallelism is intentionally unsupported; "
+            "use cp_size=1 or disable VLM packing."
+        )
+
+    samples = []
+    restore_indices = []
+    batch, seqlen = sequences.shape
+    for row in range(batch):
+        valid = attention_mask[row].bool().nonzero(as_tuple=False).flatten()
+        if valid.numel() < 2:
+            raise ValueError("packed VLM samples require at least two real tokens")
+        start, stop = int(valid[0]), int(valid[-1]) + 1
+        if valid.numel() != stop - start:
+            raise ValueError("packed VLM samples require one contiguous attention span")
+        ids = sequences[row, start:stop]
+        sample = {
+            "input_ids": ids,
+            "labels": ids,
+            "attention_mask": torch.ones_like(ids),
+        }
+        if media[row] is not None:
+            sample.update(
+                {
+                    key: value.to(sequences.device, non_blocking=True) if isinstance(value, torch.Tensor) else value
+                    for key, value in media[row].items()
+                }
+            )
+        token_types = (ids == image_token_id).to(torch.long)
+        if video_token_id is not None:
+            token_types[ids == video_token_id] = 2
+        sample["mm_token_type_ids"] = token_types
+        samples.append(sample)
+        restore_indices.append(torch.arange(start, stop - 1, device=sequences.device) + row * seqlen)
+
+    sequence_alignment = 2 * cp_size if layout == "thd" and cp_size > 1 else 1
+    packed = pack_vlm_samples(
+        samples,
+        padding_idx=padding_token_id,
+        get_rope_index=get_rope_index,
+        sequence_alignment=sequence_alignment,
+    )
+    collate_kwargs = {"padding_idx": padding_token_id}
+    if layout == "thd":
+        from nemo_automodel.components.datasets.vlm import packed_sequence_thd_vlm_collater
+
+        collated = packed_sequence_thd_vlm_collater([packed], **collate_kwargs)
+    else:
+        from nemo_automodel.components.datasets.vlm import neat_packed_vlm_collater
+
+        collated = neat_packed_vlm_collater(
+            [packed],
+            attn_implementation="flash_attention_2",
+            **collate_kwargs,
+        )
+    collated = {
+        key: value.to(sequences.device) if isinstance(value, torch.Tensor) else value
+        for key, value in collated.items()
+    }
+    labels = collated.pop("labels")
+    valid_predictions = labels.reshape(-1) != -100
+    dense_positions = torch.cat(restore_indices)
+    if int(valid_predictions.sum()) != dense_positions.numel():
+        raise ValueError(
+            "packed VLM labels do not match the real next-token positions: "
+            f"got {int(valid_predictions.sum())} labels and {dense_positions.numel()} dense positions"
+        )
+    physical_to_dense = dense_positions.new_full((labels.numel(),), -1)
+    physical_to_dense[valid_predictions] = dense_positions
+    targets = labels.clamp_min(0)
+    if layout == "thd":
+        collated["padding_mask"] = labels.eq(-100)
+    collated.pop("_packed_seq_ids", None)
+    return collated, targets, physical_to_dense

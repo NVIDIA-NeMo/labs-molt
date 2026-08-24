@@ -24,7 +24,7 @@ import torch
 import torch.nn as nn
 
 from molt.models.loading import configure_loaded_model, load_automodel
-from molt.models.packing import pack_padded_batch, unpack_to_padded
+from molt.models.packing import pack_padded_batch, pack_vlm_batch, unpack_to_padded
 
 
 class BaseModel(nn.Module):
@@ -166,101 +166,6 @@ class BaseModel(nn.Module):
             return self._cp_sharder.shard_token_tensor(per_token, seq_dim=1, fill=-1)
         return per_token
 
-    def _pack_vlm_batch(self, sequences, attention_mask, media):
-        """Pack a padded VLM batch and retain dense-output restore indices.
-
-        ``sequences`` and ``attention_mask`` have shape ``[batch, sequence]``;
-        ``media`` contains one processor mapping per sample. Returned model
-        inputs use THD or indexed-mask packing, targets follow the same token
-        order, and restore indices map real predictions back to the dense batch.
-        """
-        from nemo_automodel.components.datasets.vlm import pack_vlm_samples, resolve_get_rope_index
-
-        if not isinstance(media, list) or len(media) != sequences.shape[0]:
-            raise ValueError("packed VLM forward requires one mm_train_inputs entry per sequence")
-        if self._image_token_id is None:
-            raise AttributeError(f"VLM config {type(self._vlm_config).__name__} has no image placeholder token id")
-        get_rope_index = resolve_get_rope_index(self.module)
-        has_mrope = get_rope_index is not None
-        if has_mrope and self.cp_size > 1:
-            raise NotImplementedError(
-                "Multi-axis mRoPE with packed THD context parallelism is intentionally unsupported; "
-                "use cp_size=1 or disable VLM packing."
-            )
-
-        samples = []
-        restore_indices = []
-        batch, seqlen = sequences.shape
-        for row in range(batch):
-            valid = attention_mask[row].bool().nonzero(as_tuple=False).flatten()
-            if valid.numel() < 2:
-                raise ValueError("packed VLM samples require at least two real tokens")
-            start, stop = int(valid[0]), int(valid[-1]) + 1
-            if valid.numel() != stop - start:
-                raise ValueError("packed VLM samples require one contiguous attention span")
-            ids = sequences[row, start:stop]
-            sample = {
-                "input_ids": ids,
-                "labels": ids,
-                "attention_mask": torch.ones_like(ids),
-            }
-            if media[row] is not None:
-                sample.update(
-                    {
-                        key: value.to(sequences.device, non_blocking=True)
-                        if isinstance(value, torch.Tensor)
-                        else value
-                        for key, value in media[row].items()
-                    }
-                )
-            token_types = (ids == self._image_token_id).to(torch.long)
-            if self._video_token_id is not None:
-                token_types[ids == self._video_token_id] = 2
-            sample["mm_token_type_ids"] = token_types
-            samples.append(sample)
-            restore_indices.append(torch.arange(start, stop - 1, device=sequences.device) + row * seqlen)
-
-        padding_token_id = getattr(getattr(self.module, "config", None), "pad_token_id", None) or 0
-        sequence_alignment = 2 * self.cp_size if self.packing_layout == "thd" and self.cp_size > 1 else 1
-        packed = pack_vlm_samples(
-            samples,
-            padding_idx=padding_token_id,
-            get_rope_index=get_rope_index,
-            sequence_alignment=sequence_alignment,
-        )
-        collate_kwargs = {"padding_idx": padding_token_id}
-        if self.packing_layout == "thd":
-            from nemo_automodel.components.datasets.vlm import packed_sequence_thd_vlm_collater
-
-            collated = packed_sequence_thd_vlm_collater([packed], **collate_kwargs)
-        else:
-            from nemo_automodel.components.datasets.vlm import neat_packed_vlm_collater
-
-            collated = neat_packed_vlm_collater(
-                [packed],
-                attn_implementation="flash_attention_2",
-                **collate_kwargs,
-            )
-        collated = {
-            key: value.to(sequences.device) if isinstance(value, torch.Tensor) else value
-            for key, value in collated.items()
-        }
-        labels = collated.pop("labels")
-        valid_predictions = labels.reshape(-1) != -100
-        dense_positions = torch.cat(restore_indices)
-        if int(valid_predictions.sum()) != dense_positions.numel():
-            raise ValueError(
-                "packed VLM labels do not match the real next-token positions: "
-                f"got {int(valid_predictions.sum())} labels and {dense_positions.numel()} dense positions"
-            )
-        physical_to_dense = dense_positions.new_full((labels.numel(),), -1)
-        physical_to_dense[valid_predictions] = dense_positions
-        targets = labels.clamp_min(0)
-        if self.packing_layout == "thd":
-            collated["padding_mask"] = labels.eq(-100)
-        collated.pop("_packed_seq_ids", None)
-        return collated, targets, physical_to_dense
-
     def _forward_backbone(
         self,
         sequences: torch.LongTensor,
@@ -294,7 +199,17 @@ class BaseModel(nn.Module):
                     mm_inputs = [None] * batch
                 if not isinstance(mm_inputs, list):
                     raise ValueError("packed VLM forward requires one mm_train_inputs mapping per sample")
-                model_batch, rolled_sequences, indices = self._pack_vlm_batch(sequences, attention_mask, mm_inputs)
+                model_batch, rolled_sequences, indices = pack_vlm_batch(
+                    sequences,
+                    attention_mask,
+                    mm_inputs,
+                    module=self.module,
+                    layout=self.packing_layout,
+                    cp_size=self.cp_size,
+                    image_token_id=self._image_token_id,
+                    video_token_id=self._video_token_id,
+                    padding_token_id=padding_token_id,
+                )
                 model_batch["labels"] = rolled_sequences
             else:
                 sequence_alignment = 2 * self.cp_size if self.packing_layout == "thd" and self.cp_size > 1 else 1
