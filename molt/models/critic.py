@@ -36,20 +36,11 @@ class _ValueHead(nn.Linear):
     """Scalar value projection over the backbone's last hidden state.
 
     Replaces the vocab ``lm_head`` so the model's "logits" are per-token values.
-    Under TP the hidden state arrives as a DTensor on the TP mesh, so we materialize
-    its full (un-TP-sharded) view via ``unshard_dtensor`` before the plain head:
-
-    - For the common ``ColwiseParallel`` head (e.g. HF Qwen3 ``colwise_gather_output``)
-      the head input is *replicated*, so this is a no-op gather.
-    - For a sequence-/hidden-sharded input (SequenceParallel) it all-gathers, so the
-      head still sees the full hidden_size and computes correct values — a bare
-      ``to_local()`` would have silently used only this rank's shard.
-
-    This materializes only the value head's TP/SP hidden input; ``BaseModel``
-    owns context-parallel token layout and dense output restoration.
-    AutoModel installs this head before FSDP, so its parameters participate in the
-    same reduction, clipping, optimizer, and checkpoint lifecycle as the backbone.
-    ``unshard_dtensor`` is a no-op at TP=1 (input already plain).
+    Under TP/SP the hidden state can arrive as a sharded DTensor, so it is
+    materialized via ``unshard_dtensor`` first (a bare ``to_local()`` would
+    silently use only this rank's shard; at TP=1 this is a no-op). Installed
+    before FSDP, so its parameters share the backbone's reduction, clipping,
+    optimizer, and checkpoint lifecycle.
     """
 
     def __init__(self, hidden_size: int, initializer_range: float = 0.02, device=None):
@@ -69,15 +60,10 @@ class _ValueHead(nn.Linear):
 
 
 def _resolve_hidden_size(model) -> int:
-    """Hidden size for the value head, read off the built model rather than its config —
-    config-independent, so it sidesteps where (and how) VLMs nest the language-model dims
-    (``text_config``, ``llm_config`` for Nemotron-Omni, dict vs object; several of our
-    models expose no top-level ``hidden_size`` at all).
-
-    Primary source is the ``lm_head`` we're about to replace: its ``in_features`` is
-    exactly the post-norm hidden the value head consumes — correct even under a factorized
-    input embedding (``embedding_size != hidden_size``). Fall back to the token-embedding
-    dim (== hidden for every decoder we run) for the rare model exposing no output head."""
+    """Hidden size for the value head, read off the built model, not its config
+    (VLMs nest the language-model dims in arch-specific places). The ``lm_head``
+    being replaced gives the exact post-norm hidden the head consumes; fall back
+    to the token-embedding dim for models exposing no output head."""
     head = model.get_output_embeddings() if hasattr(model, "get_output_embeddings") else None
     if head is not None:
         dim = getattr(head, "in_features", None) or head.weight.shape[-1]
@@ -129,10 +115,8 @@ class Critic(BaseModel):
             kwargs["pre_fsdp_hook"] = _install_value_head
             super().__init__(*args, **kwargs)
         else:
-            # Preserve the lightweight pre-instantiated-model path used by unit
-            # tests and inference utilities. Such a model has not been built by
-            # this wrapper, so installing the head here does not move a parameter
-            # across an existing AutoModel FSDP boundary.
+            # Pre-instantiated models (tests, inference utilities) are not FSDP
+            # wrapped by us, so the head can be installed after construction.
             super().__init__(*args, **kwargs)
             _install_value_head(self.model)
 

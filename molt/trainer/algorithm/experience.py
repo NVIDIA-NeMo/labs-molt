@@ -33,28 +33,21 @@ def tensor_field(role: str, **kwargs):
     return field(metadata=metadata, **kwargs)
 
 
+def _map_tensors(value, fn):
+    """Apply ``fn`` to every tensor in a nested dict/list/tuple structure."""
+    if isinstance(value, torch.Tensor):
+        return fn(value)
+    if isinstance(value, dict):
+        return {key: _map_tensors(item, fn) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_map_tensors(item, fn) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_map_tensors(item, fn) for item in value)
+    return value
+
+
 def to(value, device, *, non_blocking: bool = False):
-    if isinstance(value, torch.Tensor):
-        return value.to(device, non_blocking=non_blocking)
-    if isinstance(value, dict):
-        return {key: to(item, device, non_blocking=non_blocking) for key, item in value.items()}
-    if isinstance(value, list):
-        return [to(item, device, non_blocking=non_blocking) for item in value]
-    if isinstance(value, tuple):
-        return tuple(to(item, device, non_blocking=non_blocking) for item in value)
-    return value
-
-
-def _pin_memory(value):
-    if isinstance(value, torch.Tensor):
-        return value.pin_memory() if value.device.type == "cpu" else value
-    if isinstance(value, dict):
-        return {key: _pin_memory(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_pin_memory(item) for item in value]
-    if isinstance(value, tuple):
-        return tuple(_pin_memory(item) for item in value)
-    return value
+    return _map_tensors(value, lambda t: t.to(device, non_blocking=non_blocking))
 
 
 def get_model_parallel_size(args) -> int:
@@ -200,7 +193,7 @@ class Experience:
     def pin_memory(self):
         """Pin every CPU tensor so the next CUDA transfer can be asynchronous."""
         for name, value in self.__dict__.items():
-            setattr(self, name, _pin_memory(value))
+            setattr(self, name, _map_tensors(value, lambda t: t.pin_memory() if t.device.type == "cpu" else t))
         return self
 
 
