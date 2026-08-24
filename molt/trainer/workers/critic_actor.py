@@ -78,7 +78,11 @@ class CriticTrainer:
         # The critic can fit the value function with more passes per RL step than the actor
         # (--critic.max_epochs); falls back to the shared --train.max_epochs when unset.
         self.max_epochs = getattr(self.args.critic, "max_epochs", None) or self.args.train.max_epochs
-        self.value_loss_fn = ValueLoss(value_clip=self.args.critic.value_clip)
+        self.value_loss_fn = ValueLoss(
+            value_clip=self.args.critic.value_clip,
+            # Engine applies the optimizer window's global action-token denominator.
+            loss_agg_mode="token-sum",
+        )
         self.replay_buffer = NaiveReplayBuffer(
             micro_train_batch_size,
             0,
@@ -175,18 +179,11 @@ class CriticTrainer:
                     seqlens = exp.attention_mask.sum(dim=-1)
                     local_seq_count += float(seqlens.numel())
                     local_token_sum += float(seqlens.sum())
-                    datum_batches.append(
-                        self.critic.make_value_datums(
-                            exp,
-                            old_values=exp.values,
-                            returns=exp.returns,
-                            routed_experts=exp.routed_experts,
-                        )
-                    )
+                    datum_batches.append(self.critic.make_value_datums(exp))
 
                 result = self.engine.forward_backward(
                     datum_batches,
-                    self.compute_critic_loss,
+                    self._value_objective,
                 )
                 self.strategy._maybe_debug_grad_stats(self.critic, "critic")
                 optim_result = self.engine.step()
@@ -232,22 +229,15 @@ class CriticTrainer:
         )
         return status
 
-    def compute_critic_loss(self, output, loss_inputs):
-        values = self.critic.compute_values(output, loss_inputs)
-        weights = loss_inputs["weights"]
-        local_tokens = weights.sum()
-        value_loss, _, _ = self.value_loss_fn(
+    def _value_objective(self, model_output, batch):
+        values = self.critic.compute_values(model_output, batch)
+        loss_sum, _, _ = self.value_loss_fn(
             values,
-            loss_inputs["old_values"],
-            loss_inputs["returns"],
-            action_mask=weights.bool(),
-            dp_size=1,
-            batch_num_tokens=local_tokens,
+            batch["old_values"],
+            batch["returns"],
+            action_mask=batch["weights"].bool(),
         )
-        # ValueLoss returns a local token mean. Engine expects a scalar local
-        # weighted numerator and applies the one global window denominator.
-        numerator = value_loss * local_tokens
-        return LossOutput(loss_sum=numerator, token_outputs={"action_values": values})
+        return LossOutput(loss_sum=loss_sum, token_outputs={"action_values": values})
 
 
 @ray.remote(num_gpus=1)

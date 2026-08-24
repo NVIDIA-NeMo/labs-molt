@@ -79,12 +79,7 @@ def test_multi_axis_mrope_packed_vlm_cp_fails_fast():
 
 def test_make_text_datums_uses_the_next_token_axis():
     experience = _experience()
-    datums = Critic.make_value_datums(
-        _wrapper(),
-        experience,
-        old_values=experience.values,
-        returns=experience.returns,
-    )
+    datums = Critic.make_value_datums(_wrapper(), experience)
 
     assert len(datums) == 2
     assert torch.equal(datums[0].model_inputs["input_ids"], torch.tensor([10, 11, 12]))
@@ -115,12 +110,7 @@ def test_left_padding_is_removed_and_outputs_return_to_action_coordinates():
     experience.values = torch.zeros(1, 4)
     experience.returns = torch.ones(1, 4)
 
-    datum = Critic.make_value_datums(
-        _wrapper(),
-        experience,
-        old_values=experience.values,
-        returns=experience.returns,
-    )[0]
+    datum = Critic.make_value_datums(_wrapper(), experience)[0]
 
     assert torch.equal(datum.model_inputs["input_ids"], torch.tensor([10, 11]))
     assert torch.equal(datum.loss_fn_inputs["target_tokens"], torch.tensor([11, 12]))
@@ -148,16 +138,13 @@ class _RouteAdapter:
 
 def test_make_datums_declares_grouping_and_routing_side_channels():
     experience = _experience()
+    experience.advantages = experience.returns
     routes = torch.arange(2 * 3 * 2 * 5, dtype=torch.int16).reshape(2, 3, 2, 5)
+    experience.routed_experts = routes
     datums = Actor.make_policy_datums(
         _wrapper(routing_replay_context=_RouteAdapter()),
         experience,
-        old_action_log_probs=None,
-        advantages=experience.returns,
-        base_action_log_probs=None,
-        rollout_log_probs=None,
         include_sequence_ids=True,
-        routed_experts=routes,
     )
 
     for datum in datums:
@@ -181,12 +168,7 @@ def test_make_vlm_datums_keeps_processor_ready_tokens_and_media():
         {"pixel_values": torch.ones(1, 3, 2, 2), "image_grid_thw": torch.tensor([[1, 2, 2]])},
         None,
     ]
-    datums = Critic.make_value_datums(
-        _wrapper(is_vlm=True),
-        experience,
-        old_values=experience.values,
-        returns=experience.returns,
-    )
+    datums = Critic.make_value_datums(_wrapper(is_vlm=True), experience)
 
     assert torch.equal(datums[0].model_inputs["input_ids"], torch.tensor([10, 99, 12, 13]))
     assert torch.equal(datums[1].model_inputs["input_ids"], torch.tensor([20, 21, 22]))
@@ -247,12 +229,7 @@ def _token_values(output, _inputs):
 def test_sample_datums_share_one_engine_optimizer_window():
     experience = _experience()
     model = _ScalarValueModel()
-    datums = Critic.make_value_datums(
-        _wrapper(model=model),
-        experience,
-        old_values=experience.values,
-        returns=experience.returns,
-    )
+    datums = Critic.make_value_datums(_wrapper(model=model), experience)
     optimizer = torch.optim.SGD(model.parameters(), lr=0.05)
     engine = Engine(
         model,
@@ -332,8 +309,8 @@ def test_dynamic_vlm_batches_keep_their_own_output_boundaries():
     second.mm_train_inputs = [None, None]
     wrapper = _wrapper(is_vlm=True)
     datum_batches = [
-        Critic.make_value_datums(wrapper, first, old_values=first.values, returns=first.returns),
-        Critic.make_value_datums(wrapper, second, old_values=second.values, returns=second.returns),
+        Critic.make_value_datums(wrapper, first),
+        Critic.make_value_datums(wrapper, second),
     ]
     processor = SimpleNamespace(
         image_processor=SimpleNamespace(merge_size=2),
@@ -362,6 +339,10 @@ def test_dynamic_vlm_batches_keep_their_own_output_boundaries():
     assert [len(batch["action_values"]) for batch in result.token_outputs] == [1, 2]
     torch.testing.assert_close(first_values, torch.tensor([[0.0, 9.9, 1.2, 0.0]]))
     torch.testing.assert_close(second_values, torch.tensor([[0.0, 1.1, 1.2, 0.0], [2.0, 2.1, 0.0, 0.0]]))
+    expected_loss = (
+        (first_values.square() * first.action_mask).sum() + (second_values.square() * second.action_mask).sum()
+    ) / (first.action_mask.sum() + second.action_mask.sum())
+    torch.testing.assert_close(result.loss, expected_loss.to(result.loss))
 
 
 class _TinyPolicyModel(nn.Module):
@@ -385,17 +366,10 @@ def test_policy_datums_run_real_logprob_entropy_backward_and_step():
     actor = _wrapper(model=model, temperature=1.0)
     actor.compute_action_log_probs = MethodType(Actor.compute_action_log_probs, actor)
     actor.compute_entropy = MethodType(Actor.compute_entropy, actor)
-    datums = Actor.make_policy_datums(
-        actor,
-        experience,
-        old_action_log_probs=experience.action_log_probs,
-        advantages=experience.advantages,
-        base_action_log_probs=experience.base_action_log_probs,
-        rollout_log_probs=None,
-    )
+    datums = Actor.make_policy_datums(actor, experience)
     trainer = object.__new__(PolicyTrainer)
     trainer.actor = actor
-    trainer.actor_loss_fn = PolicyLoss()
+    trainer.actor_loss_fn = PolicyLoss(loss_agg_mode="token-sum")
     trainer._sequence_group = None
     trainer.args = SimpleNamespace(
         actor=SimpleNamespace(entropy_coef=0.01),
@@ -416,7 +390,7 @@ def test_policy_datums_run_real_logprob_entropy_backward_and_step():
     assert all(parameter.grad is None for parameter in model.parameters())
 
     def policy_loss(output, inputs):
-        return trainer.compute_policy_loss(output, inputs, kl_ctl=0.1)
+        return trainer._policy_objective(output, inputs, kl_ctl=0.1)
 
     before = model.output.weight.detach().clone()
     result = engine.forward_backward([datums], policy_loss)
@@ -543,7 +517,7 @@ def test_policy_loss_returns_named_action_outputs_and_entropy():
         "advantages": torch.ones_like(log_probs),
     }
 
-    result = trainer.compute_policy_loss({"logits": logits}, loss_inputs, kl_ctl=0.0)
+    result = trainer._policy_objective({"logits": logits}, loss_inputs, kl_ctl=0.0)
 
     torch.testing.assert_close(result.loss_sum, -entropy.sum() * 0.1)
     assert result.token_outputs["action_log_probs"] is log_probs

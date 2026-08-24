@@ -39,29 +39,24 @@ class Actor(BaseModel):
         self,
         experience: "Experience",
         *,
-        old_action_log_probs: torch.Tensor | None,
-        advantages: torch.Tensor,
-        base_action_log_probs: torch.Tensor | None,
-        rollout_log_probs: torch.Tensor | None,
         include_sequence_ids: bool = False,
-        routed_experts: torch.Tensor | None = None,
     ) -> list[Datum]:
         """Build one policy microbatch with its PPO token inputs."""
         side_inputs = {
             "weights": experience.action_mask.float(),
-            "advantages": advantages,
+            "advantages": experience.advantages,
         }
-        if old_action_log_probs is not None:
-            side_inputs["old_action_log_probs"] = old_action_log_probs
-        if base_action_log_probs is not None:
-            side_inputs["base_action_log_probs"] = base_action_log_probs
-        if rollout_log_probs is not None:
-            side_inputs["rollout_log_probs"] = rollout_log_probs
+        if experience.action_log_probs is not None:
+            side_inputs["old_action_log_probs"] = experience.action_log_probs
+        if experience.base_action_log_probs is not None:
+            side_inputs["base_action_log_probs"] = experience.base_action_log_probs
+        if experience.rollout_log_probs is not None:
+            side_inputs["rollout_log_probs"] = experience.rollout_log_probs
         return self._make_datums(
             experience,
             side_inputs=side_inputs,
             include_sequence_ids=include_sequence_ids,
-            routed_experts=routed_experts,
+            routed_experts=experience.routed_experts,
         )
 
     def compute_action_log_probs(self, output: Any, inputs: Mapping[str, torch.Tensor]) -> torch.Tensor:

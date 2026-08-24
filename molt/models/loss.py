@@ -83,7 +83,11 @@ def agg_loss(
     The returned scalar is invariant to DP/FSDP averaging when callers provide
     global batch metadata. For ``token-mean`` this is exactly:
     ``masked_sum(loss_mat, loss_mask) / batch_num_tokens * dp_size``.
+    ``token-sum`` leaves normalization to a caller such as AutoModel Engine.
     """
+    if loss_agg_mode == "token-sum":
+        return masked_sum(loss_mat, loss_mask)
+
     if loss_agg_mode == "token-mean":
         if batch_num_tokens is None:
             if dp_size > 1:

@@ -111,6 +111,8 @@ class PolicyTrainer:
                 if self.args.algo.advantage.is_correction_level != "off"
                 else None
             ),
+            # Engine applies the optimizer window's global action-token denominator.
+            loss_agg_mode="token-sum",
         )
 
         self.replay_buffer = NaiveReplayBuffer(
@@ -334,18 +336,13 @@ class PolicyTrainer:
                     datum_batches.append(
                         self.actor.make_policy_datums(
                             exp,
-                            old_action_log_probs=exp.action_log_probs,
-                            advantages=exp.advantages,
-                            base_action_log_probs=exp.base_action_log_probs,
-                            rollout_log_probs=exp.rollout_log_probs,
                             include_sequence_ids=self._needs_sequence_ids,
-                            routed_experts=exp.routed_experts,
                         )
                     )
 
                 result = self.engine.forward_backward(
                     datum_batches,
-                    partial(self.compute_policy_loss, kl_ctl=kl_ctl),
+                    partial(self._policy_objective, kl_ctl=kl_ctl),
                 )
                 self.strategy._maybe_debug_grad_stats(self.actor, "actor")
                 optim_result = self.engine.step()
@@ -395,46 +392,42 @@ class PolicyTrainer:
         )
         return status_mean
 
-    def compute_policy_loss(self, output, loss_inputs, *, kl_ctl: float):
-        action_log_probs = self.actor.compute_action_log_probs(output, loss_inputs)
+    def _policy_objective(self, model_output, batch, *, kl_ctl: float):
+        log_probs = self.actor.compute_action_log_probs(model_output, batch)
+        action_mask = batch["weights"].bool()
+        old_log_probs = batch.get("old_action_log_probs")
+        if old_log_probs is None:
+            old_log_probs = log_probs.detach()
 
-        weights = loss_inputs["weights"]
-        local_tokens = weights.sum()
-        old_action_log_probs = loss_inputs.get("old_action_log_probs")
-        if old_action_log_probs is None:
-            old_action_log_probs = action_log_probs.detach()
-        actor_loss, *_ = self.actor_loss_fn(
-            action_log_probs,
-            old_action_log_probs,
-            loss_inputs["advantages"],
-            action_mask=weights.bool(),
-            rollout_log_probs=loss_inputs.get("rollout_log_probs"),
-            dp_size=1,
-            batch_num_tokens=local_tokens,
-            sequence_ids=loss_inputs.get("sequence_ids"),
-            num_sequences=loss_inputs.get("num_sequences"),
+        loss_sum, *_ = self.actor_loss_fn(
+            log_probs,
+            old_log_probs,
+            batch["advantages"],
+            action_mask=action_mask,
+            rollout_log_probs=batch.get("rollout_log_probs"),
+            sequence_ids=batch.get("sequence_ids"),
+            num_sequences=batch.get("num_sequences"),
             sequence_group=self._sequence_group,
         )
-        numerator = actor_loss * local_tokens
 
         if self.args.algo.kl.use_loss and self.args.algo.kl.init_coef > 0:
             approx_kl = compute_approx_kl(
-                action_log_probs,
-                loss_inputs["base_action_log_probs"],
+                log_probs,
+                batch["base_action_log_probs"],
                 kl_estimator=self.args.algo.kl.estimator,
             )
-            numerator = numerator + masked_sum(approx_kl, weights.bool()) * kl_ctl
+            loss_sum = loss_sum + masked_sum(approx_kl, action_mask) * kl_ctl
 
-        token_outputs = {"action_log_probs": action_log_probs}
+        token_outputs = {"action_log_probs": log_probs}
         if bool(self.args.actor.entropy_coef):
-            entropy = self.actor.compute_entropy(output, loss_inputs)
-            numerator = numerator - masked_sum(entropy, weights.bool()) * self.args.actor.entropy_coef
+            entropy = self.actor.compute_entropy(model_output, batch)
+            loss_sum = loss_sum - masked_sum(entropy, action_mask) * self.args.actor.entropy_coef
             token_outputs["entropy"] = entropy
 
         # Native AutoModel MoE gates inject their configured auxiliary gradient
         # through MoEAuxLossAutoScaler; Engine sets its window/CP scale. Adding the
         # scalar output here would double-count it.
-        return LossOutput(loss_sum=numerator, token_outputs=token_outputs)
+        return LossOutput(loss_sum=loss_sum, token_outputs=token_outputs)
 
     def _collect_metrics(
         self,

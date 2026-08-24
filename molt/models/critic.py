@@ -144,20 +144,16 @@ class Critic(BaseModel):
     def make_value_datums(
         self,
         experience: "Experience",
-        *,
-        old_values: torch.Tensor,
-        returns: torch.Tensor,
-        routed_experts: torch.Tensor | None = None,
     ) -> list[Datum]:
         """Build one critic microbatch with its value-regression inputs."""
         return self._make_datums(
             experience,
             side_inputs={
                 "weights": experience.action_mask.float(),
-                "old_values": old_values,
-                "returns": returns,
+                "old_values": experience.values,
+                "returns": experience.returns,
             },
-            routed_experts=routed_experts,
+            routed_experts=experience.routed_experts,
         )
 
     @staticmethod

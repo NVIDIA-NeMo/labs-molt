@@ -382,7 +382,7 @@ def test_sft_loss_does_not_double_count_native_moe_aux_loss():
     logits = torch.tensor([[[0.2, -0.3, 0.1], [0.7, 0.0, -0.4]]], requires_grad=True)
     aux_loss = torch.tensor(2.0, requires_grad=True)
 
-    loss = trainer.compute_sft_loss(
+    loss = trainer._sft_loss(
         SimpleNamespace(logits=logits, aux_loss=aux_loss),
         {"labels": torch.tensor([[0, 1]])},
     )

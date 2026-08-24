@@ -120,10 +120,10 @@ class SFTTrainer:
             log_dir = os.path.join(self.strategy.args.logger.tensorboard_dir, strategy.args.logger.wandb.run_name)
             self._tensorboard = SummaryWriter(log_dir=log_dir)
 
-    def compute_sft_loss(self, output, loss_inputs):
-        if not torch.is_tensor(output):
-            output = output["logits"] if isinstance(output, dict) else output.logits
-        return self.loss_fn(output, loss_inputs["labels"])
+    def _sft_loss(self, model_output, batch):
+        if not torch.is_tensor(model_output):
+            model_output = model_output["logits"] if isinstance(model_output, dict) else model_output.logits
+        return self.loss_fn(model_output, batch["labels"])
 
     def fit(self, args, consumed_samples=0, num_update_steps_per_epoch=None):
         # Infer num_update_steps_per_epoch from dataloader if not provided
@@ -175,7 +175,7 @@ class SFTTrainer:
                     continue
 
                 window_size = accum_microbatches
-                result = self.engine.forward_backward(accum_window, self.compute_sft_loss)
+                result = self.engine.forward_backward(accum_window, self._sft_loss)
                 self.strategy._maybe_debug_grad_stats(self.model, "model")
                 optim_result = self.engine.step()
                 self.scheduler.step()
@@ -256,7 +256,7 @@ class SFTTrainer:
         )
 
         for batch in eval_dataloader:
-            result = self.engine.evaluate([batch], self.compute_sft_loss)
+            result = self.engine.evaluate([batch], self._sft_loss)
             batch_loss_sum = result.loss_sum
             batch_token_sum = result.weight_sum
             loss_sum = batch_loss_sum if loss_sum is None else loss_sum + batch_loss_sum

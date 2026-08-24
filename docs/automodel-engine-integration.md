@@ -28,7 +28,7 @@ padding and shifting to `pad_collate_fn`, preserves additional processor
 tensors such as Nemotron-Omni's `image_flags` and `imgs_sizes`, and uses the
 matching packed-VLM materializer when packing is enabled. The complete
 accumulation window maps to one
-`forward_backward([[datum0, datum1], [datum2, ...]], compute_loss)` call and
+`forward_backward([[datum0, datum1], [datum2, ...]], loss_fn)` call and
 one `step()`; each inner list is one replay or dataloader microbatch.
 
 Engine calls AutoModel's `MaskedCrossEntropy(reduction="sum")` through a small

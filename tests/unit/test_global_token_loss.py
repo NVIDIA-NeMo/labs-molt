@@ -13,13 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""slime-style global token-mean normalization for the RL policy loss.
+"""Global token-mean normalization for the RL policy loss.
 
-The RL trainer feeds every microbatch of one optimizer-step batch the *same*
-``batch_num_tokens`` (the action-token count of the whole batch, summed over all
-microbatches and DP ranks) and skips the ``/accum`` rescale. Summing the
-per-microbatch ``agg_loss`` over the window therefore yields slime's
-``calculate_per_token_loss=True`` objective: ``Σ (loss*mask).sum() / Σ mask.sum()``.
+Each physical batch contributes a local masked token sum. AutoModel Engine sums
+the complete optimizer window and divides it by the action-token count across
+that window and all data-parallel ranks: ``Σ (loss*mask).sum() / Σ mask.sum()``.
 """
 
 import torch
@@ -28,12 +26,9 @@ from molt.models import PolicyLoss
 from molt.models.loss import agg_loss, masked_sum
 
 
-def _window_loss(losses, masks, batch_num_tokens, dp_size=1):
-    # Mirror policy_train: one shared denominator for every microbatch, summed.
-    return sum(
-        agg_loss(loss, mask, "token-mean", dp_size=dp_size, batch_num_tokens=batch_num_tokens)
-        for loss, mask in zip(losses, masks)
-    )
+def _window_loss(losses, masks):
+    loss_sum = sum(agg_loss(loss, mask, "token-sum") for loss, mask in zip(losses, masks))
+    return loss_sum / sum(mask.sum() for mask in masks)
 
 
 def test_window_token_mean_matches_slime_sum_of_token():
@@ -41,7 +36,7 @@ def test_window_token_mean_matches_slime_sum_of_token():
     masks = [torch.tensor([[1.0, 1.0, 0.0]]), torch.tensor([[1.0, 1.0]]), torch.tensor([[1.0]])]
     n_window = sum(m.sum() for m in masks)
 
-    got = _window_loss(losses, masks, n_window)
+    got = _window_loss(losses, masks)
     want = sum(masked_sum(loss, mask) for loss, mask in zip(losses, masks)) / n_window
     torch.testing.assert_close(got, want)
 
@@ -52,9 +47,8 @@ def test_uniform_tokens_match_old_per_microbatch_mean():
     # change is a no-op for balanced batches (regression-safe).
     losses = [torch.tensor([[1.0, 3.0]]), torch.tensor([[5.0, 7.0]])]
     masks = [torch.ones(1, 2), torch.ones(1, 2)]
-    n_window = sum(m.sum() for m in masks)
 
-    new = _window_loss(losses, masks, n_window)
+    new = _window_loss(losses, masks)
     old = sum(agg_loss(loss, m, "token-mean", batch_num_tokens=m.sum()) for loss, m in zip(losses, masks)) / len(
         losses
     )
@@ -66,9 +60,8 @@ def test_unequal_tokens_differ_from_per_microbatch_mean():
     # by token, not by microbatch, so it differs from the old per-microbatch mean.
     losses = [torch.tensor([[2.0, 2.0, 2.0]]), torch.tensor([[10.0]])]
     masks = [torch.ones(1, 3), torch.ones(1, 1)]
-    n_window = sum(m.sum() for m in masks)
 
-    new = _window_loss(losses, masks, n_window)  # (2+2+2+10)/4 = 4.0
+    new = _window_loss(losses, masks)  # (2+2+2+10)/4 = 4.0
     old = sum(agg_loss(loss, m, "token-mean", batch_num_tokens=m.sum()) for loss, m in zip(losses, masks)) / len(
         losses
     )
@@ -87,7 +80,7 @@ def test_accumulated_gradient_equals_global_token_mean():
 
     w = torch.zeros((), requires_grad=True)
     for xi, mi in zip(x, masks):
-        loss = agg_loss(w * xi, mi, "token-mean", dp_size=1, batch_num_tokens=n_window)
+        loss = agg_loss(w * xi, mi, "token-sum") / n_window
         loss.backward()  # accumulates into w.grad, no /accum rescale
 
     want = sum(xi.sum() for xi in x) / n_window  # d/dw of Σ (w*x)/N_window
@@ -98,6 +91,13 @@ def test_accumulated_gradient_equals_global_token_mean():
     for xi, mi in zip(x, masks):
         (agg_loss(w_old * xi, mi, "token-mean", batch_num_tokens=mi.sum()) / len(x)).backward()
     assert not torch.allclose(w.grad, w_old.grad)
+
+
+def test_token_sum_leaves_window_normalization_to_engine():
+    losses = torch.tensor([[1.0, 2.0, 9.0]])
+    mask = torch.tensor([[1, 1, 0]], dtype=torch.bool)
+
+    torch.testing.assert_close(agg_loss(losses, mask, "token-sum"), torch.tensor(3.0))
 
 
 def test_policy_loss_reports_per_token_mean_independent_of_denominator():
