@@ -104,16 +104,10 @@ class FsdpStrategy:
     def _get_automodel_mesh(self, name: str, required: bool = False):
         if self.device_mesh is None:
             return None
+        from nemo_automodel.components.distributed.mesh_utils import get_flat_mesh
 
         try:
-            from nemo_automodel.components.distributed.mesh_utils import get_flat_mesh
-        except ImportError:
-            get_flat_mesh = None
-
-        try:
-            if get_flat_mesh is not None:
-                return get_flat_mesh(self.device_mesh, name)
-            return self.device_mesh[name]
+            return get_flat_mesh(self.device_mesh, name)
         except (KeyError, RuntimeError, AttributeError):
             if required:
                 raise
@@ -174,14 +168,14 @@ class FsdpStrategy:
                 from torch.distributed.tensor._ops import _mask_buffer
             except ImportError:
                 _mask_buffer = None
-            if _mask_buffer is not None and not getattr(_mask_buffer.MaskBuffer, "_orlhf_patched", False):
+            if _mask_buffer is not None and not getattr(_mask_buffer.MaskBuffer, "_molt_patched", False):
 
                 def _safe_materialize(self, mask):
                     self.data = mask
                     self.refcount += 1
 
                 _mask_buffer.MaskBuffer.materialize_mask = _safe_materialize
-                _mask_buffer.MaskBuffer._orlhf_patched = True
+                _mask_buffer.MaskBuffer._molt_patched = True
 
         from molt.utils.utils import convert_to_torch_dtype
 
@@ -198,12 +192,9 @@ class FsdpStrategy:
                 cast_forward_inputs=True,
             )
         )
-        # Public attribute `strategy.distributed_config`, forwarded to from_pretrained.
-        # Activation checkpointing MUST be set here via FSDP2Config for dense / EP=1 /
-        # HF-fallback models: the from_pretrained(activation_checkpointing=) kwarg only
-        # reaches the ep_size>1 MoE parallelizer, so otherwise those models train with
-        # no AC and OOM on long sequences. Source of truth:
-        # --actor.gradient_checkpoint (RL) / --model.gradient_checkpoint (SFT).
+        # AC must be set on FSDP2Config: the from_pretrained kwarg only reaches
+        # the ep_size>1 MoE parallelizer, so dense/HF models would otherwise
+        # train with no AC. Sourced from --actor/--model.gradient_checkpoint.
         _actor_cfg = getattr(self.args, "actor", None)
         _model_cfg = getattr(self.args, "model", None)
         activation_checkpointing = resolve_ac_mode(
@@ -219,22 +210,16 @@ class FsdpStrategy:
             # a pending synchronization state.
             defer_fsdp_grad_sync=False,
         )
-        # MoE parallelization config, required when ep_size > 1.
-        # ignore_router_for_ac=True → selective AC that saves the router projection so
-        # the topk routing is NOT recomputed in backward; otherwise a near-tie token
-        # re-routes on recompute → per-expert counts shift → grouped-GEMM shapes drift
-        # ±1 → CheckpointError.
-        # reshard_after_forward (MOLT_MOE_RESHARD_AFTER_FWD): free the all-gathered
-        # experts after forward and re-gather in backward — one extra all-gather for a
-        # lower activation peak. Default OFF (bit-identical); opt in for memory-bound
-        # runs (e.g. 32K/CP8). Smoke-test under deepep+AC: the re-gather must not
-        # perturb the AC recompute and logprobs_diff must stay 0.
-        _reshard_after_fwd = os.environ.get("MOLT_MOE_RESHARD_AFTER_FWD", "0") == "1"
+        # ignore_router_for_ac saves the router projection during AC so topk
+        # routing is not recomputed in backward — a near-tie token re-routing on
+        # recompute shifts grouped-GEMM shapes and raises CheckpointError.
+        # MOLT_MOE_RESHARD_AFTER_FWD=1 trades one extra expert all-gather in
+        # backward for a lower activation peak on memory-bound runs.
         self.moe_config = (
             MoEParallelizerConfig(
                 mp_policy=mp_policy,
                 ignore_router_for_ac=True,
-                reshard_after_forward=_reshard_after_fwd,
+                reshard_after_forward=os.environ.get("MOLT_MOE_RESHARD_AFTER_FWD", "0") == "1",
             )
             if self.ep_size > 1
             else None
@@ -252,11 +237,9 @@ class FsdpStrategy:
         )
         self.device_mesh, self.moe_mesh = mesh_context.device_mesh, mesh_context.moe_mesh
 
-        # init_device_mesh's sub-process-groups (CP all-to-all, EP reduce-scatter)
-        # inherit NCCL's 600s watchdog, not the longer `timeout` we pass for the world
-        # group. On the compile-bound cold first step a cross-node collective can
-        # approach 600s and trip the watchdog → SIGABRT. Raise every sub-group's
-        # timeout to the world value so a slow-but-progressing step waits, not aborts.
+        # Mesh sub-groups (CP all-to-all, EP reduce-scatter) inherit NCCL's 600s
+        # default watchdog, not the world-group `timeout`; a compile-bound cold
+        # first step can exceed 600s, so raise every sub-group to the world value.
         from torch.distributed.distributed_c10d import _set_pg_timeout
 
         _seen_pg = set()
@@ -357,7 +340,7 @@ class FsdpStrategy:
             model = engine
         return model, optimizer, scheduler
 
-    def _maybe_debug_grad_stats(self, model: nn.Module, optim_name: str) -> None:
+    def debug_grad_stats(self, model: nn.Module, optim_name: str) -> None:
         debug = os.environ.get("MOLT_FSDP_DEBUG_GRADS", "")
         if not debug or debug == "0":
             return

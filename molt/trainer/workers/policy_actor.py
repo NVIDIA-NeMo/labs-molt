@@ -416,7 +416,7 @@ class PolicyTrainer:
             self.actor.model.backward(total_loss, scale_wrt_gas=False)
 
         if is_optimizer_step:
-            self.strategy._maybe_debug_grad_stats(self.actor, "actor")
+            self.strategy.debug_grad_stats(self.actor, "actor")
         self.actor.model.step()
         grad_norm = self.actor.model.get_global_grad_norm() if is_optimizer_step else None
         return self._collect_metrics(
@@ -539,26 +539,18 @@ class PolicyTrainer:
         ep_size = getattr(self.strategy.args.fsdp, "ep_size", 1) or 1
         model_config = getattr(model, "config", None)
 
-        # Pack many small per-tensor broadcasts into large batched broadcasts.
-        # Inspired by vLLM's `vllm.distributed.weight_transfer.packed_tensor`
-        # — same idea, simplified (no double-buffer streams) since FSDP
-        # `gather_full_param` already serializes on the default stream so
-        # overlap gain is small. Cuts a 30B+ MoE refit from thousands of
-        # RPC+broadcast pairs to ~tens.
-        #
-        # Only trainer rank 0 holds `_model_update_group`; non-rank-0 ranks
-        # still call `gather_full_param` (an FSDP collective) but drop the
-        # gathered tensor immediately — no point staging the batch on every rank.
+        # Pack many small per-tensor broadcasts into large batched broadcasts,
+        # cutting a large-MoE refit from thousands of RPC+broadcast pairs to tens.
+        # Only trainer rank 0 holds `_model_update_group`; other ranks still join
+        # `gather_full_param` (an FSDP collective) but drop the gathered tensor.
         is_rank0 = torch.distributed.get_rank() == 0
         # --train.check_weight_update_equal: rank 0 arms the check, evaluated after the last flush.
         check_weight_update = is_rank0 and getattr(self.strategy.args.train, "check_weight_update_equal", False)
         if check_weight_update:
             ray.get([engine.reset_weight_update_check.remote() for engine in self.vllm_engines])
-        # 512 MiB flushes, matching slime's `--update-weight-buffer-size` default
-        # (512 * 1024**2). vLLM runs at high gpu_memory_utilization (~0.9-0.95) with
-        # little free VRAM, and the receiver allocates a contiguous
-        # `torch.empty(sum(sizes))` per flush — the old 1 GiB batch OOMed the engine.
-        packed_threshold_bytes = 512 * 1024**2  # 512 MiB (slime default)
+        # 512 MiB flushes (slime's default): the receiver allocates one contiguous
+        # buffer per flush, and vLLM runs with little free VRAM.
+        packed_threshold_bytes = 512 * 1024**2
 
         pending_metas: list[tuple[str, torch.dtype, tuple[int, ...]]] = []
         pending_tensors: list[torch.Tensor] = []
@@ -578,29 +570,17 @@ class PolicyTrainer:
             pending_bytes = 0
 
         for name, tensor in model.state_dict().items():
-            # Refit EVERY state_dict entry (each converted to HF names below). vLLM's
-            # load_weights matches by name and ignores what it doesn't have, so the
-            # "which weights to accept" decision lives on the vLLM side. We deliberately
-            # do NOT pre-filter by a named_parameters requires_grad map: its FQNs differ
-            # from state_dict's (custom-AutoModel / FSDP naming), so that filter silently
-            # skipped ~all trained weights and left vLLM stuck on the base checkpoint
-            # (vllm_kl then grew with training as the actor drifted from the stale engine).
-            # Skip TE `_extra_state` (fp8 amax bookkeeping — a uint8 tensor in recent
-            # TE, a BytesIO in older) and any other non-tensor. It is never a real
-            # weight and vLLM has no param for it; the HF adapter drops it via
-            # `exclude_key_regex` anyway (NeMo-RL relies on that same regex). Skip it
-            # here so a tensor-valued `_extra_state` can't trip the expert guard below.
+            # Refit EVERY state_dict entry; vLLM's load_weights matches by name
+            # and ignores the rest, so the acceptance decision lives on the vLLM
+            # side (a requires_grad pre-filter would use mismatched FQNs and
+            # silently skip trained weights). TE `_extra_state` is fp8 amax
+            # bookkeeping, never a real weight.
             if not torch.is_tensor(tensor) or name.endswith("_extra_state"):
                 continue
 
-            # EP-sharded experts must be DTensors so `gather_full_param`'s
-            # `full_tensor()` collects every expert across the EP mesh. The
-            # default torch_mm experts (GroupedExperts + ExpertParallel) are
-            # DTensors, so this holds; but the TE GroupedLinear layout
-            # (BackendConfig experts="te") keeps only this rank's local experts
-            # as plain tensors, which would silently broadcast just rank-0's
-            # slice. The train and rollout engines must share this DTensor
-            # invariant — enforce it loudly rather than let their policies diverge.
+            # EP-sharded experts must be DTensors so full_tensor() gathers every
+            # expert across the EP mesh; the TE GroupedLinear layout keeps only
+            # local experts as plain tensors and would broadcast rank-0's slice.
             if ep_size > 1 and "expert" in name and not isinstance(tensor, DTensor):
                 raise RuntimeError(
                     f"Refit: expert weight {name!r} is not a DTensor under ep_size={ep_size}; "
@@ -633,26 +613,17 @@ class PolicyTrainer:
                     continue
                 if _skip_tied_lm_head(model_config, hf_name):
                     continue  # redundant: vLLM gets the shared weight via embed_tokens
-                # Dtype-faithful refit: keep each param in its native/compute dtype
-                # instead of force-casting everything to a single `param_dtype`. vLLM's
-                # `load_weights` casts each tensor to *that param's own* target dtype via
-                # `param.data.copy_()`, so an fp32-kept weight (e.g. a fp32 MoE
-                # router/gate) round-trips as fp32 rather than being silently
-                # bf16-downcast (which previously corrupted routing). For bf16-target
-                # params the final vLLM value is identical to the old forced-bf16 path
-                # (the cast just happens on the receiver); the only cost is ~2x transfer
-                # bytes for fp32 masters — negligible next to the broadcast lock-wait.
+                # Keep each param in its native dtype: vLLM casts to the target
+                # param's own dtype on receive, so fp32-kept weights (e.g. the
+                # MoE router) round-trip as fp32 instead of a silent bf16 downcast.
                 hf_weight = hf_weight.to(
                     device=torch.device("cuda", torch.cuda.current_device()),
                     non_blocking=True,
                 ).contiguous()
                 nbytes = hf_weight.numel() * hf_weight.element_size()
-                # slime's `_chunk_by_size`: flush the accumulated batch BEFORE adding a
-                # weight that would take it to/over the buffer size, so each broadcast
-                # buffer stays bounded (an oversized lone tensor forms its own batch). The
-                # old post-append check let a big tensor land on an already-near-threshold
-                # batch, ballooning the receiver's contiguous buffer and OOM-ing vLLM. The
-                # trailing `_flush()` after the loop sends the final partial batch.
+                # Flush BEFORE adding a weight that would cross the threshold so
+                # each broadcast buffer stays bounded; an oversized lone tensor
+                # forms its own batch, and the trailing _flush() sends the rest.
                 if pending_bytes and pending_bytes + nbytes >= packed_threshold_bytes:
                     _flush()
                 pending_metas.append((hf_name, hf_weight.dtype, tuple(hf_weight.shape)))
@@ -757,9 +728,8 @@ class PolicyModelActor(BaseModelActor):
         ckpt_path = os.path.join(args.ckpt.path, "_actor")
         if args.ckpt.load_enable and os.path.exists(ckpt_path):
             strategy.print(f"Loading the checkpoint: {ckpt_path}")
-            # LOAD_MODEL_ONLY=1: skip optim/scheduler state to allow switching optimizer kinds
-            # (e.g. Adam ckpt → Muon resume). LambdaLR's strict-zip on get_lr breaks when
-            # base_lrs (loaded, 1 entry for Adam) mismatches lr_lambdas (fresh, 4 entries for Muon).
+            # LOAD_MODEL_ONLY=1 skips optimizer/scheduler state so a resume can
+            # switch optimizer kinds (their state shapes are incompatible).
             model_only = os.environ.get("LOAD_MODEL_ONLY", "0") == "1"
             _, states = strategy.load_ckpt(
                 self.actor.model,
@@ -813,12 +783,9 @@ class PolicyModelActor(BaseModelActor):
         )
 
     def forward(self, experience) -> torch.Tensor:
-        """Old actor action log-probs for one rollout Experience — the old log-probs used off-policy
-        and the student side of the KL-as-reward path (on_policy_distill / reinforce-KL). reload()
-        first fetches the sample's heavy tensors (token ids / images / routing) from the producing
-        runner's shared-memory store — they reach this rank straight from the runner, never through
-        the controller. Called per sample by execute_batch; the controller attaches the result as
-        action_log_probs."""
+        """Old actor action log-probs for one rollout Experience; the controller
+        attaches the result as action_log_probs. reload() pulls the sample's
+        heavy tensors from the producing runner's shared-memory store."""
         experience = experience.reload()
         experience.to_device(torch.cuda.current_device(), non_blocking=True)
         self.actor.eval()
@@ -840,9 +807,8 @@ class PolicyModelActor(BaseModelActor):
         return self.checkpoint_states
 
     def append(self, experience: Experience):
-        # reload() fetches the sample's heavy tensors (images / token ids / routing) from the
-        # producing runner's shared-memory store — they reach this rank straight from the runner,
-        # never through the controller. A no-op for an already-local experience.
+        # reload() pulls the sample's heavy tensors from the producing runner's
+        # shared-memory store; a no-op for an already-local experience.
         self.trainer.replay_buffer.append(experience.reload())
 
     def save_checkpoint(self, tag, client_states=None, metric_value=None, metric_key=None):

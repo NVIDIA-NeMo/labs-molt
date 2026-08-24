@@ -172,7 +172,7 @@ class SFTTrainer:
                         engine.backward(loss, scale_wrt_gas=False)
 
                     if engine.is_gradient_accumulation_boundary():
-                        self.strategy._maybe_debug_grad_stats(self.model, "model")
+                        self.strategy.debug_grad_stats(self.model, "model")
                     engine.step()
                     window_loss += loss.detach()
 

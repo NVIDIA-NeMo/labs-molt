@@ -229,7 +229,7 @@ class CriticTrainer:
             self.critic.model.backward(loss, scale_wrt_gas=False)
 
         if is_optimizer_step:
-            self.strategy._maybe_debug_grad_stats(self.critic, "critic")
+            self.strategy.debug_grad_stats(self.critic, "critic")
         self.critic.model.step()
         grad_norm = self.critic.model.get_global_grad_norm() if is_optimizer_step else None
         return {
@@ -323,9 +323,8 @@ class CriticModelActor(BaseModelActor):
         return status
 
     def forward(self, experience) -> torch.Tensor:
-        """Per-token value V(s) on the action span (collection-time old_values) for one rollout
-        Experience. reload() first fetches the sample's heavy tensors from the producing runner's
-        shared-memory store. Called per sample by execute_batch; the controller attaches values."""
+        """Collection-time values V(s) on the action span for one rollout
+        Experience; the controller attaches the result as values."""
         experience = experience.reload()
         experience.to_device(torch.cuda.current_device(), non_blocking=True)
         self.critic.eval()
@@ -341,8 +340,8 @@ class CriticModelActor(BaseModelActor):
         return output.action_values.to("cpu")
 
     def append(self, experience: Experience):
-        # reload() fetches the sample's heavy tensors from the producing runner's shared-memory
-        # store (a no-op if already local); mirrors PolicyModelActor.append.
+        # reload() pulls the sample's heavy tensors from the producing runner's
+        # shared-memory store; a no-op for an already-local experience.
         self.trainer.replay_buffer.append(experience.reload())
 
     def get_checkpoint_states(self):
@@ -359,11 +358,8 @@ class CriticModelActor(BaseModelActor):
             args.ckpt.dcp_max_num,
             args.ckpt.max_mem,
             client_states or {},
-            # Forward the actor's eval metric so the critic's retention/pruning
-            # (sorted by metric in _prune_checkpoints) makes the SAME keep/drop
-            # decisions as the actor — otherwise the critic prunes by recency
-            # only and the two checkpoint sets desync (a step the actor keeps for
-            # its metric may have its _critic dir pruned).
+            # Forward the actor's eval metric so critic checkpoint pruning makes
+            # the same keep/drop decisions as the actor's.
             metric_value=metric_value,
             metric_key=metric_key,
             optimizer=self.critic_optim,

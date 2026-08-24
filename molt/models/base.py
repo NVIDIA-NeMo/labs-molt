@@ -181,13 +181,11 @@ def _automodel_supports_thd_packing(model_or_path) -> bool:
 
 
 def _mtp_off_kwargs(pretrain_or_model) -> dict:
-    """Return the ``from_pretrained`` config-override kwarg that disables the MTP head.
+    """``from_pretrained`` config-override kwargs that disable the MTP head.
 
-    The training actor never uses the multi-token-prediction head (rollout spec-decode
-    loads its own copy in vLLM). AutoModel deep-merges nested config dicts, so
-    ``text_config={...}`` patches just that field (same mechanism as the recipe yaml's
-    ``text_config.mtp_num_hidden_layers: 0``). Returns ``{}`` when MTP is absent or the
-    path can't be introspected."""
+    The training actor never uses multi-token prediction (rollout spec-decode
+    loads its own copy in vLLM), and some checkpoints declare MTP modules
+    without shipping their weights. Returns ``{}`` when MTP is absent."""
     if not isinstance(pretrain_or_model, str):
         return {}
     try:
@@ -198,9 +196,7 @@ def _mtp_off_kwargs(pretrain_or_model) -> dict:
         return {}
     text_config = getattr(cfg, "text_config", None)
     target = text_config if text_config is not None else cfg
-    # MoE families name the MTP-depth config key differently (all keys tried below);
-    # disable whichever the config enables. Needed even when a checkpoint declares MTP
-    # modules but ships no MTP weights (building them would fail the weight load).
+    # Model families name the MTP-depth key differently; zero whichever is set.
     disabled = {
         k: 0 for k in ("mtp_num_hidden_layers", "num_nextn_predict_layers", "num_mtp_modules") if getattr(target, k, 0)
     }
@@ -259,50 +255,15 @@ class BaseModel(nn.Module):
                 raise ValueError("pre_fsdp_hook requires loading the model through NeMoAutoModel")
             self.model = pretrain_or_model
             self.is_vlm = False
-            is_native_model = is_automodel_custom_model(self.model)
-            is_moe = _detect_moe_arch(self.model)
-            _reject_hf_fallback_features(
-                is_hf_model=not is_native_model,
-                is_moe=is_moe,
+            # Pre-instantiated models (tests, inference utilities) skip the CLI
+            # backend-flag check: attn_implementation only applies to models
+            # this wrapper loads itself.
+            self._finalize_model_setup(
+                packing_samples=packing_samples,
+                attn_implementation=None,
                 moe_aux_loss_coef=moe_aux_loss_coef,
+                routing_replay=routing_replay,
             )
-            if is_native_model:
-                configured_aux = configure_nemo_moe_aux_loss(self.model, moe_aux_loss_coef)
-                if abs(float(moe_aux_loss_coef or 0.0)) > 1e-8 and not configured_aux:
-                    raise ValueError(
-                        "MoE auxiliary loss was requested, but the AutoModel model has no native MoE gates."
-                    )
-            if packing_samples:
-                if is_native_model:
-                    if not _automodel_supports_thd_packing(self.model):
-                        raise ValueError(
-                            "This pre-instantiated AutoModel custom model does not declare THD packing support. "
-                            "Use an AutoModel custom TE model or disable --fsdp.packing_samples."
-                        )
-                    self.packing_layout = "thd"
-                else:
-                    mesh_names = getattr(device_mesh, "mesh_dim_names", ()) or ()
-                    cp_size = device_mesh["cp"].size() if "cp" in mesh_names else 1
-                    pp_size = device_mesh["pp"].size() if "pp" in mesh_names else 1
-                    if moe_mesh is not None or cp_size > 1 or pp_size > 1:
-                        raise NotImplementedError(
-                            "Hugging Face indexed-mask packing requires cp_size=1, pp_size=1, and ep_size=1."
-                        )
-                    from nemo_automodel.components.models.common.packing import (
-                        configure_packing,
-                        get_attn_implementation,
-                    )
-
-                    actual_attn = get_attn_implementation(None, model=self.model)
-                    if actual_attn != "flash_attention_2":
-                        raise RuntimeError(
-                            "Hugging Face indexed-mask packing requires the model to use flash_attention_2; "
-                            f"got {actual_attn!r}."
-                        )
-                    configure_packing("flash_attention_2")
-                    self.packing_layout = "indexed_mask"
-            if routing_replay:
-                self._enable_routing_replay()
             return
 
         from molt.utils.utils import convert_to_torch_dtype, is_vlm_model
@@ -321,38 +282,37 @@ class BaseModel(nn.Module):
         )
         if is_moe and not ep_active:
             raise ValueError("MoE models require --fsdp.ep_size > 1 in the AutoModel custom-only branch.")
-        # EP dispatch is a nemo_automodel custom-path feature; HF has no equivalent. An
-        # HF-fallback model under active EP would silently mis-shard experts / train on
-        # wrong grads, so forbid it loudly. (TP/CP run on HF, so they aren't gated here.)
+        # EP dispatch only exists on the AutoModel custom path; an HF-fallback
+        # model under active EP would silently mis-shard experts. TP/CP run fine
+        # on HF, so only EP is gated here.
         if use_hf_model and ep_active:
             raise RuntimeError(
                 f"{pretrain_or_model!r}: architecture not in nemo_automodel's ModelRegistry, so molt "
-                "would fall back to HF transformers — which has no expert-parallel (EP) dispatch, but "
-                "EP is active here (ep_size>1). The HF fallback is forbidden under EP. Use a checkpoint "
-                "whose `architectures` is natively registered (e.g. omni3: NemotronH_Nano_Omni_Reasoning_V3, "
-                "the official GA model — not a renamed alias), or run with ep_size=1."
+                "would fall back to HF transformers, which has no expert-parallel dispatch. Use a "
+                "natively registered checkpoint or run with ep_size=1."
             )
-        if packing_samples and use_hf_model:
-            if attn_implementation != "flash_attention_2":
-                raise ValueError(
-                    "Hugging Face fallback packing requires --fsdp.attn_implementation flash_attention_2."
-                )
+        # Fail fast on packing misconfigurations before the (possibly very
+        # large) checkpoint load; _finalize_model_setup rechecks the loaded model.
+        if packing_samples:
             mesh_names = getattr(device_mesh, "mesh_dim_names", ()) or ()
-            cp_size = device_mesh["cp"].size() if "cp" in mesh_names else 1
             pp_size = device_mesh["pp"].size() if "pp" in mesh_names else 1
-            if cp_size > 1 or pp_size > 1:
-                raise NotImplementedError("Hugging Face indexed-mask packing requires cp_size=1 and pp_size=1.")
-        if packing_samples and not use_hf_model and not _automodel_supports_thd_packing(pretrain_or_model):
-            raise ValueError(
-                "AutoModel custom implementation for this architecture does not declare THD packing support; "
-                "use --fsdp.attn_implementation te with a THD-capable custom model or disable packing."
-            )
+            if use_hf_model:
+                if attn_implementation != "flash_attention_2":
+                    raise ValueError(
+                        "Hugging Face fallback packing requires --fsdp.attn_implementation flash_attention_2."
+                    )
+                if self.cp_size > 1 or pp_size > 1:
+                    raise NotImplementedError("Hugging Face indexed-mask packing requires cp_size=1 and pp_size=1.")
+            elif not _automodel_supports_thd_packing(pretrain_or_model):
+                raise ValueError(
+                    "AutoModel custom implementation for this architecture does not declare THD packing support; "
+                    "use --fsdp.attn_implementation te with a THD-capable custom model or disable packing."
+                )
 
         _validate_attn_implementation(attn_implementation)
-        # fp32 master weights (including MoE): matches AutoModel's master-weight
-        # contract (NVIDIA-NeMo/Automodel PR #2379) — load in fp32, let FSDP2's
-        # MixedPrecisionPolicy(param_dtype=bf16) do bf16 fwd/bwd. A bf16 master
-        # rounds away AdamW updates (~LR < bf16 ULP) at small LR, so the MoE never learns.
+        # fp32 master weights, bf16 fwd/bwd via FSDP2 MixedPrecisionPolicy
+        # (NVIDIA-NeMo/Automodel PR #2379): a bf16 master rounds away small-LR
+        # AdamW updates.
         torch_dtype = compute_dtype if not use_fp32_master_weights else torch.float32
         self.is_vlm = is_vlm_model(pretrain_or_model)
 
@@ -370,10 +330,10 @@ class BaseModel(nn.Module):
                 "(architecture not in nemo_automodel ModelRegistry) — falling back to HuggingFace "
                 "transformers. Native parallelism, selective activation checkpointing, and TE attention are OFF."
             )
-        # AutoModel custom drives attention/MoE through a BackendConfig and hands
-        # from_pretrained "sdpa": passing "te" would also fire AutoModel's own post-init
-        # TE injection (auto_model.py) on top of the backend's. HF rejects the `backend`
-        # kwarg, so we omit it there and pass attn_implementation through unchanged.
+        # AutoModel custom models take their kernels from BackendConfig and get
+        # attn_implementation="sdpa" (passing "te" would additionally fire
+        # AutoModel's post-init TE injection). HF fallback rejects the `backend`
+        # kwarg, so it receives attn_implementation unchanged and no BackendConfig.
         attn_for_from_pretrained = attn_implementation
         backend_kwarg: dict = {}
         if not use_hf_model:
@@ -381,19 +341,24 @@ class BaseModel(nn.Module):
 
             backend_attn = _resolve_custom_backend_attn(attn_implementation, packing_samples)
             using_te = backend_attn == "te"
-            # Disable TE fused RoPE everywhere: VLM mRoPE position tensors don't match
-            # the simpler 4D rotary layout the fused kernel expects (first surfaced under
-            # Qwen3.5-MoE CP; disabled unconditionally to keep RoPE correct on all paths).
-            backend_cfg = {"attn": backend_attn, "rope_fusion": False}
-            # Pin the MoE dispatcher (BackendConfig otherwise auto-selects on deep_ep
-            # importability, silently changing the training path). Default hybridep to
-            # match AutoModel; == deepep on intra-node NVLink. Override MOLT_MOE_DISPATCHER
-            # (d580 recipes pin deepep — cross-node hybridep/DOCA-GPUNetIO fails there).
-            backend_cfg["dispatcher"] = os.environ.get("MOLT_MOE_DISPATCHER", "hybridep")
-            # Linear (GEMM) + experts backend follow the attention choice by default
-            # (TE attn -> TE linear/experts, else torch). Some models decouple them
-            # (e.g. sparse-attn arch needs sdpa but wants TE linear + gmm experts), so
-            # MOLT_LINEAR_BACKEND / MOLT_MOE_EXPERTS override the attn-coupled default.
+            backend_cfg = {
+                "attn": backend_attn,
+                # TE fused RoPE cannot handle multi-axis VLM mRoPE position
+                # tensors; keep it off on every path so RoPE stays correct.
+                "rope_fusion": False,
+                # Pin the MoE dispatcher: BackendConfig otherwise auto-selects
+                # on deep_ep importability, silently changing the training path.
+                "dispatcher": os.environ.get("MOLT_MOE_DISPATCHER", "hybridep"),
+                # bf16 RMSNorm recomputes non-deterministically under activation
+                # checkpointing (CheckpointError); default fp32 like AutoModel recipes.
+                "rms_norm": os.environ.get("MOLT_RMS_NORM", "torch_fp32"),
+                # fp32 router matches vLLM's fp32 routing; a bf16 gate drifts from
+                # the rollout engine and inflates vllm_kl. Matches slime/verl.
+                "gate_precision": os.environ.get("MOLT_GATE_PRECISION", "float32"),
+            }
+            # Linear/experts kernels follow the attention choice (TE attn -> TE
+            # linear/experts, else torch); env overrides decouple them for models
+            # that mix backends (e.g. sdpa attention with TE linear).
             linear_backend = os.environ.get("MOLT_LINEAR_BACKEND")
             experts_backend = os.environ.get("MOLT_MOE_EXPERTS")
             if linear_backend:
@@ -404,15 +369,6 @@ class BaseModel(nn.Module):
                 backend_cfg["experts"] = experts_backend
             elif not using_te:
                 backend_cfg["experts"] = "torch_mm"
-            # RMS-norm precision. bf16 RMSNorm recomputes non-deterministically under
-            # activation checkpointing (-> CheckpointError) and destabilizes the MoE grad
-            # norm. Default fp32 (matches AutoModel reference recipes). Override: MOLT_RMS_NORM.
-            backend_cfg["rms_norm"] = os.environ.get("MOLT_RMS_NORM", "torch_fp32")
-            # Force the MoE router to fp32 (BackendConfig defaults the gate linear to
-            # the bf16 bulk dtype). A bf16 router drifts from vLLM's fp32 router ->
-            # rollout-vs-train logprobs diverge and vllm_kl climbs. Matches slime/verl.
-            # Override: MOLT_GATE_PRECISION.
-            backend_cfg["gate_precision"] = os.environ.get("MOLT_GATE_PRECISION", "float32")
             attn_for_from_pretrained = "sdpa"
             backend_kwarg = {"backend": BackendConfig(**backend_cfg)}
             if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
@@ -449,45 +405,18 @@ class BaseModel(nn.Module):
             **_mtp_off_kwargs(pretrain_or_model),
             **backend_kwarg,
         )
-        # Registry/config inspection is best-effort. Recheck the loaded class so
-        # a late AutoModel -> HF fallback cannot enter either removed feature.
-        is_native_model = is_automodel_custom_model(self.model)
-        _reject_hf_fallback_features(
-            is_hf_model=not is_native_model,
-            is_moe=_detect_moe_arch(self.model),
+        # Path/registry inspection above is best-effort; recheck the class that
+        # actually loaded so a late AutoModel -> HF fallback cannot slip past.
+        self._finalize_model_setup(
+            packing_samples=packing_samples,
+            attn_implementation=attn_implementation,
             moe_aux_loss_coef=moe_aux_loss_coef,
+            routing_replay=routing_replay,
         )
-        if packing_samples:
-            if is_native_model:
-                if attn_implementation not in {"te", "tilelang"}:
-                    raise ValueError("AutoModel-native packing requires --fsdp.attn_implementation te or tilelang.")
-                if not _automodel_supports_thd_packing(self.model):
-                    raise ValueError("The loaded AutoModel-native model does not declare THD packing support.")
-                self.packing_layout = "thd"
-            else:
-                from nemo_automodel.components.models.common.packing import configure_packing, get_attn_implementation
 
-                actual_attn = get_attn_implementation(None, model=self.model)
-                if actual_attn != "flash_attention_2":
-                    raise RuntimeError(
-                        "Hugging Face indexed-mask packing requires the loaded model to use flash_attention_2; "
-                        f"got {actual_attn!r}."
-                    )
-                configure_packing("flash_attention_2")
-                self.packing_layout = "indexed_mask"
-        if is_native_model:
-            configured_aux = configure_nemo_moe_aux_loss(self.model, moe_aux_loss_coef)
-            if abs(float(moe_aux_loss_coef or 0.0)) > 1e-8 and not configured_aux:
-                raise ValueError("MoE auxiliary loss was requested, but the AutoModel model has no native MoE gates.")
-        if routing_replay:
-            self._enable_routing_replay()
-        if self.packing_layout is not None:
-            print(f"[Packing] Using AutoModel {self.packing_layout} packed path.")
-
-        # Optionally freeze the MoE router/gate (keeps vLLM-vs-actor routing identical,
-        # stabilizes training). Match by isinstance(Gate), NOT by name: the path varies by
-        # arch and a `gate` name match would also catch the gated-MLP `gate_proj.weight`,
-        # which is not a router. requires_grad=False drops it from the optimizer and refit.
+        # Optional MoE router freeze (keeps vLLM-vs-actor routing identical).
+        # Match by isinstance(Gate), not name: a name match would also catch the
+        # gated-MLP `gate_proj`, which is not a router.
         if freeze_moe_router:
             try:
                 from nemo_automodel.components.moe.layers import Gate
@@ -515,6 +444,62 @@ class BaseModel(nn.Module):
             self._video_token_id = _first_token_id(
                 self._vlm_config, "video_token_id", "video_token_index", "video_context_token_id"
             )
+
+    def _finalize_model_setup(
+        self,
+        *,
+        packing_samples: bool,
+        attn_implementation: Optional[str],
+        moe_aux_loss_coef: float,
+        routing_replay: bool,
+    ) -> None:
+        """Configure a constructed ``self.model``: HF-fallback gating, packing
+        layout, MoE aux loss, and routing replay. ``attn_implementation`` is
+        ``None`` for pre-instantiated models, skipping the CLI-flag check."""
+        is_native_model = is_automodel_custom_model(self.model)
+        _reject_hf_fallback_features(
+            is_hf_model=not is_native_model,
+            is_moe=_detect_moe_arch(self.model),
+            moe_aux_loss_coef=moe_aux_loss_coef,
+        )
+        if packing_samples:
+            self.packing_layout = self._resolve_packing_layout(is_native_model, attn_implementation)
+            print(f"[Packing] Using AutoModel {self.packing_layout} packed path.")
+        if is_native_model:
+            configured_aux = configure_nemo_moe_aux_loss(self.model, moe_aux_loss_coef)
+            if abs(float(moe_aux_loss_coef or 0.0)) > 1e-8 and not configured_aux:
+                raise ValueError("MoE auxiliary loss was requested, but the AutoModel model has no native MoE gates.")
+        if routing_replay:
+            self._enable_routing_replay()
+
+    def _resolve_packing_layout(
+        self, is_native_model: bool, attn_implementation: Optional[str]
+    ) -> Literal["thd", "indexed_mask"]:
+        if is_native_model:
+            if attn_implementation is not None and attn_implementation not in {"te", "tilelang"}:
+                raise ValueError("AutoModel-native packing requires --fsdp.attn_implementation te or tilelang.")
+            if not _automodel_supports_thd_packing(self.model):
+                raise ValueError(
+                    "This AutoModel custom model does not declare THD packing support; "
+                    "use a THD-capable custom model or disable --fsdp.packing_samples."
+                )
+            return "thd"
+
+        mesh_names = getattr(self.device_mesh, "mesh_dim_names", ()) or ()
+        pp_size = self.device_mesh["pp"].size() if "pp" in mesh_names else 1
+        if self._moe_mesh is not None or self.cp_size > 1 or pp_size > 1:
+            raise NotImplementedError(
+                "Hugging Face indexed-mask packing requires cp_size=1, pp_size=1, and ep_size=1."
+            )
+        from nemo_automodel.components.models.common.packing import configure_packing, get_attn_implementation
+
+        actual_attn = get_attn_implementation(None, model=self.model)
+        if actual_attn != "flash_attention_2":
+            raise RuntimeError(
+                f"Hugging Face indexed-mask packing requires the model to use flash_attention_2; got {actual_attn!r}."
+            )
+        configure_packing("flash_attention_2")
+        return "indexed_mask"
 
     def _enable_routing_replay(self) -> None:
         """Bind AutoModel's model-scoped rollout routing adapter."""

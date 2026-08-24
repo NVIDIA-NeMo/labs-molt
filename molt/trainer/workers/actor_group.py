@@ -162,10 +162,8 @@ class ReferenceModelActor(BaseModelActor):
         self.model.eval()
 
     def forward(self, experience) -> torch.Tensor:
-        """Reference log-probs for one rollout Experience. reload() first fetches the sample's heavy
-        tensors (token ids / images) from the producing runner's shared-memory store — they reach
-        this rank straight from the runner, never through the controller. Called per sample by
-        execute_batch; the controller attaches the result as base_action_log_probs."""
+        """Reference log-probs for one rollout Experience; the controller
+        attaches the result as base_action_log_probs."""
         experience = experience.reload()
         device = torch.cuda.current_device()
         with torch.no_grad(), ExitStack() as forward_context:

@@ -39,7 +39,7 @@ class _Strategy:
         self.reductions.append((data.detach().clone(), op))
         return data
 
-    def _maybe_debug_grad_stats(self, model, name):
+    def debug_grad_stats(self, model, name):
         self.events.append("debug")
 
 
