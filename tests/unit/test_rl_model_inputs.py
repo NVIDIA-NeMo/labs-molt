@@ -220,7 +220,6 @@ def test_packing_round_trips_dense_token_coordinates(layout):
         sequences,
         attention_mask,
         layout=layout,
-        pad_to_tokens=8 if layout == "thd" else None,
     )
 
     assert torch.equal(packed[:, :4], torch.tensor([[1, 3, 4, 5]]))
@@ -232,8 +231,8 @@ def test_packing_round_trips_dense_token_coordinates(layout):
     if layout == "thd":
         assert attention["qkv_format"] == "thd"
         assert torch.equal(attention["cu_seqlens"], torch.tensor([0, 1, 4], dtype=torch.int32))
-        assert torch.equal(attention["cu_seqlens_padded"], torch.tensor([0, 1, 8], dtype=torch.int32))
-        assert torch.equal(attention["padding_mask"], torch.tensor([[False] * 4 + [True] * 4]))
+        assert torch.equal(attention["cu_seqlens_padded"], torch.tensor([0, 1, 4], dtype=torch.int32))
+        assert torch.equal(attention["padding_mask"], torch.tensor([[False] * 4]))
     else:
         assert torch.equal(attention["attention_mask"], torch.tensor([[1, 2, 2, 2]]))
 
@@ -268,27 +267,6 @@ def test_routing_replay_uses_the_same_physical_map_as_packed_tokens():
     assert torch.equal(prepared[0, 1], routes[0, :, :, 1])
     assert torch.equal(prepared[0, 4], routes[1, :, :, 0])
     assert (prepared[0, [2, 3, 5, 6, 7]] == -1).all()
-
-
-def test_hybridep_equalization_uses_ep_then_ep_shard_and_rejects_unequal_padded_batches(monkeypatch):
-    actor = Actor(_TinyPolicyModel())
-    actor._hybridep_equalization_groups = ("ep", "ep_shard")
-    calls = []
-
-    def max_width(extrema, *, op, group):
-        calls.append((op, group))
-        extrema[2] = 8
-
-    monkeypatch.setattr(torch.distributed, "all_reduce", max_width)
-    assert actor._hybridep_target_width(torch.ones(1, 4), packed=True) == 8
-    assert [group for _op, group in calls] == ["ep", "ep_shard"]
-
-    def unequal_batch(extrema, *, op, group):
-        extrema[1] = 2
-
-    monkeypatch.setattr(torch.distributed, "all_reduce", unequal_batch)
-    with pytest.raises(NotImplementedError, match="same batch size"):
-        actor._hybridep_target_width(torch.ones(1, 4), packed=False)
 
 
 class _TinyValueModel(nn.Module):

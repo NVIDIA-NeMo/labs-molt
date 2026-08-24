@@ -21,9 +21,7 @@ from contextlib import nullcontext
 from typing import Optional, Union
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
-import torch.nn.functional as F
 
 from molt.models.loading import configure_loaded_model, load_automodel
 from molt.models.packing import pack_padded_batch, unpack_to_padded
@@ -71,8 +69,6 @@ class BaseModel(nn.Module):
         mesh_dims = getattr(device_mesh, "mesh_dim_names", ()) or ()
         cp_mesh = device_mesh["cp"] if device_mesh is not None and "cp" in mesh_dims else None
         self.cp_size = cp_mesh.size() if cp_mesh is not None else 1
-        self._hybridep_equalization_groups = None
-        self._model_owns_hybridep_packed_cp_equalization = False
 
         if isinstance(pretrain_or_model, str):
             from molt.utils.utils import is_vlm_model
@@ -139,60 +135,6 @@ class BaseModel(nn.Module):
     def module(self) -> nn.Module:
         """The trainable module, whether or not ``model`` is an Engine."""
         return getattr(self.model, "module", self.model)
-
-    def _hybridep_target_width(self, token_tensor, *, packed: bool) -> int | None:
-        """Return the common physical token width required by live HybridEP dispatchers."""
-        if self._hybridep_equalization_groups is None:
-            uses_uniform_tokens = False
-            owns_packed_cp_equalization = False
-            for module in self.module.modules():
-                dispatcher = getattr(module, "token_dispatcher", None)
-                uses_uniform_tokens |= getattr(dispatcher, "requires_uniform_token_count", False) is True
-                owns_packed_cp_equalization |= bool(getattr(module, "owns_hybridep_packed_cp_equalization", False))
-
-            groups = []
-            if uses_uniform_tokens:
-                mesh_names = getattr(self._moe_mesh, "mesh_dim_names", ()) or ()
-                if self._moe_mesh is None or "ep" not in mesh_names or self._moe_mesh["ep"].size() <= 1:
-                    raise ValueError("a live HybridEP dispatcher requires a moe_mesh with ep_size > 1")
-                if not dist.is_available() or not dist.is_initialized():
-                    raise RuntimeError("a live HybridEP dispatcher requires initialized distributed process groups")
-                groups.append(self._moe_mesh["ep"].get_group())
-                if self.cp_size > 1:
-                    if "ep_shard" not in mesh_names:
-                        raise ValueError("HybridEP with context parallelism requires an ep_shard mesh axis")
-                    if self._moe_mesh["ep_shard"].size() > 1:
-                        groups.append(self._moe_mesh["ep_shard"].get_group())
-            self._hybridep_equalization_groups = tuple(groups)
-            self._model_owns_hybridep_packed_cp_equalization = owns_packed_cp_equalization
-
-        if not self._hybridep_equalization_groups:
-            return None
-        if token_tensor.ndim < 2 or token_tensor.shape[0] < 1 or token_tensor.shape[1] < 1:
-            raise ValueError("HybridEP requires a non-empty [batch, tokens, ...] model input")
-
-        local = torch.tensor(
-            (int(packed), int(token_tensor.shape[0]), int(token_tensor.shape[1])),
-            dtype=torch.int64,
-            device=token_tensor.device,
-        )
-        extrema = torch.cat((local, -local))
-        for group in self._hybridep_equalization_groups:
-            dist.all_reduce(extrema, op=dist.ReduceOp.MAX, group=group)
-        upper = extrema[: local.numel()].tolist()
-        lower = (-extrema[local.numel() :]).tolist()
-        if lower[0] != upper[0]:
-            raise ValueError("HybridEP ranks must all use packed inputs or all use padded inputs")
-        if packed:
-            if lower[1] != 1 or upper[1] != 1:
-                raise ValueError("HybridEP packed equalization requires one physical token row per rank")
-            if self.cp_size > 1 and self._model_owns_hybridep_packed_cp_equalization:
-                return None
-        elif lower[1] != upper[1]:
-            raise NotImplementedError(
-                "HybridEP padded equalization requires the same batch size on every participating rank"
-            )
-        return None if lower[2] == upper[2] else int(upper[2])
 
     def _restore_full_sequence(self, values, *, cp_forward, batch, seqlen, indices):
         """Restore token values to shape ``[batch, sequence, ...]``."""
@@ -287,11 +229,7 @@ class BaseModel(nn.Module):
             get_rope_index=get_rope_index,
             sequence_alignment=sequence_alignment,
         )
-        packed_ids = torch.as_tensor(packed["input_ids"], device=sequences.device).reshape(1, -1)
-        target_width = self._hybridep_target_width(packed_ids, packed=True)
         collate_kwargs = {"padding_idx": padding_token_id}
-        if target_width is not None:
-            collate_kwargs["max_length"] = target_width
         if self.packing_layout == "thd":
             from nemo_automodel.components.datasets.vlm import packed_sequence_thd_vlm_collater
 
@@ -369,16 +307,6 @@ class BaseModel(nn.Module):
                     padding_token_id=padding_token_id,
                 )
                 packed_ids, packed_positions, rolled_sequences, indices, packed_attention = packed
-                target_width = self._hybridep_target_width(packed_ids, packed=True)
-                if target_width is not None:
-                    packed_ids, packed_positions, rolled_sequences, indices, packed_attention = pack_padded_batch(
-                        sequences,
-                        attention_mask,
-                        layout=self.packing_layout,
-                        sequence_alignment=sequence_alignment,
-                        pad_to_tokens=target_width,
-                        padding_token_id=padding_token_id,
-                    )
                 model_batch = {
                     "input_ids": packed_ids,
                     "labels": rolled_sequences,
@@ -401,16 +329,6 @@ class BaseModel(nn.Module):
                         "padded context parallelism requires right-padded contiguous sequences; enable packing "
                         "for arbitrary padding layouts"
                     )
-
-            target_width = self._hybridep_target_width(sequences, packed=False)
-            if target_width is not None:
-                pad = target_width - sequences.shape[1]
-                sequences = F.pad(sequences, (0, pad), value=padding_token_id)
-                attention_mask = F.pad(attention_mask, (0, pad))
-                if position_ids is not None:
-                    position_ids = F.pad(position_ids, (0, pad))
-                if routed_experts is not None:
-                    routed_experts = F.pad(routed_experts, (0, pad), value=-1)
 
             if self.is_vlm and isinstance(mm_inputs, list):
                 from molt.utils.vlm_utils import merge_mm_train_inputs

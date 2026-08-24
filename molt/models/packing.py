@@ -13,7 +13,6 @@ def pack_padded_batch(
     *,
     layout: str,
     sequence_alignment: int = 1,
-    pad_to_tokens: int | None = None,
     padding_token_id: int = 0,
 ):
     """Pack padded next-token examples into one physical token row.
@@ -23,7 +22,6 @@ def pack_padded_batch(
         attention_mask: Contiguous valid-token spans matching ``sequences``.
         layout: ``"thd"`` or ``"indexed_mask"``.
         sequence_alignment: Physical alignment for each THD document.
-        pad_to_tokens: Optional final THD width for HybridEP equalization.
         padding_token_id: Fill for synthetic input tokens.
 
     Returns:
@@ -40,8 +38,6 @@ def pack_padded_batch(
         raise ValueError(f"sequence_alignment must be positive, got {sequence_alignment}")
     if layout == "indexed_mask" and sequence_alignment != 1:
         raise ValueError("indexed-mask packing does not support per-document alignment")
-    if layout == "indexed_mask" and pad_to_tokens is not None:
-        raise ValueError("indexed-mask packing does not support expert-parallel token padding")
 
     batch, seqlen = sequences.shape
     packed_ids_parts = []
@@ -70,24 +66,6 @@ def pack_padded_batch(
         document_id_parts.append(torch.full((padded_length,), row + 1, device=sequences.device, dtype=torch.long))
         seq_lens.append(real_length)
         padded_lens.append(padded_length)
-
-    physical_tokens = sum(padded_lens)
-    trailing_pad = 0 if pad_to_tokens is None else pad_to_tokens - physical_tokens
-    if trailing_pad < 0:
-        raise ValueError(f"pad_to_tokens={pad_to_tokens} is smaller than the {physical_tokens} packed tokens")
-    if trailing_pad:
-        packed_ids_parts[-1] = F.pad(packed_ids_parts[-1], (0, trailing_pad), value=padding_token_id)
-        target_parts[-1] = F.pad(target_parts[-1], (0, trailing_pad))
-        start = padded_lens[-1]
-        position_parts[-1] = torch.cat(
-            (
-                position_parts[-1],
-                torch.arange(start, start + trailing_pad, device=sequences.device, dtype=torch.long),
-            )
-        )
-        physical_to_dense_parts[-1] = F.pad(physical_to_dense_parts[-1], (0, trailing_pad), value=-1)
-        document_id_parts[-1] = F.pad(document_id_parts[-1], (0, trailing_pad), value=batch)
-        padded_lens[-1] += trailing_pad
 
     packed_ids = torch.cat(packed_ids_parts).unsqueeze(0)
     targets = torch.cat(target_parts).unsqueeze(0)
