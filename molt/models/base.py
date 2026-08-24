@@ -116,7 +116,10 @@ class BaseModel(nn.Module):
             cp_size=self.cp_size,
         )
         if routing_replay:
-            self._enable_routing_replay()
+            from nemo_automodel.components.moe.router_replay import RouterReplayAdapter
+
+            self._routing_replay_adapter = RouterReplayAdapter(self.model)
+            print(f"[R3] Routing replay enabled at global layer ids {list(self._routing_replay_adapter.layer_ids)}.")
 
         if self.is_vlm:
             self._vlm_config = self.model.config
@@ -131,13 +134,6 @@ class BaseModel(nn.Module):
                 if isinstance(getattr(self._vlm_config, name, None), int):
                     self._video_token_id = getattr(self._vlm_config, name)
                     break
-
-    def _enable_routing_replay(self) -> None:
-        """Bind AutoModel's model-scoped rollout routing adapter."""
-        from nemo_automodel.components.moe.router_replay import RouterReplayAdapter
-
-        self._routing_replay_adapter = RouterReplayAdapter(self.model)
-        print(f"[R3] Routing replay enabled at global layer ids {list(self._routing_replay_adapter.layer_ids)}.")
 
     @property
     def module(self) -> nn.Module:
