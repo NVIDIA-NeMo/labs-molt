@@ -339,22 +339,6 @@ def test_value_loss_matches_reference():
     assert torch.allclose(clip_frac, ref_clipfrac, atol=1e-6)
 
 
-def test_value_loss_token_sum_defers_normalization():
-    values = torch.tensor([[0.0, 1.0, 2.0]])
-    old_values = torch.zeros_like(values)
-    returns = torch.ones_like(values)
-    mask = torch.tensor([[1, 1, 0]], dtype=torch.bool)
-
-    loss, _, _ = ValueLoss(value_clip=None, loss_agg_mode="token-sum")(
-        values,
-        old_values,
-        returns,
-        action_mask=mask,
-    )
-
-    torch.testing.assert_close(loss, torch.tensor(0.5))
-
-
 def test_gae_whitens_advantages_and_masks():
     """gae batch-whitens its advantages (zero mean, unit population std over the
     action tokens) and re-masks off-action positions to 0, while leaving

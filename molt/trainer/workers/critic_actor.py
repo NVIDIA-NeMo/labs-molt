@@ -23,20 +23,18 @@ actor holding the value model, its own optimizer, and its own value-only trainin
 loop. It is colocated on the actor's GPUs by default (shared placement group) but,
 being a separate group, can be disaggregated onto its own GPUs.
 
-The training loop converts each replay-buffer microbatch into an AutoModel Datum.
-Engine owns the complete accumulation window, global-token normalization, backward,
-FSDP finalization, clipping, and optimizer update. The scalar value head is installed
-before FSDP and follows the same lifecycle as the backbone.
+The trainer follows the OpenRLHF flow directly: critic forward, value loss,
+Engine backward, then Engine step. The scalar value head is installed before
+FSDP and follows the same lifecycle as the backbone.
 """
 
 import os
 import time
+from contextlib import ExitStack
 from typing import Dict
 
 import ray
 import torch
-from nemo_automodel.components.distributed.mesh import MeshContext
-from nemo_automodel.engine import Engine, LossOutput
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -70,8 +68,8 @@ class CriticTrainer:
     ):
         self.strategy = strategy
         self.args = strategy.args
-        self._defer_grad_sync = os.environ.get("MOLT_DEFER_GRAD_SYNC", "1") == "1"
         self.tokenizer = tokenizer
+        self.dataloader_pin_memory = pin_memory
         self.critic = critic
         self.critic_optim = critic_optim
         self.critic_scheduler = critic_scheduler
@@ -80,32 +78,13 @@ class CriticTrainer:
         self.max_epochs = getattr(self.args.critic, "max_epochs", None) or self.args.train.max_epochs
         self.value_loss_fn = ValueLoss(
             value_clip=self.args.critic.value_clip,
-            # Engine applies the optimizer window's global action-token denominator.
-            loss_agg_mode="token-sum",
+            loss_agg_mode="token-mean",
         )
         self.replay_buffer = NaiveReplayBuffer(
             micro_train_batch_size,
             0,
             buffer_cpu_offload,
             dynamic_batch=self.args.train.dynamic_batch_enable,
-        )
-        raw_model = self.critic.model
-        padding_token_id = getattr(getattr(raw_model, "config", None), "pad_token_id", None) or 0
-        max_grad_norm = self.args.critic.max_norm
-        mesh_names = getattr(strategy.device_mesh, "mesh_dim_names", ()) or ()
-        cp_mesh = strategy.device_mesh["cp"] if "cp" in mesh_names else None
-        cp_size = cp_mesh.size() if cp_mesh is not None else 1
-        self.engine = Engine(
-            raw_model,
-            device=torch.device("cuda", torch.cuda.current_device()),
-            mesh_context=MeshContext.from_meshes(strategy.device_mesh, strategy.moe_mesh),
-            collate_fn=self.critic.datum_collator(self.tokenizer, cp_size=cp_size),
-            pin_memory=pin_memory,
-            padding_token_id=padding_token_id,
-            batch_context_fn=self.critic.routing_replay_context,
-            defer_fsdp_grad_sync=self._defer_grad_sync,
-            optimizers=self.critic_optim,
-            max_grad_norm=max_grad_norm if max_grad_norm and max_grad_norm > 0 else None,
         )
         # AutoModel's MFU calculator over the value model (same backbone as the
         # actor -> ~same FLOP/token); None if AutoModel/arch unsupported, then we
@@ -114,9 +93,9 @@ class CriticTrainer:
         # distinct perf/critic_* prefix so neither overwrites the other.
         self._mfu = None
         try:
-            from nemo_automodel._transformers.mfu import AutoMFU
+            from nemo_automodel import AutoMFU
 
-            self._mfu = AutoMFU.from_config(self.critic.model, device=torch.cuda.get_device_name())
+            self._mfu = AutoMFU.from_config(self.critic.module, device=torch.cuda.get_device_name())
         except Exception as exc:
             logger.warning(f"perf: critic MFU unavailable ({exc!r}); reporting memory only.")
         torch_dist_barrier_and_cuda_sync()
@@ -131,6 +110,7 @@ class CriticTrainer:
             batch_size=self.replay_buffer.sample_batch_size,
             shuffle=should_shuffle,
             drop_last=True,
+            pin_memory=self.dataloader_pin_memory,
             collate_fn=self.replay_buffer.collate_fn,
         )
         device = torch.cuda.current_device()
@@ -161,7 +141,8 @@ class CriticTrainer:
                 if remainder:
                     max_steps -= remainder
 
-            # Same window / global-token-mean contract as PolicyTrainer.policy_train.
+            # Every microbatch in one optimizer window shares one global
+            # action-token denominator.
             window = []
             for step, experience in enumerate(pbar):
                 if step >= max_steps:
@@ -172,40 +153,29 @@ class CriticTrainer:
                 )
                 if not window_end:
                     continue
-                datum_batches = []
-                for exp in window:
+
+                local_tokens = sum(exp.action_mask.sum() for exp in window)
+                batch_num_tokens = self.strategy.global_token_count(local_tokens)
+                self.critic.model.set_gradient_accumulation_steps(len(window))
+                for index, exp in enumerate(window):
+                    exp.to_device(device, non_blocking=self.dataloader_pin_memory)
                     # Full per-sequence lengths drive the FLOP estimate (the forward
                     # processes the whole sequence, not just action tokens).
                     seqlens = exp.attention_mask.sum(dim=-1)
                     local_seq_count += float(seqlens.numel())
                     local_token_sum += float(seqlens.sum())
-                    datum_batches.append(self.critic.make_value_datums(exp))
-
-                result = self.engine.forward_backward(
-                    datum_batches,
-                    self._value_objective,
-                )
-                self.strategy._maybe_debug_grad_stats(self.critic, "critic")
-                optim_result = self.engine.step()
-                # Transformers LambdaLR.step() takes an absolute epoch when passed
-                # an argument; AutoModel schedulers use step(1) as an increment.
-                self.critic_scheduler.step()
-                last_grad_norm = float(optim_result.grad_norm)
-                last_lr = self.critic_scheduler.get_last_lr()[0]
-
-                for exp, token_outputs in zip(window, result.token_outputs):
-                    exp.to_device(device)
-                    action_values = exp.align_action_outputs(token_outputs["action_values"])
-                    _, reported_value_loss, value_clip_frac = self.value_loss_fn(
-                        action_values,
-                        exp.values,
-                        exp.returns,
-                        action_mask=exp.action_mask,
+                    metrics = self.training_step(
+                        exp,
+                        batch_num_tokens,
+                        is_optimizer_step=index == len(window) - 1,
                     )
                     n_tok = float(exp.action_mask.sum().item())
-                    loss_sum += float(reported_value_loss) * n_tok
-                    clip_sum += (float(value_clip_frac) if value_clip_frac is not None else 0.0) * n_tok
+                    loss_sum += float(metrics["value_loss"]) * n_tok
+                    clip_sum += float(metrics["value_clip_frac"]) * n_tok
                     token_total += n_tok
+                    if metrics["grad_norm"] is not None:
+                        last_grad_norm = float(metrics["grad_norm"])
+                    last_lr = self.critic_scheduler.get_last_lr()[0]
                     if self.args.train.force_on_policy and self.replay_buffer.cpu_offload:
                         exp.to_device(torch.device("cpu"))
                 window = []
@@ -229,15 +199,44 @@ class CriticTrainer:
         )
         return status
 
-    def _value_objective(self, model_output, batch):
-        values = self.critic.compute_values(model_output, batch)
-        loss_sum, _, _ = self.value_loss_fn(
-            values,
-            batch["old_values"],
-            batch["returns"],
-            action_mask=batch["weights"].bool(),
-        )
-        return LossOutput(loss_sum=loss_sum, token_outputs={"action_values": values})
+    def training_step(
+        self,
+        experience: Experience,
+        batch_num_tokens: torch.Tensor,
+        *,
+        is_optimizer_step: bool,
+    ) -> Dict[str, object]:
+        """Run one critic microbatch: value forward, loss, backward, step."""
+        self.critic.train()
+        with ExitStack() as model_context:
+            model_output = self.critic(
+                experience.sequences,
+                experience.action_mask,
+                attention_mask=experience.attention_mask,
+                cp_context_stack=model_context,
+                routed_experts=experience.routed_experts,
+                mm_train_inputs=experience.mm_train_inputs if self.critic.is_vlm else None,
+            )
+            action_values = model_output.action_values
+            loss, reported_loss, clip_frac = self.value_loss_fn(
+                action_values,
+                experience.values,
+                experience.returns,
+                action_mask=experience.action_mask,
+                dp_size=self.strategy.dp_size,
+                batch_num_tokens=batch_num_tokens,
+            )
+            self.critic.model.backward(loss, scale_wrt_gas=False)
+
+        if is_optimizer_step:
+            self.strategy._maybe_debug_grad_stats(self.critic, "critic")
+        self.critic.model.step()
+        grad_norm = self.critic.model.get_global_grad_norm() if is_optimizer_step else None
+        return {
+            "value_loss": reported_loss.detach(),
+            "value_clip_frac": clip_frac.detach() if clip_frac is not None else 0.0,
+            "grad_norm": grad_norm,
+        }
 
 
 @ray.remote(num_gpus=1)
@@ -328,9 +327,18 @@ class CriticModelActor(BaseModelActor):
         Experience. reload() first fetches the sample's heavy tensors from the producing runner's
         shared-memory store. Called per sample by execute_batch; the controller attaches values."""
         experience = experience.reload()
-        datums = self.critic.make_scoring_datums(experience, routed_experts=experience.routed_experts)
-        outputs = self.trainer.engine.forward(datums, self.critic.compute_values)
-        return experience.align_action_outputs(outputs).to("cpu")
+        experience.to_device(torch.cuda.current_device(), non_blocking=True)
+        self.critic.eval()
+        with torch.no_grad():
+            output = self.critic(
+                experience.sequences,
+                experience.action_mask,
+                attention_mask=experience.attention_mask,
+                routed_experts=experience.routed_experts,
+                mm_train_inputs=experience.mm_train_inputs if self.critic.is_vlm else None,
+            )
+        self.critic.train()
+        return output.action_values.to("cpu")
 
     def append(self, experience: Experience):
         # reload() fetches the sample's heavy tensors from the producing runner's shared-memory

@@ -3,228 +3,137 @@ SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All 
 SPDX-License-Identifier: Apache-2.0
 -->
 
-# AutoModel Engine integration
+# AutoModel training integration
 
-SFT execution is Engine-only on this branch. Molt no longer has a second SFT
-implementation for global token normalization, backward, FSDP synchronization,
-gradient clipping, optimizer updates, or gradient clearing.
+Molt follows the same eager-training boundary as OpenRLHF on DeepSpeed. The RL
+trainer shows the algorithm in its natural order:
 
-## Execution boundary
+```python
+model_output = actor(sequences, action_mask, ...)
+loss = policy_loss(model_output.action_log_probs, old_log_probs, advantages, ...)
+actor.model.backward(loss)
+actor.model.step()
+```
 
-`SFTDataset.__getitem__` emits one AutoModel `Datum` per sample. The dataloader
-only groups those objects into a list, so AutoModel owns padding, packing,
-position IDs, loss-side-channel collation, pinning, and CP preparation.
+`actor.model` is an AutoModel `Engine`. It is a small `nn.Module` wrapper
+around an already-distributed model, not an RL batch runner. Its public eager
+API is:
 
-| Field | Layout |
+- `engine(*args, **kwargs)`: ordinary model forward;
+- `engine.backward(loss)`: backward for a caller-computed scalar loss;
+- `engine.step()`: advance one accumulation microstep and update at the boundary;
+- `engine.zero_grad()` and `engine.get_global_grad_norm()`.
+
+There is no Datum, loss callback, output envelope, or packing protocol at this
+boundary. AutoModel does not know PPO, advantages, action masks, or value loss.
+
+## Ownership
+
+| Owner | Responsibilities |
 | --- | --- |
-| text `input_ids` | one shifted 1-D sequence per Datum |
-| VLM processor outputs | one unbatched, unshifted processor mapping per Datum |
-| `labels` | `PER_TOKEN` targets; unsupervised positions are `-100` |
-| `weights` | `PER_TOKEN` boolean supervision mask |
+| Molt dataset/replay buffer | logical samples, tokens, media, masks, old/reference log-probabilities, advantages, returns, rollout routes |
+| Molt `Actor` / `Critic` | convert a logical batch to the model's padded or packed inputs, enter CP/R3 contexts, run the model, and restore dense token outputs |
+| Molt trainer | PPO/GSPO/CISPO, KL, entropy and value objectives; global token normalization; metrics and checkpoint cadence |
+| AutoModel model/distributed components | TP/CP/EP/FSDP model execution, vocab-parallel token log-probability and entropy primitives, router replay, task-head sharding |
+| AutoModel `Engine` | deferred FSDP synchronization, backward, distributed gradient finalization, clipping, optimizer update, gradient clearing, scheduler advancement |
 
-Text uses AutoModel's canonical `collate_datums`, including native THD and HF
-indexed-mask packing. VLM uses AutoModel's `collate_vlm_datums`, which delegates processor
-padding and shifting to `pad_collate_fn`, preserves additional processor
-tensors such as Nemotron-Omni's `image_flags` and `imgs_sizes`, and uses the
-matching packed-VLM materializer when packing is enabled. The complete
-accumulation window maps to one
-`forward_backward([[datum0, datum1], [datum2, ...]], loss_fn)` call and
-one `step()`; each inner list is one replay or dataloader microbatch.
+This keeps the policy worker readable while keeping model-layout mechanics out
+of the RL algorithm. Physical layout handling is concentrated in `BaseModel`,
+which is shared by policy, reference, critic, and SFT paths.
 
-Engine calls AutoModel's `MaskedCrossEntropy(reduction="sum")` through a small
-output-normalization loss function because HF models return `.logits` while native
-AutoModel models may return the logits tensor directly. Engine owns the global
-weight denominator, model-parallel loss reductions, gradient synchronization,
-clipping, optimizer update, and `zero_grad` lifecycle.
+## Policy and critic
 
-For RL, Molt still owns target and action-mask semantics, advantages, and
-PPO/KL/GSPO objectives. Its loss functions delegate selected-token log probabilities
-and exact entropy for vocab-sharded DTensor logits to AutoModel's tensor-parallel
-loss primitives, without gathering the full vocabulary.
+`PolicyTrainer.training_step` is deliberately explicit: actor forward, policy
+loss, optional KL and entropy terms, backward, step, then metrics. `PolicyLoss`
+owns the RL formula. The trainer computes one data-parallel global action-token
+denominator for the complete optimizer window, so unequal dynamic microbatches
+are normalized as one update.
 
-Molt advances its existing Transformers scheduler immediately after a
-successful Engine optimizer step. It is intentionally not passed as an Engine
-scheduler: AutoModel's scheduler uses `step(1)` as an increment, while a
-Transformers scheduler interprets that argument as an absolute epoch.
+`CriticTrainer.training_step` has the same shape: critic forward, clipped value
+loss, backward, and step. The fp32 scalar value head is installed before FSDP,
+so it participates in normal gradient reduction, clipping, optimization, and
+checkpointing. Critic routing replay requires the critic to use the actor
+checkpoint because captured actor routes have no semantic meaning for an
+unrelated MoE topology.
 
-Evaluation uses `Engine.evaluate`, accumulates its loss and weight sums over the
-whole validation dataset, then performs one final data-parallel reduction. It
-does not average batch means or communicate once per validation batch.
+Collection is also direct. Policy and reference actors return action
+log-probabilities, and the critic returns action values. The model wrappers
+restore packing and CP layouts before returning, so workers only see dense
+`[batch, sequence - 1]` tensors and never manipulate physical-token indices.
 
-Molt still constructs and distributes `Actor.model` and retains its checkpoint
-cadence, format, retention policy, and consumed-sample counter. Moving model
-construction and checkpoint policy into another backend would also replace
-Molt's generic model fallback and RL-shared strategy setup, so it is outside
-this SFT execution integration.
+## SFT
 
-## Current fail-fast boundary
+`SFTDataset` returns ordinary dictionaries. Its collater right-pads token
+tensors and retains one processor result per VLM sample. `SFTTrainer` then
+runs Actor forward, computes masked next-token cross entropy from the returned
+log-probabilities, and calls Engine backward/step. Evaluation is a direct
+no-grad forward and a token-weighted data-parallel reduction.
 
-There is no legacy SFT fallback. Padded text and VLM input, native THD packing,
-HF dense FA2 indexed-mask packing, TP, CP, EP, and sequence
-parallelism all stay on the same Engine path. Full CPU offload, including for
-native custom-MoE models, is delegated to AutoModel's FSDP2
-`CPUOffloadPolicy`; the old optimizer-only implementation has been removed.
-Unsupported combinations fail before the first training batch:
+Native custom-MoE auxiliary loss remains an AutoModel autograd path through
+`MoEAuxLossAutoScaler`. Molt configures its coefficient but does not add the
+same differentiable scalar again. The reported `sft_loss` is cross entropy;
+detached auxiliary-loss observability is not wired yet.
 
-- PP, because Molt's shared strategy does not yet construct an `AutoPipeline`;
-- HF fallback packing outside `flash_attention_2` or with CP, PP, or EP;
-- packed VLM CP when the active model/backend does not declare packed-CP
-  support;
-- multi-axis mRoPE with packed THD CP, which AutoModel currently rejects
-  because aligned document padding and CP token reordering do not yet preserve
-  its three position axes.
+## Packing, VLM, CP, and routing replay
 
-Native custom-MoE auxiliary loss is supported through AutoModel's
-`MoEAuxLossAutoScaler`: Molt sets the native gate coefficient and AutoModel
-injects the auxiliary gradient during autograd. The reported `sft_loss` remains
-the token cross-entropy metric. Molt does not add the differentiable aux scalar
-to its loss function, which would apply the same auxiliary gradient twice;
-detached, correctly aggregated aux observability is not wired yet.
+Molt accepts normal dense batches at the trainer boundary. `BaseModel` owns
+the model-specific physical conversion:
 
-Muon and `MOLT_DEFER_GRAD_SYNC=0` use the same Engine path: Engine steps the
-already-built optimizer generically and accepts the FSDP synchronization toggle
-directly.
+- native packed text uses THD metadata;
+- dense Hugging Face FA2 packing uses an indexed document mask;
+- packed VLM batches reuse AutoModel's VLM packing/collation primitives;
+- padded and packed outputs are scattered back to the original dense token
+  coordinates before `Actor.forward` or `Critic.forward` returns;
+- `ContextParallelSharder` prepares CP-local model inputs and restores token
+  outputs;
+- rollout routes are rearranged into the same physical token order and passed
+  to `RouterReplayAdapter.replay`.
 
-## PPO critic
+CP and R3 contexts cover both model forward and backward so activation-
+checkpoint recomputation sees the same layout and routes. These contexts are
+implemented inside the model wrapper and entered through an `ExitStack`
+supplied by the trainer; PPO/value-loss code does not inspect them.
 
-Critic optimization is also Engine-only. Every replay sample becomes a Datum;
-text and VLM microbatches are lists of those Datums whose padding, media,
-packing, and PPO side channels are collated by AutoModel.
-Molt provides only the clipped value-loss function. Engine returns detached
-token values, which Molt restores to the replay buffer's dense coordinates for
-epoch-level metrics. The value projection is installed through AutoModel's
-`pre_fsdp_hook`, before parameter discovery and FSDP wrap; the old
-replicated-head broadcast and manual DP gradient all-reduce have been deleted.
+Dynamic replay batching is unchanged. Each replay batch is forwarded directly;
+the Engine accumulation size is set to the actual number of microbatches in the
+current optimizer window.
 
-The hook returns the managed task module directly. AutoModel excludes the value
-head from TP and expert-specific sharding, synchronizes its TP replicas at init,
-and gives it an fp32 FSDP unit over DP and CP. It also excludes the head from PEFT
-and lower-precision transforms and includes it in training checkpoints. Molt
-therefore uses the same critic path with TP, CP, EP, and sequence
-parallelism; PP remains unsupported. Molt does not expose critic PEFT,
-quantization, FP8, or QAT options, so those AutoModel capabilities are not Molt
-feature claims. Dense critic full CPU offload uses AutoModel; custom-MoE full
-offload uses the same path. Hugging Face dense fallback packing uses indexed
-masks with FA2 at CP1/PP1/EP1. The existing Transformers scheduler remains Molt-owned for the
-same `step()` versus `step(1)` protocol reason as SFT.
+## Parallelism boundary
 
-With routing replay enabled, critic old-value collection and value training
-consume the same actor rollout routes through AutoModel's model-scoped adapter.
-The critic must use the actor checkpoint: AutoModel validates numeric route
-shapes and ranges, but cannot prove semantic compatibility with an unrelated
-MoE topology.
+The eager Engine intentionally rejects `AutoPipeline`. Like DeepSpeed,
+pipeline parallelism has a different execution contract because only the last
+stage can compute the loss. AutoModel recipes retain their separate
+`AutoPipeline` schedule. Molt still fails fast for `pp_size > 1` because its
+trainers do not yet build that pipeline-specific path.
 
-## RL policy actor
+Other retained boundaries are:
 
-Policy optimization is Engine-only as well. Each text or VLM replay sample
-becomes one processor-ready Datum;
-AutoModel aligns its shifted target tokens, action weights,
-old/base/rollout log-probabilities, advantages, optional rollout routes, and
-media while padding or packing the batch. A complete optimizer window is
-one `forward_backward` call followed by one `step`; Molt's policy loss function
-contains only PPO/GSPO/CISPO, KL, and entropy numerators.
+- multi-axis mRoPE with packed THD context parallelism is intentionally
+  unsupported;
+- Hugging Face fallback MoE is unsupported; MoE training requires an
+  AutoModel-native implementation;
+- Hugging Face indexed-mask packing requires FA2 and CP1/PP1/EP1;
+- a single-rank full-CPU-offload configuration remains unsupported until
+  AutoModel applies a size-one FSDP wrapper.
 
-`LossOutput.token_outputs` lets Engine return per-sample action log-probabilities
-and entropy after undoing CP or either packed layout. `Experience.align_action_outputs`
-then places those logical token results on Molt's dense action axis for replay-buffer
-metrics. For GSPO and sequence/geometric IS correction, Molt supplies sequence
-IDs as a `PER_TOKEN` side channel and reduces detached per-sequence statistics
-over the CP group. This preserves the dense per-sequence objective after THD
-packing and CP sharding without gathering differentiable log-probabilities.
+## Strategy and checkpoints
 
-AutoModel's `RouterReplayAdapter` consumes rollout routes only after Engine has
-applied packing and CP layout, and its context covers forward, activation-
-checkpoint recomputation, and backward. Native AutoModel MoE gates keep their
-`MoEAuxLossAutoScaler` path; adding the surfaced scalar aux loss in the policy
-loss function would count that gradient twice.
+`FsdpStrategy` still owns topology construction, model loading, optimizer and
+scheduler construction, collectives, checkpoint policy, and vLLM refit. It no
+longer implements a second backward/optimizer loop. During `prepare`, it wraps
+the already-distributed model in Engine; checkpoint and refit code unwrap
+`engine.module` to reach the model state.
 
-Padded text and VLM, native THD packing, HF dense indexed-mask packing, TP, CP,
-EP, sequence parallelism, R3, entropy regularization, and PPO/GSPO/CISPO all use this path.
-Replay microbatches contain one Datum per sample, so AutoModel owns padded,
-THD, and indexed-mask collation instead of receiving a Molt-built physical
-batch. Nested Datum lists preserve each dynamic replay-buffer group while still
-allowing all samples inside that group to be packed together.
-Packed VLM CP is accepted only when AutoModel declares support for the active
-model/backend; multi-axis mRoPE with packed THD CP remains intentionally
-unsupported. HF-fallback indexed-mask packing is limited to FA2 with
-CP1/PP1/EP1; every HF-fallback MoE model fails during model construction. Molt
-retains neither an HF MoE training nor a scalar auxiliary-loss optimization branch.
-The policy's Transformers scheduler remains Molt-owned and advances once after a
-successful Engine optimizer update.
+The source dependency must be pinned to the AutoModel commit containing this
+Engine API. Molt's PyPI metadata still uses a released-version floor, so source
+and Molt commits must be published together until that API is in an AutoModel
+release.
 
-Collection-time policy, reference, and critic scoring also use
-`Engine.forward`. Molt retains only the RL loss semantics and dense replay
-coordinate restoration; it no longer has a separate collection-time input-
-layout implementation.
+## Validation
 
-With SFT, critic, and policy updates all on Engine, `FsdpStrategy` no longer
-contains its duplicate `backward`, accumulation/sync, clipping,
-`optimizer_step`, or grad-norm cache. It retains topology, optimizer/scheduler
-construction, collectives, checkpointing, refit support, and optional gradient
-debugging.
-
-## Remaining blockers and retained boundaries
-
-| Boundary | Current behavior | Missing contract |
-| --- | --- | --- |
-| Full CPU offload | Delegated to AutoModel's `CPUOffloadPolicy` for multi-rank dense and native custom-MoE models | AutoModel still skips `fully_shard` for a size-one world/mesh, so single-GPU full offload is not supported |
-| Transformers scheduler | Supported through one explicit Molt scheduler `step()` after Engine `step()` | Engine schedulers use incremental `step(1)`, while HF `LambdaLR` interprets the argument as absolute epoch 1 |
-| Pipeline parallelism | Molt CLI fails fast at `pp_size > 1` | `FsdpStrategy` still constructs an eager model rather than `AutoPipeline`; AutoModel also lacks managed task-head hooks and packed HybridEP equalization under PP |
-| Critic checkpoint resume | AutoModel checkpoint and managed-head primitives exist | A Molt save/restart/next-step parity smoke has not been run |
-| HF fallback packing | Dense FA2 uses AutoModel indexed masks at CP1/PP1/EP1 | Native models keep the THD contract; every other backend and CP/PP/EP combination fails fast |
-| HF fallback MoE | Model construction always fails fast, independent of auxiliary-loss settings or EP size | All MoE training requires an AutoModel-native implementation; the old scalar auxiliary-loss branch was deleted |
-| Multi-axis mRoPE + packed THD CP | Intentionally unsupported and fail-fast | The agreed scope excludes this combination; AutoModel also rejects 3-D packed position IDs when CP/PP reorders or splits the token stream |
-
-## Dependency and validation status
-
-Source and Docker installs pin AutoModel revision `a06df38f8`, which contains
-the current Datum Engine, final-batch pinning after physical collation, padded and
-packed VLM Datum collation with arbitrary layout-aware task inputs, HF FA2
-indexed-mask packing, and per-Datum token-output restoration. Its public
-execution API separates scoring (`forward`), evaluation (`evaluate`), training
-(`forward_backward`), and optimizer mutation (`step`); explicit nested Datum
-batches preserve dynamic replay boundaries. The same revision contains
-model-scoped routing replay, managed pre-FSDP task modules used by the critic
-value head, and dense-or-vocab-parallel selected-token log-probability and
-exact-entropy primitives.
-Molt's PyPI build still replaces source pins with `nemo-automodel>=0.5.0`; no
-released version floor currently guarantees this API.
-
-CPU tests use the real Engine and cover unequal binary masks, left/right
-padding, shifted targets and position IDs, typed token-output restoration,
-padded and packed VLM PPO side-channel alignment, critic and policy
-backward/optimizer mutation, packed GSPO and sequence-level IS parity, and a
-live two-rank gloo CP reduction of sequence statistics. A
-two-GPU FSDP2 SFT parity smoke with rank-asymmetric data and two accumulated
-microbatches matched the single-model reference loss, full gradients, and
-updated parameters.
-
-A single-H100 TP1 smoke with a tiny dense Qwen3 model verified the real HF FA2
-indexed-mask path against separate per-document forwards: logits and loss
-matched exactly, bf16 gradients matched within tolerance, and changing one
-document did not change another document's logits. Indexed-mask VLM and TP>1
-currently have CPU collation/routing coverage, not a corresponding GPU parity
-claim.
-
-Critic H100 smokes with a real Qwen3 checkpoint passed Engine backward and
-optimizer update for DP=2, TP=2 with sequence parallelism, CP=2, and TP=2+CP=2;
-the managed value head was FSDP-wrapped, received a finite nonzero global
-gradient, updated, and remained replica-consistent. Critic R3 is wired through
-the same adapter as the policy; custom-MoE route parity and checkpoint-resume
-parity remain to be run.
-
-Actor and critic H100 EP=8 smokes with Qwen3-VL-30B-A3B passed native TE THD
-packing of two processor-ready VLM Datums, Engine loss/backward/clip/optimizer
-mutation, finite nonzero global gradient norms, and restoration of token outputs
-to the dense replay-buffer coordinates. Unit tests additionally cover packed
-VLM routing-replay side channels and their `-1` alignment sentinel.
-
-A two-GPU dense FSDP2 smoke passed AutoModel Engine backward, CPU-resident
-gradient clipping and optimizer mutation under `CPUOffloadPolicy`, followed by
-Molt's CUDA-staged DTensor gather for vLLM refit. A two-GPU custom Qwen3.5-MoE
-HybridEP smoke passed the same Engine path with all expert DTensor shards
-resident on CPU between model calls.
-
-The AutoModel source revision and this Molt integration must be published
-together. The PyPI release floor remains a packaging boundary until a release
-containing these APIs is cut.
+Unit coverage exercises direct Actor and Critic outputs, unequal accumulation
+microbatches, THD and indexed-mask round trips, routing replay, SFT training and
+evaluation, and the Engine backward/step boundary. Distributed validation must
+continue to cover DP-global token normalization, TP vocab scoring, CP and R3
+activation-checkpoint replay, HybridEP/custom-MoE gradients, packed VLM, and
+full CPU offload.

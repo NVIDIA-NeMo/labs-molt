@@ -25,7 +25,6 @@ role-specific openers (Kimi), no reply terminator (GLM), alternation-enforced tu
 
 import pytest
 import torch
-from nemo_automodel.components.datasets.datum import Datum, LossInputLayout
 
 from molt.datasets.sft_dataset import SFTDataset, discover_reply_markers
 
@@ -154,44 +153,56 @@ CASES = [
 ]
 
 
-def test_text_sample_is_one_shifted_datum_for_automodel_collation():
+def test_collate_returns_an_ordinary_padded_text_batch():
     ds = object.__new__(SFTDataset)
-    ds.processor = None
+    ds.pad_token_id = 9
+    batch = ds.collate_fn(
+        [
+            {
+                "input_ids": torch.tensor([10, 11, 12]),
+                "attention_mask": torch.ones(3, dtype=torch.long),
+                "loss_mask": torch.tensor([True, False, False]),
+                "mm_train_inputs": None,
+            },
+            {
+                "input_ids": torch.tensor([20, 21]),
+                "attention_mask": torch.ones(2, dtype=torch.long),
+                "loss_mask": torch.tensor([False, True]),
+                "mm_train_inputs": None,
+            },
+        ]
+    )
 
-    datum = ds._make_datum([10, 11, 12], [1.0, 0.0, 0.0], None)
-
-    assert type(datum) is Datum
-    torch.testing.assert_close(datum.model_inputs["input_ids"], torch.tensor([10, 11]))
-    torch.testing.assert_close(datum.loss_fn_inputs["labels"], torch.tensor([11, -100]))
-    torch.testing.assert_close(datum.loss_fn_inputs["weights"], torch.tensor([True, False]))
-    assert datum.loss_fn_input_layouts == {
-        "labels": LossInputLayout.PER_TOKEN,
-        "weights": LossInputLayout.PER_TOKEN,
-    }
-    assert datum.loss_fn_input_pad_values == {"labels": -100}
-    assert not hasattr(SFTDataset, "collate_fn")
+    torch.testing.assert_close(batch["input_ids"], torch.tensor([[10, 11, 12], [20, 21, 9]]))
+    torch.testing.assert_close(batch["attention_mask"], torch.tensor([[1, 1, 1], [1, 1, 0]]))
+    torch.testing.assert_close(batch["loss_mask"], torch.tensor([[True, False, False], [False, True, False]]))
+    assert batch["mm_train_inputs"] is None
 
 
-def test_vlm_sample_keeps_processor_inputs_unshifted_for_automodel_collater():
+def test_collate_keeps_vlm_processor_inputs_per_sample():
     ds = object.__new__(SFTDataset)
-    ds.processor = object()
+    ds.pad_token_id = 0
     pixel_values = torch.ones(1, 2)
+    media = {"pixel_values": pixel_values, "image_grid_thw": torch.tensor([[1, 2, 2]])}
+    batch = ds.collate_fn(
+        [
+            {
+                "input_ids": torch.tensor([10, 11, 12]),
+                "attention_mask": torch.ones(3, dtype=torch.long),
+                "loss_mask": torch.tensor([True, False, False]),
+                "mm_train_inputs": media,
+            },
+            {
+                "input_ids": torch.tensor([20, 21]),
+                "attention_mask": torch.ones(2, dtype=torch.long),
+                "loss_mask": torch.tensor([False, True]),
+                "mm_train_inputs": None,
+            },
+        ]
+    )
 
-    datum = ds._make_datum([10, 11, 12], [1.0, 0.0, 0.0], {"pixel_values": pixel_values})
-
-    torch.testing.assert_close(datum.model_inputs["input_ids"], torch.tensor([10, 11, 12]))
-    torch.testing.assert_close(datum.model_inputs["attention_mask"], torch.ones(3, dtype=torch.long))
-    assert datum.model_inputs["pixel_values"] is pixel_values
-    torch.testing.assert_close(datum.loss_fn_inputs["labels"], torch.tensor([-100, 11, -100]))
-    torch.testing.assert_close(datum.loss_fn_inputs["weights"], torch.tensor([False, True, False]))
-
-
-def test_datum_rejects_a_loss_mask_with_the_wrong_token_length():
-    ds = object.__new__(SFTDataset)
-    ds.processor = None
-
-    with pytest.raises(ValueError, match="one prediction-position value per token"):
-        ds._make_datum([10, 11, 12], [1.0, 0.0], None)
+    assert batch["mm_train_inputs"] == [media, None]
+    assert batch["mm_train_inputs"][0]["pixel_values"] is pixel_values
 
 
 @pytest.mark.parametrize("name, template, open_str, close_str, sup", CASES, ids=[c[0] for c in CASES])

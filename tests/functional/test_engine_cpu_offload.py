@@ -7,7 +7,6 @@ import pytest
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from nemo_automodel.components.datasets.datum import Datum, LossInputLayout
 from nemo_automodel.engine import Engine
 from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard
 from torch.distributed.tensor import DTensor
@@ -42,24 +41,15 @@ def _cpu_offload_worker(rank: int, world_size: int, init_file: str) -> None:
         fully_shard(model.projection, offload_policy=offload_policy)
         fully_shard(model, offload_policy=offload_policy)
         optimizer = torch.optim.AdamW(model.parameters(), lr=0.01)
-        datums = [
-            Datum(
-                model_inputs={"input_ids": torch.tensor([rank + 1, rank + 2])},
-                loss_fn_inputs={"weights": torch.ones(2)},
-                loss_fn_input_layouts={"weights": LossInputLayout.PER_TOKEN},
-            )
-        ]
+        engine = Engine(model, optimizer=optimizer, max_grad_norm=1.0)
 
-        engine = Engine(model, device=device, optimizers=optimizer, max_grad_norm=1.0)
+        output = engine(torch.tensor([rank + 1, rank + 2], device=device))
+        loss = output.square().sum()
+        engine.backward(loss)
+        engine.step()
 
-        def squared_loss(output, _loss_inputs):
-            return output.square().sum()
-
-        result = engine.forward_backward([datums], squared_loss)
-        optim_result = engine.step()
-
-        assert torch.isfinite(result.loss)
-        assert torch.isfinite(optim_result.grad_norm)
+        assert torch.isfinite(loss)
+        assert torch.isfinite(torch.as_tensor(engine.get_global_grad_norm()))
         parameter = next(model.parameters())
         assert isinstance(parameter, DTensor)
         assert parameter.to_local().device.type == "cpu"

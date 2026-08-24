@@ -97,6 +97,36 @@ def _pad_to_common_hw(tensors: List[torch.Tensor]) -> List[torch.Tensor]:
     return [F.pad(t, (0, max_w - int(t.shape[-1]), 0, max_h - int(t.shape[-2]))) for t in tensors]
 
 
+def merge_mm_train_inputs(items: list, device) -> Dict[str, Any]:
+    """Merge per-sample processor tensors for a padded VLM forward."""
+    from nemo_automodel.components.datasets.vlm import merge_media_values
+
+    grouped: Dict[str, list[Any]] = {}
+    for item in items:
+        for media in item if isinstance(item, list) else [item]:
+            if media is None:
+                continue
+            for key, value in media.items():
+                grouped.setdefault(key, []).append(value)
+
+    merged = {}
+    for key, values in grouped.items():
+        if key in {"pixel_values", "pixel_values_videos"}:
+            moved = []
+            for value in values:
+                if isinstance(value, (list, tuple)):
+                    moved.append([torch.as_tensor(item).to(device, non_blocking=True) for item in value])
+                else:
+                    moved.append(torch.as_tensor(value).to(device, non_blocking=True))
+            merged[key] = merge_media_values(moved, field_name=key)
+        else:
+            merged[key] = torch.cat(
+                [torch.as_tensor(value).to(device, non_blocking=True) for value in values],
+                dim=0,
+            )
+    return merged
+
+
 def load_images(image_refs: Union[str, List[str], Image.Image, List[Any]]) -> List[Image.Image]:
     """Load PIL images from paths, URLs, base64 strings, raw bytes, or PIL objects.
 

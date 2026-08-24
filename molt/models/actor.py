@@ -16,65 +16,73 @@
 # Adapted from OpenRLHF (https://github.com/OpenRLHF/OpenRLHF),
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
-from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from typing import Optional
 
 import torch
-from nemo_automodel.components.datasets.datum import Datum
 from nemo_automodel.components.loss import token_entropy, token_log_probs
 
-from .base import BaseModel
-
-if TYPE_CHECKING:
-    from molt.trainer.algorithm.experience import Experience
+from .base import BaseModel, _AttrDict
 
 
 class Actor(BaseModel):
-    """Policy wrapper that owns model construction and rollout temperature.
+    """Policy model with the OpenRLHF-style ``actor(tokens)`` interface."""
 
-    AutoModel ``Engine`` owns all training and collection-time forwards.
-    """
-
-    def make_policy_datums(
+    def forward(
         self,
-        experience: "Experience",
-        *,
-        include_sequence_ids: bool = False,
-    ) -> list[Datum]:
-        """Build one policy microbatch with its PPO token inputs."""
-        side_inputs = {
-            "weights": experience.action_mask.float(),
-            "advantages": experience.advantages,
-        }
-        if experience.action_log_probs is not None:
-            side_inputs["old_action_log_probs"] = experience.action_log_probs
-        if experience.base_action_log_probs is not None:
-            side_inputs["base_action_log_probs"] = experience.base_action_log_probs
-        if experience.rollout_log_probs is not None:
-            side_inputs["rollout_log_probs"] = experience.rollout_log_probs
-        return self._make_datums(
-            experience,
-            side_inputs=side_inputs,
-            include_sequence_ids=include_sequence_ids,
-            routed_experts=experience.routed_experts,
+        sequences: torch.LongTensor,
+        action_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        cp_context_stack=None,
+        return_entropy: bool = False,
+        routed_experts: Optional[torch.Tensor] = None,
+        mm_train_inputs=None,
+        **mm_inputs,
+    ) -> _AttrDict:
+        """Score every next token and, when requested, the RL action span.
+
+        Args:
+            sequences: Padded token IDs with shape ``[batch, sequence]``.
+            action_mask: Optional mask with shape ``[batch, actions]``. When
+                present, ``action_log_probs`` contains the final ``actions``
+                positions and is zero outside this mask.
+            attention_mask: Valid-token mask matching ``sequences``.
+            return_entropy: Also return exact per-token entropy.
+            routed_experts: Optional rollout routes with shape
+                ``[batch, global_layers, topk, sequence]``.
+            mm_train_inputs: One processor result per VLM sample.
+
+        Returns:
+            Model output augmented with dense ``log_probs`` of shape
+            ``[batch, sequence - 1]``, optional ``entropy`` of the same shape,
+            and optional ``action_log_probs`` matching ``action_mask``.
+        """
+        if mm_train_inputs is not None:
+            if mm_inputs:
+                raise ValueError("pass either mm_train_inputs or expanded media tensors, not both")
+            mm_inputs = mm_train_inputs
+        output, targets, cp_forward, indices, batch, seqlen = self._forward_backbone(
+            sequences,
+            attention_mask,
+            position_ids,
+            cp_context_stack,
+            mm_inputs,
+            routed_experts=routed_experts,
         )
+        logits = output["logits"]
+        log_probs = token_log_probs(logits, targets, temperature=self.temperature)
+        log_probs = self._restore_full_sequence(
+            log_probs, cp_forward=cp_forward, batch=batch, seqlen=seqlen, indices=indices
+        )
+        output["log_probs"] = log_probs[:, :-1]
 
-    def compute_action_log_probs(self, output: Any, inputs: Mapping[str, torch.Tensor]) -> torch.Tensor:
-        """Compute the realized next-token log probabilities for one model batch."""
-        if torch.is_tensor(output):
-            logits = output
-        elif isinstance(output, Mapping):
-            logits = output["logits"]
-        else:
-            logits = output.logits
-        return token_log_probs(logits, inputs["target_tokens"], temperature=self.temperature)
+        if return_entropy:
+            entropy = token_entropy(logits, temperature=self.temperature)
+            entropy = self._restore_full_sequence(
+                entropy, cp_forward=cp_forward, batch=batch, seqlen=seqlen, indices=indices
+            )
+            output["entropy"] = entropy[:, :-1]
 
-    def compute_entropy(self, output: Any, _inputs: Mapping[str, torch.Tensor] | None = None) -> torch.Tensor:
-        """Compute one entropy value for each token in a model batch."""
-        if torch.is_tensor(output):
-            logits = output
-        elif isinstance(output, Mapping):
-            logits = output["logits"]
-        else:
-            logits = output.logits
-        return token_entropy(logits, temperature=self.temperature)
+        if action_mask is not None:
+            output["action_log_probs"] = output["log_probs"][:, -action_mask.shape[1] :] * action_mask.float()
+        return output

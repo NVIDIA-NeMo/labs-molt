@@ -19,22 +19,19 @@
 import os
 import socket
 import time
+from contextlib import ExitStack
 from dataclasses import fields
-from functools import partial
 from typing import Dict, List
 
 import ray
 import torch
 import torch.distributed
-from nemo_automodel.components.distributed.mesh import MeshContext
-from nemo_automodel.engine import Engine, LossOutput
 from torch.distributed.tensor import DTensor
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from molt.models import Actor, PolicyLoss
-from molt.models.loss import masked_sum
+from molt.models import Actor, PolicyLoss, agg_loss
 from molt.models.utils import compute_approx_kl, masked_mean
 from molt.trainer.algorithm.experience import Experience, get_model_parallel_size
 from molt.trainer.fsdp import FsdpStrategy
@@ -84,14 +81,8 @@ class PolicyTrainer:
         """
         self.strategy = strategy
         self.args = strategy.args
-        # MOLT_DEFER_GRAD_SYNC=1 → defer the FSDP grad reduce-scatter to the last
-        # microbatch of the accumulation window (AutoModel's get_sync_ctx /
-        # defer_fsdp_grad_sync default: ~1 reduce-scatter/step instead of one per
-        # microbatch). Mathematically identical (reduce-scatter is linear over the
-        # accumulated grad). Default ON to align with AutoModel's default; it trades
-        # comm for higher peak memory, so set =0 for memory-bound runs that OOM.
-        self._defer_grad_sync = os.environ.get("MOLT_DEFER_GRAD_SYNC", "1") == "1"
         self.tokenizer = tokenizer
+        self.dataloader_pin_memory = pin_memory
 
         self.actor = actor
         self.actor_optim = actor_optim
@@ -111,8 +102,6 @@ class PolicyTrainer:
                 if self.args.algo.advantage.is_correction_level != "off"
                 else None
             ),
-            # Engine applies the optimizer window's global action-token denominator.
-            loss_agg_mode="token-sum",
         )
 
         self.replay_buffer = NaiveReplayBuffer(
@@ -121,29 +110,6 @@ class PolicyTrainer:
             buffer_cpu_offload,
             dynamic_batch=self.args.train.dynamic_batch_enable,
         )
-        raw_model = self.actor.model
-        padding_token_id = getattr(getattr(raw_model, "config", None), "pad_token_id", None) or 0
-        max_grad_norm = self.args.actor.max_norm
-        mesh_names = getattr(strategy.device_mesh, "mesh_dim_names", ()) or ()
-        cp_mesh = strategy.device_mesh["cp"] if "cp" in mesh_names else None
-        cp_size = cp_mesh.size() if cp_mesh is not None else 1
-        self.engine = Engine(
-            raw_model,
-            device=torch.device("cuda", torch.cuda.current_device()),
-            mesh_context=MeshContext.from_meshes(strategy.device_mesh, strategy.moe_mesh),
-            collate_fn=self.actor.datum_collator(self.tokenizer, cp_size=cp_size),
-            pin_memory=pin_memory,
-            padding_token_id=padding_token_id,
-            batch_context_fn=self.actor.routing_replay_context,
-            defer_fsdp_grad_sync=self._defer_grad_sync,
-            optimizers=self.actor_optim,
-            max_grad_norm=max_grad_norm if max_grad_norm and max_grad_norm > 0 else None,
-        )
-        self._sequence_group = cp_mesh.get_group() if cp_mesh is not None and cp_mesh.size() > 1 else None
-        self._needs_sequence_ids = (
-            self.args.actor.loss_mode == "gspo" or self.args.algo.advantage.is_correction_level in {"seq", "geo"}
-        )
-
         # Init torch group for weights sync (NCCL only — async-split topology
         # has actor and vLLM on different nodes, so CUDA IPC is not applicable).
         backend = getattr(self.strategy.args.vllm, "sync_backend", "nccl")
@@ -154,9 +120,9 @@ class PolicyTrainer:
         # table); None if AutoModel/arch unsupported -> we then report memory only.
         self._mfu = None
         try:
-            from nemo_automodel._transformers.mfu import AutoMFU
+            from nemo_automodel import AutoMFU
 
-            self._mfu = AutoMFU.from_config(self.actor.model, device=torch.cuda.get_device_name())
+            self._mfu = AutoMFU.from_config(self.actor.module, device=torch.cuda.get_device_name())
         except Exception as exc:
             logger.warning(f"perf: MFU unavailable ({exc!r}); reporting memory only.")
 
@@ -274,6 +240,7 @@ class PolicyTrainer:
             batch_size=self.replay_buffer.sample_batch_size,
             shuffle=should_shuffle,
             drop_last=True,
+            pin_memory=self.dataloader_pin_memory,
             collate_fn=self.replay_buffer.collate_fn,
         )
         device = torch.cuda.current_device()
@@ -312,8 +279,8 @@ class PolicyTrainer:
                         f"[PolicyRL] dropping {remainder} trailing actor microbatches "
                         f"(< grad_accum={accum_steps}) to avoid partial gradients."
                     )
-            # One Engine call consumes the complete optimizer window and owns the
-            # global action-token denominator across its Datums and DP ranks.
+            # Every microbatch in one optimizer window shares one global
+            # action-token denominator, matching OpenRLHF's trainer-owned loss.
             window = []
             for step, experience in enumerate(pbar):
                 if step >= max_steps:
@@ -326,40 +293,21 @@ class PolicyTrainer:
                 if not window_end:
                     continue
 
-                datum_batches = []
-                for exp in window:
+                local_tokens = sum(exp.action_mask.sum() for exp in window)
+                batch_num_tokens = self.strategy.global_token_count(local_tokens)
+                self.actor.model.set_gradient_accumulation_steps(len(window))
+                for index, exp in enumerate(window):
+                    exp.to_device(device, non_blocking=self.dataloader_pin_memory)
                     # Full per-sequence lengths drive the FLOP estimate (forward
                     # processes the whole sequence, not just action tokens).
                     seqlens = exp.attention_mask.sum(dim=-1)
                     local_seq_count += float(seqlens.numel())
                     local_token_sum += float(seqlens.sum())
-                    datum_batches.append(
-                        self.actor.make_policy_datums(
-                            exp,
-                            include_sequence_ids=self._needs_sequence_ids,
-                        )
-                    )
-
-                result = self.engine.forward_backward(
-                    datum_batches,
-                    partial(self._policy_objective, kl_ctl=kl_ctl),
-                )
-                self.strategy._maybe_debug_grad_stats(self.actor, "actor")
-                optim_result = self.engine.step()
-                # Keep the HF scheduler out of Engine: LambdaLR.step(1) means
-                # absolute epoch 1, whereas AutoModel schedulers use an increment.
-                self.actor_scheduler.step()
-                for idx, (exp, token_outputs) in enumerate(zip(window, result.token_outputs)):
-                    exp.to_device(device)
-                    action_log_probs = exp.align_action_outputs(token_outputs["action_log_probs"])
-                    entropy = (
-                        exp.align_action_outputs(token_outputs["entropy"]) if "entropy" in token_outputs else None
-                    )
-                    status = self._collect_metrics(
+                    status = self.training_step(
                         exp,
-                        action_log_probs,
-                        entropy,
-                        grad_norm=float(optim_result.grad_norm) if idx == len(window) - 1 else None,
+                        kl_ctl,
+                        batch_num_tokens,
+                        is_optimizer_step=index == len(window) - 1,
                     )
                     self._record_status(status, status_list, pbar)
                     if force_on_policy and self.replay_buffer.cpu_offload:
@@ -392,42 +340,96 @@ class PolicyTrainer:
         )
         return status_mean
 
-    def _policy_objective(self, model_output, batch, *, kl_ctl: float):
-        log_probs = self.actor.compute_action_log_probs(model_output, batch)
-        action_mask = batch["weights"].bool()
-        old_log_probs = batch.get("old_action_log_probs")
-        if old_log_probs is None:
-            old_log_probs = log_probs.detach()
+    def training_step(
+        self,
+        experience: Experience,
+        kl_ctl: float,
+        batch_num_tokens: torch.Tensor,
+        *,
+        is_optimizer_step: bool,
+    ) -> Dict[str, object]:
+        """Run one readable policy microbatch: actor, RL loss, backward, step."""
+        self.actor.train()
+        action_mask = experience.action_mask
 
-        loss_sum, *_ = self.actor_loss_fn(
-            log_probs,
-            old_log_probs,
-            batch["advantages"],
-            action_mask=action_mask,
-            rollout_log_probs=batch.get("rollout_log_probs"),
-            sequence_ids=batch.get("sequence_ids"),
-            num_sequences=batch.get("num_sequences"),
-            sequence_group=self._sequence_group,
-        )
-
-        if self.args.algo.kl.use_loss and self.args.algo.kl.init_coef > 0:
-            approx_kl = compute_approx_kl(
-                log_probs,
-                batch["base_action_log_probs"],
-                kl_estimator=self.args.algo.kl.estimator,
+        # CP and R3 must remain active through activation-checkpoint backward.
+        with ExitStack() as model_context:
+            model_output = self.actor(
+                experience.sequences,
+                action_mask,
+                attention_mask=experience.attention_mask,
+                cp_context_stack=model_context,
+                return_entropy=bool(self.args.actor.entropy_coef),
+                routed_experts=experience.routed_experts,
+                mm_train_inputs=experience.mm_train_inputs if self.actor.is_vlm else None,
             )
-            loss_sum = loss_sum + masked_sum(approx_kl, action_mask) * kl_ctl
+            action_log_probs = model_output.action_log_probs
+            old_action_log_probs = experience.action_log_probs
+            if old_action_log_probs is None:
+                old_action_log_probs = action_log_probs.detach()
 
-        token_outputs = {"action_log_probs": log_probs}
-        if bool(self.args.actor.entropy_coef):
-            entropy = self.actor.compute_entropy(model_output, batch)
-            loss_sum = loss_sum - masked_sum(entropy, action_mask) * self.args.actor.entropy_coef
-            token_outputs["entropy"] = entropy
+            (
+                policy_loss,
+                reported_policy_loss,
+                clip_ratio,
+                policy_kl,
+                vllm_kl,
+                is_filter_ratio,
+            ) = self.actor_loss_fn(
+                action_log_probs,
+                old_action_log_probs,
+                experience.advantages,
+                action_mask=action_mask,
+                rollout_log_probs=experience.rollout_log_probs,
+                dp_size=self.strategy.dp_size,
+                batch_num_tokens=batch_num_tokens,
+            )
+            total_loss = policy_loss
 
-        # Native AutoModel MoE gates inject their configured auxiliary gradient
-        # through MoEAuxLossAutoScaler; Engine sets its window/CP scale. Adding the
-        # scalar output here would double-count it.
-        return LossOutput(loss_sum=loss_sum, token_outputs=token_outputs)
+            if self.args.algo.kl.use_loss and self.args.algo.kl.init_coef > 0:
+                approx_kl = compute_approx_kl(
+                    action_log_probs,
+                    experience.base_action_log_probs,
+                    kl_estimator=self.args.algo.kl.estimator,
+                )
+                total_loss = total_loss + kl_ctl * agg_loss(
+                    approx_kl,
+                    action_mask,
+                    "token-mean",
+                    dp_size=self.strategy.dp_size,
+                    batch_num_tokens=batch_num_tokens,
+                )
+
+            entropy = model_output.get("entropy")
+            if entropy is not None:
+                entropy = entropy[:, -action_mask.shape[1] :]
+                total_loss = total_loss - self.args.actor.entropy_coef * agg_loss(
+                    entropy,
+                    action_mask,
+                    "token-mean",
+                    dp_size=self.strategy.dp_size,
+                    batch_num_tokens=batch_num_tokens,
+                )
+
+            # MOLT owns the global-token objective; Engine only executes the
+            # already-scaled scalar backward, matching DeepSpeed.
+            self.actor.model.backward(total_loss, scale_wrt_gas=False)
+
+        if is_optimizer_step:
+            self.strategy._maybe_debug_grad_stats(self.actor, "actor")
+        self.actor.model.step()
+        grad_norm = self.actor.model.get_global_grad_norm() if is_optimizer_step else None
+        return self._collect_metrics(
+            experience,
+            action_log_probs.detach(),
+            entropy.detach() if entropy is not None else None,
+            reported_policy_loss=reported_policy_loss,
+            clip_ratio=clip_ratio,
+            policy_kl=policy_kl,
+            vllm_kl=vllm_kl,
+            is_filter_ratio=is_filter_ratio,
+            grad_norm=float(grad_norm) if grad_norm is not None else None,
+        )
 
     def _collect_metrics(
         self,
@@ -435,12 +437,14 @@ class PolicyTrainer:
         action_log_probs: torch.Tensor,
         entropy: torch.Tensor | None,
         *,
+        reported_policy_loss: torch.Tensor,
+        clip_ratio: torch.Tensor,
+        policy_kl: torch.Tensor,
+        vllm_kl: torch.Tensor | None,
+        is_filter_ratio: torch.Tensor | None,
         grad_norm: float | None,
     ) -> Dict[str, object]:
         action_mask = experience.action_mask
-        old_action_log_probs = experience.action_log_probs
-        if old_action_log_probs is None:
-            old_action_log_probs = action_log_probs.detach()
         rollout_log_probs = experience.rollout_log_probs
 
         dump_path = os.environ.get("MOLT_DUMP_ROLLOUT_LOGPROBS")
@@ -459,13 +463,6 @@ class PolicyTrainer:
                         f.write(f"{j}\t{token}\t{rollout_lp:.6f}\t{actor_lp:.6f}\t{active}\n")
                 logger.info(f"MOLT_DUMP_ROLLOUT_LOGPROBS: wrote token-level logprob dump to {dump_path}")
 
-        _, reported_actor_loss, clip_ratio, policy_kl, vllm_kl, is_filter_ratio = self.actor_loss_fn(
-            action_log_probs,
-            old_action_log_probs,
-            experience.advantages,
-            action_mask=action_mask,
-            rollout_log_probs=rollout_log_probs,
-        )
         experience.info["policy_clip_ratio"] = clip_ratio.detach()
         experience.info["policy_kl"] = policy_kl.detach()
         if vllm_kl is not None:
@@ -492,7 +489,7 @@ class PolicyTrainer:
             experience.info["kl"] = masked_mean(approx_kl, action_mask).detach()
             experience.info["logprobs_diff"] = masked_mean(logprob_diff, action_mask).detach()
 
-        metrics = {"policy_loss": reported_actor_loss.detach()}
+        metrics = {"policy_loss": reported_policy_loss.detach()}
         weights = {"policy_loss": "token"}
         if entropy is not None:
             entropy_loss = masked_mean(entropy, action_mask)
@@ -536,9 +533,8 @@ class PolicyTrainer:
 
     def broadcast_to_vllm(self):
         torch.cuda.empty_cache()
-        # FSDP2/AutoModel: `actor.model` is the FSDP2-wrapped HF model directly
-        # (no DS-engine `.module` indirection); params are DTensors when sharded.
-        model = self.actor.model
+        # Refit reads the distributed module inside the DeepSpeed-style Engine.
+        model = self.actor.module
 
         ep_size = getattr(self.strategy.args.fsdp, "ep_size", 1) or 1
         model_config = getattr(model, "config", None)
@@ -824,9 +820,18 @@ class PolicyModelActor(BaseModelActor):
         the controller. Called per sample by execute_batch; the controller attaches the result as
         action_log_probs."""
         experience = experience.reload()
-        datums = self.actor.make_scoring_datums(experience, routed_experts=experience.routed_experts)
-        outputs = self.trainer.engine.forward(datums, self.actor.compute_action_log_probs)
-        return experience.align_action_outputs(outputs).to("cpu")
+        experience.to_device(torch.cuda.current_device(), non_blocking=True)
+        self.actor.eval()
+        with torch.no_grad():
+            output = self.actor(
+                experience.sequences,
+                experience.action_mask,
+                attention_mask=experience.attention_mask,
+                routed_experts=experience.routed_experts,
+                mm_train_inputs=experience.mm_train_inputs if self.actor.is_vlm else None,
+            )
+        self.actor.train()
+        return output.action_log_probs.to("cpu")
 
     def broadcast_to_vllm(self):
         self.trainer.broadcast_to_vllm()

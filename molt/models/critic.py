@@ -23,18 +23,13 @@ raw ``head(hidden)`` tensor and do not surface hidden states, so making the head
 one-wide is what turns that tensor into the per-token value directly.
 """
 
-from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from typing import Optional
 
 import torch
 import torch.nn as nn
-from nemo_automodel.components.datasets.datum import Datum
 
-from .base import BaseModel
+from .base import BaseModel, _AttrDict
 from .utils import unshard_dtensor
-
-if TYPE_CHECKING:
-    from molt.trainer.algorithm.experience import Experience
 
 
 class _ValueHead(nn.Linear):
@@ -50,8 +45,8 @@ class _ValueHead(nn.Linear):
       head still sees the full hidden_size and computes correct values — a bare
       ``to_local()`` would have silently used only this rank's shard.
 
-    This materializes only the value head's TP/SP hidden input; Engine owns
-    context-parallel token layout and output restoration separately.
+    This materializes only the value head's TP/SP hidden input; ``BaseModel``
+    owns context-parallel token layout and dense output restoration.
     AutoModel installs this head before FSDP, so its parameters participate in the
     same reduction, clipping, optimizer, and checkpoint lifecycle as the backbone.
     ``unshard_dtensor`` is a no-op at TP=1 (input already plain).
@@ -141,28 +136,48 @@ class Critic(BaseModel):
             super().__init__(*args, **kwargs)
             _install_value_head(self.model)
 
-    def make_value_datums(
+    def forward(
         self,
-        experience: "Experience",
-    ) -> list[Datum]:
-        """Build one critic microbatch with its value-regression inputs."""
-        return self._make_datums(
-            experience,
-            side_inputs={
-                "weights": experience.action_mask.float(),
-                "old_values": experience.values,
-                "returns": experience.returns,
-            },
-            routed_experts=experience.routed_experts,
-        )
+        sequences: torch.LongTensor,
+        action_mask: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        cp_context_stack=None,
+        routed_experts: Optional[torch.Tensor] = None,
+        mm_train_inputs=None,
+        **mm_inputs,
+    ) -> _AttrDict:
+        """Predict dense token values and, when requested, the RL action span.
 
-    @staticmethod
-    def compute_values(output: Any, _inputs: Mapping[str, torch.Tensor]) -> torch.Tensor:
-        """Return one fp32 scalar value for each token in a model batch."""
-        if torch.is_tensor(output):
-            values = output
-        elif isinstance(output, Mapping):
-            values = output["logits"]
-        else:
-            values = output.logits
-        return unshard_dtensor(values).squeeze(-1).float()
+        Args:
+            sequences: Padded token IDs with shape ``[batch, sequence]``.
+            action_mask: Optional mask with shape ``[batch, actions]``.
+            attention_mask: Valid-token mask matching ``sequences``.
+            routed_experts: Optional rollout routes with shape
+                ``[batch, global_layers, topk, sequence]``.
+            mm_train_inputs: One processor result per VLM sample.
+
+        Returns:
+            ``token_values`` with shape ``[batch, sequence - 1]`` and, when an
+            action mask is supplied, ``action_values`` matching that mask.
+        """
+        if mm_train_inputs is not None:
+            if mm_inputs:
+                raise ValueError("pass either mm_train_inputs or expanded media tensors, not both")
+            mm_inputs = mm_train_inputs
+        output, _targets, cp_forward, indices, batch, seqlen = self._forward_backbone(
+            sequences,
+            attention_mask,
+            position_ids,
+            cp_context_stack,
+            mm_inputs,
+            routed_experts=routed_experts,
+        )
+        values = unshard_dtensor(output["logits"]).squeeze(-1).float()
+        values = self._restore_full_sequence(
+            values, cp_forward=cp_forward, batch=batch, seqlen=seqlen, indices=indices
+        )[:, :-1]
+        result = _AttrDict(token_values=values)
+        if action_mask is not None:
+            result["action_values"] = values[:, -action_mask.shape[1] :] * action_mask.float()
+        return result

@@ -15,9 +15,9 @@
 
 """Global token-mean normalization for the RL policy loss.
 
-Each physical batch contributes a local masked token sum. AutoModel Engine sums
-the complete optimizer window and divides it by the action-token count across
-that window and all data-parallel ranks: ``Σ (loss*mask).sum() / Σ mask.sum()``.
+Each physical batch contributes a local masked token sum. The trainer divides
+each contribution by the shared action-token count for the complete optimizer
+window: ``Σ (loss*mask).sum() / Σ mask.sum()``.
 """
 
 import torch
@@ -27,7 +27,7 @@ from molt.models.loss import agg_loss, masked_sum
 
 
 def _window_loss(losses, masks):
-    loss_sum = sum(agg_loss(loss, mask, "token-sum") for loss, mask in zip(losses, masks))
+    loss_sum = sum(masked_sum(loss, mask) for loss, mask in zip(losses, masks))
     return loss_sum / sum(mask.sum() for mask in masks)
 
 
@@ -80,7 +80,7 @@ def test_accumulated_gradient_equals_global_token_mean():
 
     w = torch.zeros((), requires_grad=True)
     for xi, mi in zip(x, masks):
-        loss = agg_loss(w * xi, mi, "token-sum") / n_window
+        loss = masked_sum(w * xi, mi) / n_window
         loss.backward()  # accumulates into w.grad, no /accum rescale
 
     want = sum(xi.sum() for xi in x) / n_window  # d/dw of Σ (w*x)/N_window
@@ -91,13 +91,6 @@ def test_accumulated_gradient_equals_global_token_mean():
     for xi, mi in zip(x, masks):
         (agg_loss(w_old * xi, mi, "token-mean", batch_num_tokens=mi.sum()) / len(x)).backward()
     assert not torch.allclose(w.grad, w_old.grad)
-
-
-def test_token_sum_leaves_window_normalization_to_engine():
-    losses = torch.tensor([[1.0, 2.0, 9.0]])
-    mask = torch.tensor([[1, 1, 0]], dtype=torch.bool)
-
-    torch.testing.assert_close(agg_loss(losses, mask, "token-sum"), torch.tensor(3.0))
 
 
 def test_policy_loss_reports_per_token_mean_independent_of_denominator():

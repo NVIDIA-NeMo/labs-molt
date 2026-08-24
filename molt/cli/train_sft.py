@@ -67,14 +67,12 @@ def train(args):
         max_images_per_prompt=args.data.max_images_per_prompt,
         train_on_last_turn_only=args.data.train_on_last_turn_only,
     )
-    # Engine pins the final collated batch; pinning individual Datums here
-    # would be discarded when padding or packing allocates new tensors.
     train_dataloader = strategy.setup_dataloader(
         train_dataset,
         batch_size=args.train.micro_batch_size,
-        pin_memory=False,
+        pin_memory=True,
         shuffle=True,
-        collate_fn=list,
+        collate_fn=train_dataset.collate_fn,
         num_workers=args.data.dataloader_num_workers,
     )
 
@@ -98,9 +96,9 @@ def train(args):
         eval_dataloader = strategy.setup_dataloader(
             eval_dataset,
             batch_size=args.train.micro_batch_size,
-            pin_memory=False,
+            pin_memory=True,
             shuffle=False,
-            collate_fn=list,
+            collate_fn=eval_dataset.collate_fn,
             num_workers=args.data.dataloader_num_workers,
         )
 
@@ -135,7 +133,6 @@ def train(args):
         train_dataloader=train_dataloader,
         eval_dataloader=eval_dataloader,
         scheduler=scheduler,
-        max_norm=args.max_norm,
         max_epochs=args.train.max_epochs,
         tokenizer=tokenizer,
         save_hf_ckpt=args.ckpt.save_hf,

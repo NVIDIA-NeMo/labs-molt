@@ -14,9 +14,8 @@
 # limitations under the License.
 
 import itertools
-from collections.abc import Sequence
 from dataclasses import dataclass, field, fields
-from typing import Any, List, Union
+from typing import Any, List
 
 import ray
 import torch
@@ -34,10 +33,28 @@ def tensor_field(role: str, **kwargs):
     return field(metadata=metadata, **kwargs)
 
 
-def to(tensor: Union[torch.Tensor, list[torch.Tensor]], device):
-    if isinstance(tensor, list):
-        return [to(t, device) for t in tensor]
-    return tensor.to(device) if isinstance(tensor, torch.Tensor) else tensor
+def to(value, device, *, non_blocking: bool = False):
+    if isinstance(value, torch.Tensor):
+        return value.to(device, non_blocking=non_blocking)
+    if isinstance(value, dict):
+        return {key: to(item, device, non_blocking=non_blocking) for key, item in value.items()}
+    if isinstance(value, list):
+        return [to(item, device, non_blocking=non_blocking) for item in value]
+    if isinstance(value, tuple):
+        return tuple(to(item, device, non_blocking=non_blocking) for item in value)
+    return value
+
+
+def _pin_memory(value):
+    if isinstance(value, torch.Tensor):
+        return value.pin_memory() if value.device.type == "cpu" else value
+    if isinstance(value, dict):
+        return {key: _pin_memory(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_pin_memory(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_pin_memory(item) for item in value)
+    return value
 
 
 def get_model_parallel_size(args) -> int:
@@ -173,44 +190,18 @@ class Experience:
         return field_info is not None and field_info.metadata.get("tensor_role") == "episode"
 
     @torch.no_grad()
-    def to_device(self, device: torch.device):
+    def to_device(self, device: torch.device, *, non_blocking: bool = False):
         """Move all tensor fields to the specified device."""
         for name, value in self.__dict__.items():
-            if isinstance(value, dict):
-                setattr(self, name, {key: to(val, device) for key, val in value.items()})
-            else:
-                setattr(self, name, to(value, device))
-
+            setattr(self, name, to(value, device, non_blocking=non_blocking))
         return self
 
-    def align_action_outputs(self, outputs: Sequence[torch.Tensor]) -> torch.Tensor:
-        """Align per-sample token outputs with this batch's dense action axis."""
-        if self.attention_mask.ndim != 2 or self.action_mask.ndim != 2:
-            raise ValueError("action output alignment requires a batched Experience")
-        batch, sequence = self.action_mask.shape
-        if len(outputs) != batch:
-            raise ValueError(f"Experience has {batch} samples but received {len(outputs)} token outputs")
-        if not outputs:
-            raise ValueError("Experience batches cannot be empty")
-
-        trailing_shape = outputs[0].shape[1:]
-        restored = outputs[0].new_zeros((batch, sequence, *trailing_shape))
-        for row, output in enumerate(outputs):
-            valid = self.attention_mask[row].bool().nonzero(as_tuple=False).flatten()
-            if valid.numel() < 2:
-                raise ValueError("action output alignment requires at least two real tokens per sample")
-            indices = valid[:-1]
-            if output.shape[1:] != trailing_shape or output.shape[0] != indices.numel():
-                raise ValueError(
-                    "model output does not match its sample's prediction axis: "
-                    f"output={tuple(output.shape)}, predictions={indices.numel()}"
-                )
-            restored[row].index_copy_(0, indices.to(output.device), output)
-
-        action_mask = self.action_mask.to(device=restored.device, dtype=torch.bool)
-        for _ in trailing_shape:
-            action_mask = action_mask.unsqueeze(-1)
-        return restored.masked_fill(~action_mask, 0)
+    @torch.no_grad()
+    def pin_memory(self):
+        """Pin every CPU tensor so the next CUDA transfer can be asynchronous."""
+        for name, value in self.__dict__.items():
+            setattr(self, name, _pin_memory(value))
+        return self
 
 
 # Batch manipulation utilities

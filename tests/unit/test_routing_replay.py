@@ -27,7 +27,6 @@ import numpy as np
 import pytest
 import torch
 from nemo_automodel.components.moe.router_replay import replay_selection
-from nemo_automodel.engine import Engine, collate_prebatched
 from torch import nn
 
 from molt.agents.base import Trajectory
@@ -143,7 +142,7 @@ def test_make_experience_batch_pads_routed_experts_with_sentinel():
     assert batch.sequences[1, 2].item() == 0  # sequences still pad with 0
 
 
-def test_critic_engine_forward_replays_routes_through_automodel_adapter():
+def test_critic_forward_replays_routes_through_automodel_adapter():
     class ReplayGate(nn.Module):
         def __init__(self):
             super().__init__()
@@ -198,23 +197,16 @@ def test_critic_engine_forward_replays_routes_through_automodel_adapter():
         routed_experts=routed,
         mm_train_inputs=[],
     )
-    datums = wrapped.make_scoring_datums(experience, routed_experts=routed)
-    engine = Engine(
-        model,
-        device="cpu",
-        collate_fn=collate_prebatched,
-        batch_context_fn=wrapped.routing_replay_context,
+    output = wrapped(
+        experience.sequences,
+        experience.action_mask,
+        attention_mask=experience.attention_mask,
+        routed_experts=experience.routed_experts,
     )
 
-    def token_values(output, _inputs):
-        return output
-
-    outputs = engine.forward(datums, token_values)
-    restored = experience.align_action_outputs(outputs)
-
-    assert torch.equal(restored, torch.tensor([[10.0, 11.0]]))
-    assert wrapped.routing_replay_context.layer_ids == (1,)
-    assert torch.equal(model.selected, torch.tensor([[2, 3], [4, 5]]))
+    assert torch.equal(output.action_values, torch.tensor([[10.0, 11.0]]))
+    assert wrapped._routing_replay_adapter.layer_ids == (1,)
+    assert torch.equal(model.selected, torch.tensor([[2, 3], [4, 5], [6, 7]]))
 
 
 def test_critic_routing_replay_rejects_an_unrelated_checkpoint():

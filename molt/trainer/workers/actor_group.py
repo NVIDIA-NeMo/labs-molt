@@ -19,6 +19,7 @@
 import logging
 import os
 import socket
+from contextlib import ExitStack
 from typing import Dict, Type
 
 import ray
@@ -153,22 +154,12 @@ class ReferenceModelActor(BaseModelActor):
             use_fast=not strategy.args.data.disable_fast_tokenizer,
         )
 
-        self.model = self.strategy.prepare(model)
-        self.model.eval()
-        raw_model = self.model.model
-        text_tokenizer = getattr(self.tokenizer, "tokenizer", self.tokenizer)
-        padding_token_id = getattr(text_tokenizer, "pad_token_id", None)
-        if padding_token_id is None:
-            padding_token_id = getattr(getattr(raw_model, "config", None), "pad_token_id", None) or 0
-        mesh_names = getattr(strategy.device_mesh, "mesh_dim_names", ()) or ()
-        cp_size = strategy.device_mesh["cp"].size() if "cp" in mesh_names else 1
-        self.engine = Engine(
-            raw_model,
-            device=torch.device("cuda", torch.cuda.current_device()),
+        model.model = Engine(
+            model.model,
             mesh_context=MeshContext.from_meshes(strategy.device_mesh, strategy.moe_mesh),
-            collate_fn=self.model.datum_collator(self.tokenizer, cp_size=cp_size),
-            padding_token_id=padding_token_id,
         )
+        self.model = model
+        self.model.eval()
 
     def forward(self, experience) -> torch.Tensor:
         """Reference log-probs for one rollout Experience. reload() first fetches the sample's heavy
@@ -176,9 +167,16 @@ class ReferenceModelActor(BaseModelActor):
         this rank straight from the runner, never through the controller. Called per sample by
         execute_batch; the controller attaches the result as base_action_log_probs."""
         experience = experience.reload()
-        datums = self.model.make_scoring_datums(experience)
-        outputs = self.engine.forward(datums, self.model.compute_action_log_probs)
-        return experience.align_action_outputs(outputs).to("cpu")
+        device = torch.cuda.current_device()
+        with torch.no_grad(), ExitStack() as forward_context:
+            output = self.model(
+                experience.sequences.to(device, non_blocking=True),
+                action_mask=experience.action_mask.to(device, non_blocking=True),
+                attention_mask=experience.attention_mask.to(device, non_blocking=True),
+                cp_context_stack=forward_context,
+                mm_train_inputs=experience.mm_train_inputs if self.model.is_vlm else None,
+            )
+        return output["action_log_probs"].to("cpu")
 
 
 class RayActorGroup:

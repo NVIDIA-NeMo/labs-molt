@@ -31,11 +31,11 @@ from molt.trainer.fsdp.checkpoint import CheckpointManager
 from molt.utils.distributed_sampler import DistributedSampler
 
 
-def _get_actor_cls():
-    """Lazy import to avoid circular dep: molt.models.actor imports from this package."""
-    from molt.models import Actor
+def _get_model_wrapper_cls():
+    """Lazy import to avoid the models -> strategy import cycle."""
+    from molt.models.base import BaseModel
 
-    return Actor
+    return BaseModel
 
 
 class FsdpStrategy:
@@ -44,8 +44,8 @@ class FsdpStrategy:
     Mirrors DeepspeedStrategy's public surface so trainers stay backend-agnostic.
     The model is built/parallelized via ``NeMoAutoModelForCausalLM.from_pretrained``
     inside ``Actor``; this strategy handles distributed setup, optimizer/scheduler
-    construction, collectives, and checkpointing. AutoModel Engine owns training
-    execution for both SFT and RL.
+    construction, collectives, and checkpointing. Trainers own their objectives;
+    AutoModel Engine owns backward and optimizer-update mechanics.
     """
 
     def __init__(
@@ -166,8 +166,7 @@ class FsdpStrategy:
             raise NotImplementedError("Molt trainers are not pipeline-parallel aware yet; set --fsdp.pp_size 1")
 
         from nemo_automodel.components.distributed.config import FSDP2Config, MoEParallelizerConfig
-        from nemo_automodel.components.distributed.mesh import ParallelismSizes
-        from nemo_automodel.components.distributed.mesh_utils import _create_device_meshes
+        from nemo_automodel.components.distributed.mesh import MeshContext, ParallelismSizes
 
         # Allow actor/ref TP embedding calls to reuse equivalent vocab masks.
         if self.tp_size > 1:
@@ -241,9 +240,7 @@ class FsdpStrategy:
             else None
         )
 
-        # _create_device_meshes takes per-dim sizes via ParallelismSizes (dp inferred)
-        # and returns (device_mesh, moe_mesh). Mirrors MeshContext.build (mesh.py).
-        self.device_mesh, self.moe_mesh = _create_device_meshes(
+        mesh_context = MeshContext.build(
             self.distributed_config,
             ParallelismSizes(
                 tp_size=self.tp_size,
@@ -253,6 +250,7 @@ class FsdpStrategy:
             ),
             world_size=self.world_size,
         )
+        self.device_mesh, self.moe_mesh = mesh_context.device_mesh, mesh_context.moe_mesh
 
         # init_device_mesh's sub-process-groups (CP all-to-all, EP reduce-scatter)
         # inherit NCCL's 600s watchdog, not the longer `timeout` we pass for the world
@@ -299,7 +297,8 @@ class FsdpStrategy:
         ret = []
         for arg in args:
             if isinstance(arg, tuple):
-                assert len(arg) == 2, f"prepare() tuple must be (model, cfg); got len={len(arg)}"
+                if len(arg) != 2:
+                    raise ValueError(f"prepare() tuple must be (model, cfg); got len={len(arg)}")
                 model, cfg = arg
                 ret.append(self._init_train_model(model, cfg))
             else:
@@ -339,6 +338,23 @@ class FsdpStrategy:
             num_training_steps=scheduler_steps,
             scheduler_specific_kwargs={"min_lr_rate": cfg.get("min_lr_ratio", 0.1)},
         )
+        from nemo_automodel.components.distributed.mesh import MeshContext
+        from nemo_automodel.engine import Engine
+
+        max_grad_norm = cfg.get("max_norm", self.max_norm)
+        engine = Engine(
+            train_model,
+            optimizer=optimizer,
+            lr_scheduler=scheduler,
+            mesh_context=MeshContext.from_meshes(self.device_mesh, self.moe_mesh),
+            gradient_accumulation_steps=self.accumulated_gradient,
+            defer_fsdp_grad_sync=os.environ.get("MOLT_DEFER_GRAD_SYNC", "1") == "1",
+            max_grad_norm=max_grad_norm if max_grad_norm and max_grad_norm > 0 else None,
+        )
+        if isinstance(model, _get_model_wrapper_cls()):
+            model.model = engine
+        else:
+            model = engine
         return model, optimizer, scheduler
 
     def _maybe_debug_grad_stats(self, model: nn.Module, optim_name: str) -> None:
@@ -404,9 +420,9 @@ class FsdpStrategy:
     def global_token_count(self, mask: torch.Tensor) -> torch.Tensor:
         """All-reduce ``mask.sum()`` across the data-parallel data mesh.
 
-        For CP, call this before ``make_cp_batch_and_ctx`` while each CP rank
-        still sees the full local sequence. Token denominators are reduced over
-        DP only because CP ranks share samples.
+        Call this before the model forward while every CP rank still sees the
+        full logical sequence. Token denominators are reduced over DP only
+        because CP ranks share samples.
         """
         local = mask if mask.ndim == 0 else mask.sum()
         device = torch.device("cuda", torch.cuda.current_device()) if torch.cuda.is_available() else local.device
@@ -509,7 +525,7 @@ class FsdpStrategy:
         return (not dist.is_initialized()) or dist.get_rank() == 0
 
     def _unwrap_model(self, model) -> nn.Module:
-        if isinstance(model, _get_actor_cls()):
+        if isinstance(model, _get_model_wrapper_cls()):
             return self._unwrap_model(model.model)
         if hasattr(model, "get_base_model_for_fsdp"):
             return model.get_base_model_for_fsdp()

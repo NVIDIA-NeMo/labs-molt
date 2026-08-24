@@ -21,10 +21,10 @@ import os
 from typing import Callable, List, Optional
 
 import torch
-from nemo_automodel.components.datasets.datum import Datum, LossInputLayout
 from torch.utils.data import Dataset
 
 from molt.utils.logging_utils import init_logger
+from molt.utils.utils import zero_pad_sequences
 from molt.utils.vlm_utils import should_expand_image_placeholder, split_image_placeholder
 
 logger = init_logger(__name__)
@@ -175,6 +175,9 @@ class SFTDataset(Dataset):
                 "or tokenizer (checked *_token_id attrs and image_token/video_token strings); "
                 "truncation cannot protect image placeholders."
             )
+        self.pad_token_id = self.text_tokenizer.pad_token_id
+        if self.pad_token_id is None:
+            self.pad_token_id = self.text_tokenizer.eos_token_id
         if image_key and self.processor is None:
             raise ValueError("--data.image_key needs an AutoProcessor (must expose .image_processor).")
 
@@ -270,66 +273,17 @@ class SFTDataset(Dataset):
                 "it will contribute no loss. Likely over-length truncation dropped the assistant reply — "
                 "raise --data.max_len or shorten the sample."
             )
-        return self._make_datum(token_ids, loss_mask, mm_inputs)
-
-    def _make_datum(
-        self,
-        token_ids: list[int],
-        loss_mask: list[float],
-        mm_inputs: dict[str, object] | None,
-    ) -> Datum:
-        """Build one processor-ready Engine item without batching it.
-
-        The canonical text collater consumes already-shifted sequences. AutoModel's
-        pre-tokenized VLM collater owns the shift, so VLM Datums retain the source
-        sequence and express supervision on target-token positions.
-
-        Args:
-            token_ids: Unshifted token IDs with shape ``[sequence]``.
-            loss_mask: Prediction-position supervision values with shape
-                ``[sequence]``.
-            mm_inputs: Optional processor tensors with shape ``[media, ...]``.
-
-        Returns:
-            A Datum with text token fields of shape ``[sequence - 1]`` or VLM
-            token fields of shape ``[sequence]``. Media tensor shapes are
-            unchanged.
-        """
         if len(token_ids) < 2:
             raise ValueError("SFT samples need at least two tokens for next-token training")
         if len(loss_mask) != len(token_ids):
             raise ValueError("SFT loss_mask must have one prediction-position value per token")
-
         tokens = torch.tensor(token_ids, dtype=torch.long)
-        prediction_weights = torch.tensor(loss_mask[:-1], dtype=torch.bool)
-        if self.processor is None:
-            labels = tokens[1:].clone()
-            labels.masked_fill_(~prediction_weights, -100)
-            model_inputs = {"input_ids": tokens[:-1]}
-            weights = prediction_weights
-        else:
-            # pad_collate_fn shifts labels by one. Move each prediction-position
-            # mask to its target token first so the shifted result matches the text
-            # representation above. Position zero has no preceding prediction.
-            weights = torch.zeros_like(tokens, dtype=torch.bool)
-            weights[1:] = prediction_weights
-            labels = tokens.clone()
-            labels.masked_fill_(~weights, -100)
-            model_inputs = {
-                "input_ids": tokens,
-                "attention_mask": torch.ones_like(tokens),
-                **(mm_inputs or {}),
-            }
-
-        return Datum(
-            model_inputs=model_inputs,
-            loss_fn_inputs={"labels": labels, "weights": weights},
-            loss_fn_input_layouts={
-                "labels": LossInputLayout.PER_TOKEN,
-                "weights": LossInputLayout.PER_TOKEN,
-            },
-            loss_fn_input_pad_values={"labels": -100},
-        )
+        return {
+            "input_ids": tokens,
+            "attention_mask": torch.ones_like(tokens),
+            "loss_mask": torch.tensor(loss_mask, dtype=torch.bool),
+            "mm_train_inputs": mm_inputs,
+        }
 
     def _tokenize(self, text: str, images):
         """Rendered text -> token ids (capped at max_length). VLM expands the
@@ -374,3 +328,17 @@ class SFTDataset(Dataset):
         # Next-token shift: the trainer scores its prediction at position t against
         # token t+1, so token t is supervised when token t+1 is a reply token.
         return [1.0 if (t + 1 < n and is_reply[t + 1]) else 0.0 for t in range(n)]
+
+    def collate_fn(self, samples):
+        """Pad token tensors and retain one processor result per VLM sample."""
+        media = [sample["mm_train_inputs"] for sample in samples]
+        return {
+            "input_ids": zero_pad_sequences(
+                [sample["input_ids"] for sample in samples], "right", self.pad_token_id, stack=True
+            ),
+            "attention_mask": zero_pad_sequences(
+                [sample["attention_mask"] for sample in samples], "right", stack=True
+            ),
+            "loss_mask": zero_pad_sequences([sample["loss_mask"] for sample in samples], "right", stack=True),
+            "mm_train_inputs": media if any(item is not None for item in media) else None,
+        }
