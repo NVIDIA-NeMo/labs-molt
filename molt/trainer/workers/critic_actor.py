@@ -23,11 +23,9 @@ actor holding the value model, its own optimizer, and its own value-only trainin
 loop. It is colocated on the actor's GPUs by default (shared placement group) but,
 being a separate group, can be disaggregated onto its own GPUs.
 
-The training loop mirrors ``PolicyTrainer``'s window / grad-accumulation /
-global-token-mean contract so the value update is DP-invariant and aligned with the
-actor's batching — the only loss is the clipped value loss (no vLLM sync, entropy,
-or KL). The scalar value head is replicated (not FSDP-wrapped), so its accumulated
-gradient is mean-all-reduced over the DP(+CP) group once, right before the step.
+The trainer follows the OpenRLHF flow directly: critic forward, value loss,
+Engine backward, then Engine step. The scalar value head is installed before
+FSDP and follows the same lifecycle as the backbone.
 """
 
 import os
@@ -47,7 +45,6 @@ from molt.trainer.fsdp import FsdpStrategy
 from molt.utils import get_tokenizer
 from molt.utils.distributed_util import torch_dist_barrier_and_cuda_sync
 from molt.utils.logging_utils import init_logger
-from molt.utils.vlm_utils import merge_mm_train_inputs
 
 from ..algorithm import NaiveReplayBuffer
 from .actor_group import BaseModelActor
@@ -66,19 +63,23 @@ class CriticTrainer:
         critic_scheduler,
         micro_train_batch_size: int = 8,
         buffer_cpu_offload: bool = True,
-        dataloader_pin_memory: bool = True,
+        tokenizer=None,
+        pin_memory: bool = True,
     ):
         self.strategy = strategy
         self.args = strategy.args
-        self._defer_grad_sync = os.environ.get("MOLT_DEFER_GRAD_SYNC", "1") == "1"
-        self.dataloader_pin_memory = dataloader_pin_memory
+        self.tokenizer = tokenizer
+        self.dataloader_pin_memory = pin_memory
         self.critic = critic
         self.critic_optim = critic_optim
         self.critic_scheduler = critic_scheduler
         # The critic can fit the value function with more passes per RL step than the actor
         # (--critic.max_epochs); falls back to the shared --train.max_epochs when unset.
         self.max_epochs = getattr(self.args.critic, "max_epochs", None) or self.args.train.max_epochs
-        self.value_loss_fn = ValueLoss(value_clip=self.args.critic.value_clip)
+        self.value_loss_fn = ValueLoss(
+            value_clip=self.args.critic.value_clip,
+            loss_agg_mode="token-mean",
+        )
         self.replay_buffer = NaiveReplayBuffer(
             micro_train_batch_size,
             0,
@@ -92,9 +93,9 @@ class CriticTrainer:
         # distinct perf/critic_* prefix so neither overwrites the other.
         self._mfu = None
         try:
-            from nemo_automodel._transformers.mfu import AutoMFU
+            from nemo_automodel import AutoMFU
 
-            self._mfu = AutoMFU.from_config(self.critic.model, device=torch.cuda.get_device_name())
+            self._mfu = AutoMFU.from_config(self.critic.module, device=torch.cuda.get_device_name())
         except Exception as exc:
             logger.warning(f"perf: critic MFU unavailable ({exc!r}); reporting memory only.")
         torch_dist_barrier_and_cuda_sync()
@@ -140,7 +141,8 @@ class CriticTrainer:
                 if remainder:
                     max_steps -= remainder
 
-            # Same window / global-token-mean contract as PolicyTrainer.policy_train.
+            # Every microbatch in one optimizer window shares one global
+            # action-token denominator.
             window = []
             for step, experience in enumerate(pbar):
                 if step >= max_steps:
@@ -151,24 +153,29 @@ class CriticTrainer:
                 )
                 if not window_end:
                     continue
+
                 local_tokens = sum(exp.action_mask.sum() for exp in window)
                 batch_num_tokens = self.strategy.global_token_count(local_tokens)
-                for idx, exp in enumerate(window):
-                    exp.to_device(device)
+                self.critic.model.set_gradient_accumulation_steps(len(window))
+                for index, exp in enumerate(window):
+                    exp.to_device(device, non_blocking=self.dataloader_pin_memory)
                     # Full per-sequence lengths drive the FLOP estimate (the forward
                     # processes the whole sequence, not just action tokens).
                     seqlens = exp.attention_mask.sum(dim=-1)
                     local_seq_count += float(seqlens.numel())
                     local_token_sum += float(seqlens.sum())
-                    is_optimizer_step = idx == len(window) - 1
-                    value_loss, clip_frac, grad_norm = self.training_step(exp, batch_num_tokens, is_optimizer_step)
+                    metrics = self.training_step(
+                        exp,
+                        batch_num_tokens,
+                        is_optimizer_step=index == len(window) - 1,
+                    )
                     n_tok = float(exp.action_mask.sum().item())
-                    loss_sum += value_loss * n_tok
-                    clip_sum += clip_frac * n_tok
+                    loss_sum += float(metrics["value_loss"]) * n_tok
+                    clip_sum += float(metrics["value_clip_frac"]) * n_tok
                     token_total += n_tok
+                    if metrics["grad_norm"] is not None:
+                        last_grad_norm = float(metrics["grad_norm"])
                     last_lr = self.critic_scheduler.get_last_lr()[0]
-                    if grad_norm is not None:
-                        last_grad_norm = grad_norm
                     if self.args.train.force_on_policy and self.replay_buffer.cpu_offload:
                         exp.to_device(torch.device("cpu"))
                 window = []
@@ -192,72 +199,59 @@ class CriticTrainer:
         )
         return status
 
-    def training_step(self, experience: Experience, batch_num_tokens, is_optimizer_step: bool):
+    def training_step(
+        self,
+        experience: Experience,
+        batch_num_tokens: torch.Tensor,
+        *,
+        is_optimizer_step: bool,
+    ) -> Dict[str, object]:
+        """Run one critic microbatch: value forward, loss, backward, step."""
         self.critic.train()
-
-        multimodal_inputs = {}
-        if experience.mm_train_inputs and getattr(self.critic, "is_vlm", False):
-            multimodal_inputs = merge_mm_train_inputs(experience.mm_train_inputs, experience.sequences.device)
-
-        cp_context_stack = ExitStack()
-        try:
-            output = self.critic(
+        with ExitStack() as model_context:
+            model_output = self.critic(
                 experience.sequences,
                 experience.action_mask,
                 attention_mask=experience.attention_mask,
-                cp_context_stack=cp_context_stack,
-                **multimodal_inputs,
+                cp_context_stack=model_context,
+                routed_experts=experience.routed_experts,
+                mm_train_inputs=experience.mm_train_inputs if self.critic.is_vlm else None,
             )
-            value_loss, reported_value_loss, value_clip_frac = self.value_loss_fn(
-                output["action_values"],
+            action_values = model_output["action_values"]
+            loss, reported_loss, clip_frac = self.value_loss_fn(
+                action_values,
                 experience.values,
                 experience.returns,
                 action_mask=experience.action_mask,
                 dp_size=self.strategy.dp_size,
                 batch_num_tokens=batch_num_tokens,
             )
-            self.strategy.backward(
-                value_loss,
-                self.critic,
-                self.critic_optim,
-                name="critic",
-                accumulate=not self.args.train.dynamic_batch_enable,
-                scale_loss_by_accumulation=False,
-                sync_gradients=(is_optimizer_step if self._defer_grad_sync else True),
-            )
-        finally:
-            cp_context_stack.close()
+            self.critic.model.backward(loss, scale_wrt_gas=False)
 
-        grad_norm = None
         if is_optimizer_step:
             # The replicated value head is not covered by FSDP's reduce — sync it
             # over the DP(+CP) group before stepping (mean commutes with accum).
             self.strategy.sync_replicated_grads(self.critic.value_head_parameters())
-            self.strategy.optimizer_step(
-                self.critic_optim, self.critic, self.critic_scheduler, name="critic", accumulate=False
-            )
-            grad_norm = self.strategy.get_grad_norm(self.critic)
-
-        clip = value_clip_frac.item() if value_clip_frac is not None else 0.0
-        return reported_value_loss.item(), clip, grad_norm
+            self.strategy.debug_grad_stats(self.critic, "critic")
+        self.critic.model.step()
+        grad_norm = self.critic.model.get_global_grad_norm() if is_optimizer_step else None
+        return {
+            "value_loss": reported_loss.detach(),
+            "value_clip_frac": clip_frac.detach() if clip_frac is not None else 0.0,
+            "grad_norm": grad_norm,
+        }
 
 
 @ray.remote(num_gpus=1)
 class CriticModelActor(BaseModelActor):
     def init_model_from_pretrained(self, strategy: FsdpStrategy, pretrain, max_steps=None):
         args = strategy.args
-        self._setup_distributed(strategy)
-        # The scalar value head reads its (replicated) input via _ValueHead.to_local();
-        # under sequence parallelism the post-norm hidden is seq-sharded, so to_local()
-        # would silently read only the local shard -> wrong V(s). Fail fast until handled.
-        assert not getattr(strategy, "sequence_parallel", False), (
-            "PPO critic value head is not sequence-parallel-safe (critic.py _ValueHead); "
-            "run without --fsdp.sequence_parallel or extend the head to gather the seq dim."
-        )
-
         # Init from the critic checkpoint (a reward model / value model) when given,
         # else from the actor checkpoint. `pretrain` is already the actor path.
         critic_pretrain = args.critic.model_name_or_path or pretrain
+        if getattr(args.train, "routing_replay", False) and critic_pretrain != pretrain:
+            raise ValueError("critic routing replay requires the critic to use the actor checkpoint")
+        self._setup_distributed(strategy)
         critic = Critic(
             critic_pretrain,
             attn_implementation=args.fsdp.attn_implementation,
@@ -274,6 +268,7 @@ class CriticModelActor(BaseModelActor):
             freeze_moe_router=getattr(args.critic, "freeze_moe_router", False)
             or getattr(args.actor, "freeze_moe_router", False),
             moe_aux_loss_coef=args.actor.aux_loss_coef,
+            routing_replay=getattr(args.train, "routing_replay", False),
         )
         strategy.print(critic)
         self.tokenizer = get_tokenizer(
@@ -317,6 +312,7 @@ class CriticModelActor(BaseModelActor):
             self.critic_optim,
             self.critic_scheduler,
             micro_train_batch_size=args.train.micro_batch_size,
+            tokenizer=self.tokenizer,
         )
 
     def fit(self):
@@ -330,30 +326,25 @@ class CriticModelActor(BaseModelActor):
         return status
 
     def forward(self, experience) -> torch.Tensor:
-        """Per-token value V(s) on the action span (collection-time old_values) for one rollout
-        Experience. reload() first fetches the sample's heavy tensors from the producing runner's
-        shared-memory store. Called per sample by execute_batch; the controller attaches values."""
+        """Collection-time values V(s) on the action span for one rollout
+        Experience; the controller attaches the result as values."""
         experience = experience.reload()
-        device = torch.cuda.current_device()
-
-        mm_inputs = {}
-        if experience.mm_train_inputs and getattr(self.critic, "is_vlm", False):
-            mm_inputs = merge_mm_train_inputs(experience.mm_train_inputs, device)
-
+        experience.to_device(torch.cuda.current_device(), non_blocking=True)
         self.critic.eval()
         with torch.no_grad():
             output = self.critic(
-                experience.sequences.to(device),
-                experience.action_mask.to(device),
-                experience.attention_mask.to(device),
-                **mm_inputs,
+                experience.sequences,
+                experience.action_mask,
+                attention_mask=experience.attention_mask,
+                routed_experts=experience.routed_experts,
+                mm_train_inputs=experience.mm_train_inputs if self.critic.is_vlm else None,
             )
-        self.critic.train()  # reset model state
+        self.critic.train()
         return output["action_values"].to("cpu")
 
     def append(self, experience: Experience):
-        # reload() fetches the sample's heavy tensors from the producing runner's shared-memory
-        # store (a no-op if already local); mirrors PolicyModelActor.append.
+        # reload() pulls the sample's heavy tensors from the producing runner's
+        # shared-memory store; a no-op for an already-local experience.
         self.trainer.replay_buffer.append(experience.reload())
 
     def get_checkpoint_states(self):
@@ -370,11 +361,8 @@ class CriticModelActor(BaseModelActor):
             args.ckpt.dcp_max_num,
             args.ckpt.max_mem,
             client_states or {},
-            # Forward the actor's eval metric so the critic's retention/pruning
-            # (sorted by metric in _prune_checkpoints) makes the SAME keep/drop
-            # decisions as the actor — otherwise the critic prunes by recency
-            # only and the two checkpoint sets desync (a step the actor keeps for
-            # its metric may have its _critic dir pruned).
+            # Forward the actor's eval metric so critic checkpoint pruning makes
+            # the same keep/drop decisions as the actor's.
             metric_value=metric_value,
             metric_key=metric_key,
             optimizer=self.critic_optim,

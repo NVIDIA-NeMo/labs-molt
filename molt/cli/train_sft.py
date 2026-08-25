@@ -69,10 +69,10 @@ def train(args):
     )
     train_dataloader = strategy.setup_dataloader(
         train_dataset,
-        args.train.micro_batch_size,
-        True,
-        True,
-        train_dataset.collate_fn,
+        batch_size=args.train.micro_batch_size,
+        pin_memory=True,
+        shuffle=True,
+        collate_fn=train_dataset.collate_fn,
         num_workers=args.data.dataloader_num_workers,
     )
 
@@ -95,10 +95,10 @@ def train(args):
         )
         eval_dataloader = strategy.setup_dataloader(
             eval_dataset,
-            args.train.micro_batch_size,
-            True,
-            False,
-            eval_dataset.collate_fn,
+            batch_size=args.train.micro_batch_size,
+            pin_memory=True,
+            shuffle=False,
+            collate_fn=eval_dataset.collate_fn,
             num_workers=args.data.dataloader_num_workers,
         )
 
@@ -133,8 +133,6 @@ def train(args):
         train_dataloader=train_dataloader,
         eval_dataloader=eval_dataloader,
         scheduler=scheduler,
-        max_norm=args.max_norm,
-        batch_size=args.train.batch_size,
         max_epochs=args.train.max_epochs,
         tokenizer=tokenizer,
         save_hf_ckpt=args.ckpt.save_hf,
@@ -176,7 +174,12 @@ if __name__ == "__main__":
         help="Activation-checkpointing mode (string): 'full' = full-block AC (AutoModel "
         "recipe default), 'selective' = TorchTitan per-op AC, 'none'/'off'/'' = disable.",
     )
-    parser.add_argument("--model.aux_loss_coef", type=float, default=0, help="MoE balancing loss")
+    parser.add_argument(
+        "--model.aux_loss_coef",
+        type=float,
+        default=0,
+        help="AutoModel-native MoE load-balancing loss coefficient",
+    )
     parser.add_argument(
         "--model.freeze_visual_encoder",
         action="store_true",
@@ -258,19 +261,11 @@ if __name__ == "__main__":
     if not args.data.dataset:
         raise ValueError("--data.dataset is required")
 
-    # --- Parallelism / FSDP ---
-    if args.fsdp.pp_size > 1:
-        raise NotImplementedError("Molt trainers are not pipeline-parallel aware yet; set --fsdp.pp_size 1")
-
-    if args.data.image_key and args.fsdp.packing_samples:
-        raise ValueError(
-            "VLM SFT does not support --fsdp.packing_samples (packing is text-only here); "
-            "use --fsdp.cp_size with AutoModel TE native CP for long VLM sequences instead."
-        )
-
-    if args.fsdp.packing_samples and args.fsdp.attn_implementation not in {"te", "flash_attention_2", "tilelang"}:
-        raise ValueError(
-            "--fsdp.packing_samples requires --fsdp.attn_implementation te, flash_attention_2, or tilelang."
+    # --- Engine-only SFT boundary ---
+    if args.fsdp.pp_size != 1:
+        raise NotImplementedError(
+            "Engine-only SFT does not yet support pipeline parallelism in Molt's trainer setup. "
+            "No legacy fallback remains."
         )
 
     # --- Runtime ---

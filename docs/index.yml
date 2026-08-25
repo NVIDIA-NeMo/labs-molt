@@ -18,3 +18,5 @@ navigation:
     contents:
       - page: Overview
         path: index.md
+      - page: AutoModel Engine integration
+        path: automodel-engine-integration.md

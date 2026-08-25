@@ -40,25 +40,28 @@ def add_fsdp_args(parser) -> None:
         "--fsdp.offload",
         type=str,
         default="none",
-        choices=["none", "optimizer", "full"],
-        help="CPU-offload level — a nested progression, not orthogonal toggles (FSDP "
-        "param offload inherently offloads the optimizer too). "
+        choices=["none", "optimizer"],
+        help="CPU-offload mode. "
         "'none': everything on GPU. "
-        "'optimizer': run the AdamW step on CPU so the fp32 master + Adam moments never "
+        "'optimizer': run the AdamW step on CPU so the fp32 master and Adam moments never "
         "occupy GPU during the step (shrinks the optimizer-step peak, the binding one at "
-        "long context); params stay on GPU for the forward, so it's safe on Qwen3.6 MoE; "
-        "AdamW only; numerically equivalent to a GPU step. "
-        "'full': FSDP2 CPUOffloadPolicy also streams the *params* to CPU (maximal saving, "
-        "but breaks Qwen3.6 MoE and slows the forward).",
+        "long context); params stay on GPU for the forward, so it is MoE-safe; AdamW only; "
+        "numerically equivalent to a GPU step.",
     )
     parser.add_argument(
-        "--fsdp.param_dtype", type=str, default="bf16", choices=["bf16", "fp16"], help="Model data type"
+        "--fsdp.param_dtype",
+        type=str,
+        default="bf16",
+        choices=["bf16"],
+        help="Training data type. AutoModel Engine supports bf16 only; fp16 loss scaling is not implemented.",
     )
     parser.add_argument(
         "--fsdp.attn_implementation",
         type=str,
         default="flash_attention_2",
-        help="Attention implementation (e.g., sdpa, eager, flex, te, flash_attention_2)",
+        choices=["eager", "sdpa", "flex", "te", "tilelang", "flash_attention_2", "flash_attention_3"],
+        help="Attention implementation. te/tilelang/sdpa/flex drive AutoModel custom kernels; "
+        "the rest apply to Hugging Face fallback models.",
     )
     parser.add_argument("--fsdp.packing_samples", action="store_true", default=False)
 

@@ -97,6 +97,36 @@ def _pad_to_common_hw(tensors: List[torch.Tensor]) -> List[torch.Tensor]:
     return [F.pad(t, (0, max_w - int(t.shape[-1]), 0, max_h - int(t.shape[-2]))) for t in tensors]
 
 
+def merge_mm_train_inputs(items: list, device) -> Dict[str, Any]:
+    """Merge per-sample processor tensors for a padded VLM forward."""
+    from nemo_automodel.components.datasets.vlm.utils import merge_media_values
+
+    grouped: Dict[str, list[Any]] = {}
+    for item in items:
+        for media in item if isinstance(item, list) else [item]:
+            if media is None:
+                continue
+            for key, value in media.items():
+                grouped.setdefault(key, []).append(value)
+
+    merged = {}
+    for key, values in grouped.items():
+        if key in {"pixel_values", "pixel_values_videos"}:
+            moved = []
+            for value in values:
+                if isinstance(value, (list, tuple)):
+                    moved.append([torch.as_tensor(item).to(device, non_blocking=True) for item in value])
+                else:
+                    moved.append(torch.as_tensor(value).to(device, non_blocking=True))
+            merged[key] = merge_media_values(moved, field_name=key)
+        else:
+            merged[key] = torch.cat(
+                [torch.as_tensor(value).to(device, non_blocking=True) for value in values],
+                dim=0,
+            )
+    return merged
+
+
 def load_images(image_refs: Union[str, List[str], Image.Image, List[Any]]) -> List[Image.Image]:
     """Load PIL images from paths, URLs, base64 strings, raw bytes, or PIL objects.
 
@@ -281,26 +311,3 @@ def accumulate_mm_inputs(existing: Optional[Dict], new: Optional[Dict]) -> Optio
         else:
             merged[k] = new[k]
     return merged
-
-
-def merge_mm_train_inputs(mm_train_inputs_list: list, device) -> Dict[str, torch.Tensor]:
-    """Merge per-sample multimodal tensor dicts into one batched dict on *device*.
-
-    Each ``mm_train_inputs_list`` element is a per-sample dict (or list of dicts,
-    or None). Tensors are concatenated along dim=0; pixel_values is padded to a
-    common HxW first when entries have ndim==4.
-    """
-    merged: Dict[str, list] = {}
-    for item in mm_train_inputs_list:
-        for mm_dict in item if isinstance(item, list) else [item]:
-            if mm_dict is None:
-                continue
-            for key, val in mm_dict.items():
-                merged.setdefault(key, []).append(val if isinstance(val, torch.Tensor) else torch.tensor(val))
-
-    output = {}
-    for key, values in merged.items():
-        if key == "pixel_values" and all(torch.is_tensor(v) and v.ndim == 4 for v in values):
-            values = _pad_to_common_hw(values)
-        output[key] = torch.cat(values, dim=0).to(device)
-    return output

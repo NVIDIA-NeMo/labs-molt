@@ -49,14 +49,14 @@ from molt.utils.logging_utils import init_logger
 logger = init_logger(__name__)
 
 
-def _first_scalar(value):
+def first_scalar(value):
     if value is None:
         return None
     if hasattr(value, "detach") and hasattr(value, "flatten"):
         value = value.detach().flatten()
         return value[0].item() if value.numel() else None
     if isinstance(value, (list, tuple)):
-        return _first_scalar(value[0]) if value else None
+        return first_scalar(value[0]) if value else None
     return value
 
 
@@ -404,10 +404,10 @@ class StepEnvRunner(Runner):
                 if not isinstance(result, Result):
                     raise TypeError(f"Env.step must return a Result, got {type(result).__name__}")
 
-                reward_val = _first_scalar(result.reward)
+                reward_val = first_scalar(result.reward)
                 if reward_val is None:
                     raise ValueError("Env.step must return a Result with a scalar reward.")
-                score_val = _first_scalar(result.score) if result.score is not None else reward_val
+                score_val = first_scalar(result.score) if result.score is not None else reward_val
 
                 trajectory.reward += reward_val
                 trajectory.scores = score_val

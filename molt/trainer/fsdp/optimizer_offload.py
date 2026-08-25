@@ -13,18 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU optimizer offload (the ``--fsdp.offload optimizer`` level).
+"""CPU optimizer offload (the ``--fsdp.offload optimizer`` mode).
 
-Run the AdamW step on CPU so the fp32 master and Adam moments never occupy GPU during
-the step — this shrinks the optimizer-step peak, the binding one for long-context MoE
-RL. Params stay on GPU for the forward (so, unlike FSDP param offload, it's safe on
-Qwen3.6 MoE). This is the Megatron HybridDeviceOptimizer essence minus the d2h/h2d
-overlap, which is pointless when rollout >> the optimizer step (the step is ~1-5% of an
-RL iteration, mostly hidden under generation); a blocking, single-allocator-pool
-implementation gets the memory win for free and avoids cross-stream fragmentation.
-
-Distinct from FSDP2 ``CPUOffloadPolicy`` (the ``full`` level), which streams the *params*
-to CPU and runs the optimizer there too (more saving, but breaks Qwen3.6 MoE).
+Run the AdamW step on CPU so the fp32 master and Adam moments never occupy GPU
+during the step — this shrinks the optimizer-step peak, the binding one for
+long-context MoE RL. Params stay on GPU for the forward, so unlike FSDP param
+offload it is MoE-safe. This is the Megatron HybridDeviceOptimizer essence
+minus the d2h/h2d overlap, which is pointless when rollout >> the optimizer
+step; a blocking, single-allocator-pool implementation gets the memory win for
+free and avoids cross-stream fragmentation.
 """
 
 import torch
@@ -50,13 +47,15 @@ def set_local_shard(t: torch.Tensor, shard: torch.Tensor) -> None:
 
 
 class CpuOptimizerOffloader:
-    """Runs an AdamW step on CPU while keeping params resident on GPU.
+    """Wrap an AdamW so ``step()`` runs on CPU while params stay resident on GPU.
 
+    Exposes the ``step()``/``zero_grad()`` surface the AutoModel Engine drives, so the
+    Engine needs no offload awareness; checkpointing keeps using the wrapped optimizer.
     The optimizer stays built over the model's GPU DTensor params (so its moments remain
     model-matched sharded DTensors — required by AutoModel's OptimizerState + DCP
     checkpoint; a separate-CPU-master optimizer would break resume). Per step we point
     each param's and grad's local shard at a persistent fp32 CPU master / reused CPU grad
-    buffer, run ``optimizer.step()`` (so the Adam moments are created and kept on CPU),
+    buffer, run the wrapped ``step()`` (so the Adam moments are created and kept on CPU),
     then copy the updated master H2D back into the retained GPU shard. The fp32 master is
     persistent, so updates don't round away even if the GPU param is bf16. AdamW only
     (Muon's Newton-Schulz is impractical on CPU). Numerically equivalent to a GPU step,
@@ -68,15 +67,17 @@ class CpuOptimizerOffloader:
     ambiguous-bool error on lookup.
     """
 
-    def __init__(self):
+    def __init__(self, optimizer: optim.Optimizer):
+        self.optimizer = optimizer
         self._cpu_master = {}  # id(param) -> persistent fp32 CPU master shard
         self._cpu_grad = {}  # id(param) -> reused fp32 CPU grad buffer (D2H target)
 
     @torch.no_grad()
-    def step(self, optimizer: optim.Optimizer, params: list) -> None:
-        """Run the optimizer step on CPU. ``params`` are the trainable params with a grad
-        (already clipped on the GPU). The GPU-shard restore runs in a ``finally`` so a
-        raised ``step()`` can't leave a param CPU-resident for the next forward."""
+    def step(self) -> None:
+        """Run the optimizer step on CPU over every param that received a (already
+        GPU-clipped) grad. The GPU-shard restore runs in a ``finally`` so a raised
+        ``step()`` can't leave a param CPU-resident for the next forward."""
+        params = [p for group in self.optimizer.param_groups for p in group["params"] if p.grad is not None]
         gpu_shards = []
         for p in params:
             key = id(p)
@@ -91,20 +92,24 @@ class CpuOptimizerOffloader:
             set_local_shard(p, self._cpu_master[key])  # param -> CPU fp32 master
             set_local_shard(p.grad, self._cpu_grad[key])  # grad  -> CPU buffer
         try:
-            optimizer.step()  # CPU AdamW: updates the masters + CPU Adam moments
+            self.optimizer.step()  # CPU AdamW: updates the masters + CPU Adam moments
         finally:
             for p, gpu_shard in gpu_shards:
                 gpu_shard.copy_(self._cpu_master[id(p)])  # H2D updated weights (cast if bf16)
                 set_local_shard(p, gpu_shard)  # restore the GPU shard for the next forward
 
-    @torch.no_grad()
-    def moments_to_cpu(self, optimizer: optim.Optimizer) -> None:
-        """Page the Adam moments to CPU after a checkpoint resume. DCP's
-        set_optimizer_state_dict restores them onto the model param's (GPU) device, but the
-        CPU step needs them on CPU (co-located with the swapped-out param/grad). Call right
-        after loading the optimizer, before the first forward; a no-op in steady state (the
-        step creates and keeps the moments on CPU)."""
-        for state in optimizer.state.values():
-            for v in state.values():
-                if isinstance(v, torch.Tensor) and local_shard(v).device.type != "cpu":
-                    set_local_shard(v, local_shard(v).to("cpu"))
+    def zero_grad(self, set_to_none: bool = True) -> None:
+        self.optimizer.zero_grad(set_to_none=set_to_none)
+
+
+@torch.no_grad()
+def offload_moments_to_cpu(optimizer: optim.Optimizer) -> None:
+    """Page the Adam moments to CPU after a checkpoint resume. DCP's
+    set_optimizer_state_dict restores them onto the model param's (GPU) device, but the
+    CPU step needs them on CPU (co-located with the swapped-out param/grad). Call right
+    after loading the optimizer, before the first forward; a no-op in steady state (the
+    step creates and keeps the moments on CPU)."""
+    for state in optimizer.state.values():
+        for v in state.values():
+            if isinstance(v, torch.Tensor) and local_shard(v).device.type != "cpu":
+                set_local_shard(v, local_shard(v).to("cpu"))

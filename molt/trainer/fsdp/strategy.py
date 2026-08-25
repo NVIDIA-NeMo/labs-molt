@@ -15,35 +15,27 @@
 
 import math
 import os
-from collections import defaultdict
 from datetime import timedelta
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-import torch.optim as optim
 import transformers
-from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy
+from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.tensor import DTensor
 from torchdata.stateful_dataloader import StatefulDataLoader
 from transformers.optimization import get_scheduler
 
 from molt.models.utils import resolve_ac_mode
 from molt.trainer.fsdp.checkpoint import CheckpointManager
-from molt.trainer.fsdp.optimizer_offload import CpuOptimizerOffloader, local_shard
 from molt.utils.distributed_sampler import DistributedSampler
 
-try:
-    from torch.distributed.fsdp._fully_shard import FSDPModule
-except ImportError:  # pragma: no cover - torch version guard
-    FSDPModule = None
 
+def _get_model_wrapper_cls():
+    """Lazy import to avoid the models -> strategy import cycle."""
+    from molt.models.base import BaseModel
 
-def _get_actor_cls():
-    """Lazy import to avoid circular dep: molt.models.actor imports from this package."""
-    from molt.models import Actor
-
-    return Actor
+    return BaseModel
 
 
 class FsdpStrategy:
@@ -52,7 +44,8 @@ class FsdpStrategy:
     Mirrors DeepspeedStrategy's public surface so trainers stay backend-agnostic.
     The model is built/parallelized via ``NeMoAutoModelForCausalLM.from_pretrained``
     inside ``Actor``; this strategy handles distributed setup, optimizer/scheduler
-    construction, the train-step, collectives, and checkpointing.
+    construction, collectives, and checkpointing. Trainers own their objectives;
+    AutoModel Engine owns backward and optimizer-update mechanics.
     """
 
     def __init__(
@@ -77,14 +70,10 @@ class FsdpStrategy:
         self.ep_size = getattr(fsdp, "ep_size", 1)
         self.pp_size = getattr(fsdp, "pp_size", 1)
         self.param_dtype = getattr(fsdp, "param_dtype", "bf16")
-        # CPU-offload level (--fsdp.offload): none / optimizer / full. 'full' (FSDP2
-        # CPUOffloadPolicy) streams params to CPU and the optimizer follows;
-        # 'optimizer' keeps params on GPU and runs only the AdamW step on CPU
-        # (MoE-safe; see optimizer_offload.py).
         offload = getattr(fsdp, "offload", "none")
-        self.cpu_offload = offload == "full"
+        if offload not in {"none", "optimizer"}:
+            raise ValueError(f"Unsupported --fsdp.offload mode: {offload!r}; choose none or optimizer")
         self.offload_optimizer = offload == "optimizer"
-        self._optimizer_offloader = CpuOptimizerOffloader() if self.offload_optimizer else None
         # SP off by default (opt in via --fsdp.sequence_parallel); avoids the
         # _NormPartial 2D TP+FSDP weight-load hang on the HF-fallback path.
         self.sequence_parallel = bool(getattr(fsdp, "sequence_parallel", False))
@@ -95,9 +84,6 @@ class FsdpStrategy:
         self.dp_size = 1
         self.dp_cp_size = 1
         self.accumulated_gradient: int = 1
-        self._last_grad_norm: float = 0.0
-        self.time_steps = defaultdict(int)
-        self._max_norm_by_optimizer = {}
         # On-disk checkpoint I/O lives in CheckpointManager; the save_*/load_*
         # methods below delegate to it.
         self.checkpoint = CheckpointManager(self)
@@ -115,31 +101,16 @@ class FsdpStrategy:
         for k in self._UNPICKLABLE_ATTRS:
             self.__dict__.setdefault(k, None)
 
-    def _get_automodel_mesh(self, name: str, required: bool = False):
+    def _get_automodel_mesh(self, name: str):
         if self.device_mesh is None:
             return None
+        from nemo_automodel.components.distributed.mesh_utils import get_flat_mesh
 
-        try:
-            from nemo_automodel.components.distributed.mesh_utils import get_flat_mesh
-        except ImportError:
-            get_flat_mesh = None
-
-        try:
-            if get_flat_mesh is not None:
-                return get_flat_mesh(self.device_mesh, name)
-            return self.device_mesh[name]
-        except (KeyError, RuntimeError, AttributeError):
-            if required:
-                raise
-            return None
-
-    def _get_automodel_group(self, name: str):
-        mesh = self._get_automodel_mesh(name, required=self.device_mesh is not None)
-        return mesh.get_group() if mesh is not None else None
+        return get_flat_mesh(self.device_mesh, name)
 
     def _get_dp_group(self, include_cp: bool = False):
-        name = "dp_cp" if include_cp and self.cp_size > 1 else "dp"
-        return self._get_automodel_group(name)
+        mesh = self._get_automodel_mesh("dp_cp" if include_cp and self.cp_size > 1 else "dp")
+        return mesh.get_group() if mesh is not None else None
 
     def _get_dp_group_size(self, include_cp: bool = False) -> int:
         group = self._get_dp_group(include_cp=include_cp)
@@ -148,7 +119,7 @@ class FsdpStrategy:
         return dist.get_world_size(group=group)
 
     def _get_automodel_rank(self, name: str) -> int:
-        mesh = self._get_automodel_mesh(name, required=self.device_mesh is not None)
+        mesh = self._get_automodel_mesh(name)
         return mesh.get_local_rank() if mesh is not None else 0
 
     def _get_dp_rank(self, include_cp: bool = False) -> int:
@@ -172,21 +143,14 @@ class FsdpStrategy:
             torch.cuda.set_device(local_rank)
 
         if not dist.is_initialized():
-            backend = "cuda:nccl,cpu:gloo" if self.cpu_offload else "nccl"
-            dist.init_process_group(backend=backend, timeout=timeout)
+            dist.init_process_group(backend="nccl", timeout=timeout)
 
         self.world_size = dist.get_world_size()
-        if self.world_size == 1 and self.cpu_offload:
-            raise NotImplementedError(
-                "CPU offload is not supported by AutoModel/FSDP2 on a single rank; "
-                "set --fsdp.offload to none/optimizer or launch with more than one rank."
-            )
         if self.pp_size > 1:
             raise NotImplementedError("Molt trainers are not pipeline-parallel aware yet; set --fsdp.pp_size 1")
 
         from nemo_automodel.components.distributed.config import FSDP2Config, MoEParallelizerConfig
-        from nemo_automodel.components.distributed.mesh import ParallelismSizes
-        from nemo_automodel.components.distributed.mesh_utils import _create_device_meshes
+        from nemo_automodel.components.distributed.mesh import MeshContext, ParallelismSizes
 
         # Allow actor/ref TP embedding calls to reuse equivalent vocab masks.
         if self.tp_size > 1:
@@ -194,14 +158,14 @@ class FsdpStrategy:
                 from torch.distributed.tensor._ops import _mask_buffer
             except ImportError:
                 _mask_buffer = None
-            if _mask_buffer is not None and not getattr(_mask_buffer.MaskBuffer, "_orlhf_patched", False):
+            if _mask_buffer is not None and not getattr(_mask_buffer.MaskBuffer, "_molt_patched", False):
 
                 def _safe_materialize(self, mask):
                     self.data = mask
                     self.refcount += 1
 
                 _mask_buffer.MaskBuffer.materialize_mask = _safe_materialize
-                _mask_buffer.MaskBuffer._orlhf_patched = True
+                _mask_buffer.MaskBuffer._molt_patched = True
 
         from molt.utils.utils import convert_to_torch_dtype
 
@@ -218,12 +182,9 @@ class FsdpStrategy:
                 cast_forward_inputs=True,
             )
         )
-        # Public attribute `strategy.distributed_config`, forwarded to from_pretrained.
-        # Activation checkpointing MUST be set here via FSDP2Config for dense / EP=1 /
-        # HF-fallback models: the from_pretrained(activation_checkpointing=) kwarg only
-        # reaches the ep_size>1 MoE parallelizer, so otherwise those models train with
-        # no AC and OOM on long sequences. Source of truth:
-        # --actor.gradient_checkpoint (RL) / --model.gradient_checkpoint (SFT).
+        # AC must be set on FSDP2Config: the from_pretrained kwarg only reaches
+        # the ep_size>1 MoE parallelizer, so dense/HF models would otherwise
+        # train with no AC. Sourced from --actor/--model.gradient_checkpoint.
         _actor_cfg = getattr(self.args, "actor", None)
         _model_cfg = getattr(self.args, "model", None)
         activation_checkpointing = resolve_ac_mode(
@@ -232,37 +193,28 @@ class FsdpStrategy:
         self.distributed_config = FSDP2Config(
             sequence_parallel=self.sequence_parallel,
             mp_policy=mp_policy,
-            offload_policy=CPUOffloadPolicy(pin_memory=False) if self.cpu_offload else None,
             activation_checkpointing=activation_checkpointing,
-            # defer_fsdp_grad_sync=False: every microbatch reduce-scatters into .grad.
-            # The accumulation window comes from deferring optimizer_step, not skipping
-            # sync, so grads stay materialized for clipping and logging.
+            # Engine selects the runtime accumulation-sync policy for each trainer.
+            # Keep the construction default false so non-Engine forwards do not inherit
+            # a pending synchronization state.
             defer_fsdp_grad_sync=False,
         )
-        # MoE parallelization config, required when ep_size > 1.
-        # ignore_router_for_ac=True → selective AC that saves the router projection so
-        # the topk routing is NOT recomputed in backward; otherwise a near-tie token
-        # re-routes on recompute → per-expert counts shift → grouped-GEMM shapes drift
-        # ±1 → CheckpointError.
-        # reshard_after_forward (MOLT_MOE_RESHARD_AFTER_FWD): free the all-gathered
-        # experts after forward and re-gather in backward — one extra all-gather for a
-        # lower activation peak. Default OFF (bit-identical); opt in for memory-bound
-        # runs (e.g. 32K/CP8). Smoke-test under deepep+AC: the re-gather must not
-        # perturb the AC recompute and logprobs_diff must stay 0.
-        _reshard_after_fwd = os.environ.get("MOLT_MOE_RESHARD_AFTER_FWD", "0") == "1"
+        # ignore_router_for_ac saves the router projection during AC so topk
+        # routing is not recomputed in backward — a near-tie token re-routing on
+        # recompute shifts grouped-GEMM shapes and raises CheckpointError.
+        # MOLT_MOE_RESHARD_AFTER_FWD=1 trades one extra expert all-gather in
+        # backward for a lower activation peak on memory-bound runs.
         self.moe_config = (
             MoEParallelizerConfig(
                 mp_policy=mp_policy,
                 ignore_router_for_ac=True,
-                reshard_after_forward=_reshard_after_fwd,
+                reshard_after_forward=os.environ.get("MOLT_MOE_RESHARD_AFTER_FWD", "0") == "1",
             )
             if self.ep_size > 1
             else None
         )
 
-        # _create_device_meshes takes per-dim sizes via ParallelismSizes (dp inferred)
-        # and returns (device_mesh, moe_mesh). Mirrors MeshContext.build (mesh.py).
-        self.device_mesh, self.moe_mesh = _create_device_meshes(
+        mesh_context = MeshContext.build(
             self.distributed_config,
             ParallelismSizes(
                 tp_size=self.tp_size,
@@ -272,12 +224,11 @@ class FsdpStrategy:
             ),
             world_size=self.world_size,
         )
+        self.device_mesh, self.moe_mesh = mesh_context.device_mesh, mesh_context.moe_mesh
 
-        # init_device_mesh's sub-process-groups (CP all-to-all, EP reduce-scatter)
-        # inherit NCCL's 600s watchdog, not the longer `timeout` we pass for the world
-        # group. On the compile-bound cold first step a cross-node collective can
-        # approach 600s and trip the watchdog → SIGABRT. Raise every sub-group's
-        # timeout to the world value so a slow-but-progressing step waits, not aborts.
+        # Mesh sub-groups (CP all-to-all, EP reduce-scatter) inherit NCCL's 600s
+        # default watchdog, not the world-group `timeout`; a compile-bound cold
+        # first step can exceed 600s, so raise every sub-group to the world value.
         from torch.distributed.distributed_c10d import _set_pg_timeout
 
         _seen_pg = set()
@@ -318,7 +269,8 @@ class FsdpStrategy:
         ret = []
         for arg in args:
             if isinstance(arg, tuple):
-                assert len(arg) == 2, f"prepare() tuple must be (model, cfg); got len={len(arg)}"
+                if len(arg) != 2:
+                    raise ValueError(f"prepare() tuple must be (model, cfg); got len={len(arg)}")
                 model, cfg = arg
                 ret.append(self._init_train_model(model, cfg))
             else:
@@ -335,11 +287,6 @@ class FsdpStrategy:
         kind = cfg["optim"]
         adam = cfg["adam"]
         if kind == "muon":
-            if self.offload_optimizer:
-                raise NotImplementedError(
-                    "--fsdp.offload optimizer supports AdamW only; Muon's Newton-Schulz "
-                    "iterations are impractical on CPU. Use --optim adam, or --fsdp.offload none."
-                )
             from molt.trainer.fsdp.muon import build_automodel_muon_optimizer
 
             optimizer = build_automodel_muon_optimizer(train_model, cfg["muon"], adam, self.device_mesh)
@@ -355,8 +302,6 @@ class FsdpStrategy:
             )
         else:
             raise ValueError(f"Unsupported optimizer: {kind}")
-        self._max_norm_by_optimizer[id(optimizer)] = cfg.get("max_norm", self.max_norm)
-
         scheduler_steps = cfg["scheduler_steps"]
         scheduler = get_scheduler(
             cfg.get("lr_scheduler", "constant"),
@@ -365,127 +310,38 @@ class FsdpStrategy:
             num_training_steps=scheduler_steps,
             scheduler_specific_kwargs={"min_lr_rate": cfg.get("min_lr_ratio", 0.1)},
         )
-        return model, optimizer, scheduler
+        from nemo_automodel.components.distributed.mesh import MeshContext
+        from nemo_automodel.engine import Engine
 
-    # ---------------------------------------------------------------- step loop
-
-    @staticmethod
-    def _set_fsdp_backward_sync(model: nn.Module, sync: bool) -> None:
-        if FSDPModule is None:
-            return
-        fsdp_modules = [module for module in model.modules() if isinstance(module, FSDPModule)]
-        if not fsdp_modules:
-            return
-        # Set the flags on EVERY FSDP root, not just the first: with the DeepEP MoE
-        # dispatcher (EP>1) the experts are a SEPARATE FSDP root from the backbone, so
-        # flagging only fsdp_modules[0] left the experts syncing every microbatch out
-        # of step with the deferred dense root — expert grads went effectively
-        # unreduced across the accumulation window, inflating grad-norm by ~grad_acc×.
-        for fsdp_module in fsdp_modules:
-            fsdp_module.set_is_last_backward(sync)
-            fsdp_module.set_reshard_after_backward(sync)
-            fsdp_module.set_requires_gradient_sync(sync)
-
-    def backward(
-        self,
-        loss: torch.Tensor,
-        model: nn.Module,
-        optimizer: optim.Optimizer,
-        name: str = "model",
-        accumulate: bool = True,
-        **kwargs,
-    ) -> None:
-        unwrapped = self._unwrap_model(model)
-        if accumulate and self.accumulated_gradient > 1 and kwargs.get("scale_loss_by_accumulation", True):
-            loss = loss / self.accumulated_gradient
-        # Context-parallel gradient: molt gathers per-token logprobs with the AutoModel
-        # sharder's gather_token_tensor, whose differentiable all-gather SUMS the gradient
-        # across CP (local grad = cp_size× the single replicated-loss grad — see AutoModel's
-        # cp-sharder token-verb functional test). FSDP then mean-reduces param grads over
-        # dp_cp (÷cp_size), so the gather-sum and the FSDP-mean cancel and the main-loss
-        # gradient is already correct — NO explicit cp_size multiply. (The MoE aux loss
-        # below is per-shard WITHOUT a gather, so it still carries the cp_size factor.)
-        sync_gradients = kwargs.get("sync_gradients", True)
-        self._set_fsdp_backward_sync(unwrapped, sync_gradients)
-        if self.moe_mesh is not None:
-            try:
-                from nemo_automodel.components.moe.megatron.moe_utils import MoEAuxLossAutoScaler
-            except ImportError:
-                if self.is_rank_0():
-                    print("[MoE] MoEAuxLossAutoScaler import failed; aux-loss scaling skipped.")
-            else:
-                # Scale the aux gradient by the SAME factor the main loss backward
-                # gets (AutoModel's convention: main_loss_backward_scale must equal
-                # the main-loss multiplier). Under CP each gate sees only its local
-                # sequence shard, so summing the disjoint per-shard aux across CP
-                # ranks reconstructs the full-batch aux — but FSDP mean-reduces param
-                # grads over dp_cp, dividing by cp again. So without the cp_size factor
-                # the load-balance gradient is cp_size× too weak (the main loss gets its
-                # matching cp_size from the gather-sum backward above; AutoModel sets this
-                # to dp_cp_size for the identical reason). The 1/accum averages the per-microbatch aux over
-                # the optimizer-step window. Net: coef * mean(aux), cluster-invariant.
-                MoEAuxLossAutoScaler.main_loss_backward_scale = torch.tensor(
-                    self.cp_size / max(1, self.accumulated_gradient),
-                    device=loss.device,
+        # Molt owns CPU optimizer offload: the offloader wraps the AdamW with the
+        # step()/zero_grad() surface Engine drives, while checkpointing and the LR
+        # scheduler keep using the wrapped optimizer itself.
+        engine_optimizer = optimizer
+        if self.offload_optimizer:
+            if kind != "adam":
+                raise ValueError(
+                    "--fsdp.offload optimizer supports AdamW only; Muon's Newton-Schulz "
+                    "iterations are impractical on CPU. Use --optim adam, or --fsdp.offload none."
                 )
-        loss.backward()
+            from molt.trainer.fsdp.optimizer_offload import CpuOptimizerOffloader
 
-    def optimizer_step(
-        self,
-        optimizer: optim.Optimizer,
-        model: nn.Module,
-        scheduler,
-        name: str = "model",
-        accumulate: bool = True,
-        **kwargs,
-    ) -> None:
-        # Skip the optimizer step until the last micro-batch in the accum window.
-        key = f"step_{name}"
-        if accumulate:
-            self.time_steps[key] += 1
-            if self.time_steps[key] % self.accumulated_gradient != 0:
-                return
+            engine_optimizer = CpuOptimizerOffloader(optimizer)
 
-        model = self._unwrap_model(model)
-        params = [p for p in model.parameters() if p.grad is not None]
-        self._last_grad_norm = 0.0
-        # Clip/scale only when there are grads; the optimizer tail runs either way.
-        if params:
-            self._maybe_debug_grad_stats(model, name)
-            max_norm = self._max_norm_by_optimizer.get(id(optimizer), self.max_norm)
-            clip_norm = max_norm if max_norm and max_norm > 0 else None
-            if clip_norm is not None or self.moe_mesh is not None:
-                from nemo_automodel.components.training.utils import scale_grads_and_clip_grad_norm
-
-                self._last_grad_norm = float(
-                    scale_grads_and_clip_grad_norm(
-                        clip_norm,
-                        [model],
-                        pp_enabled=False,
-                        device_mesh=self.device_mesh,
-                        moe_mesh=self.moe_mesh,
-                        ep_axis_name=(
-                            "ep" if self.moe_mesh is not None and "ep" in self.moe_mesh.mesh_dim_names else None
-                        ),
-                        foreach=False,
-                        num_label_tokens=None,
-                        dp_group_size=getattr(self, "dp_cp_size", self.dp_size),
-                    )
-                )
-        if self._optimizer_offloader is not None:
-            self._optimizer_offloader.step(optimizer, params)  # CPU AdamW (params stay on GPU)
+        max_grad_norm = cfg.get("max_norm", self.max_norm)
+        engine = Engine(
+            train_model,
+            optimizer=engine_optimizer,
+            lr_scheduler=scheduler,
+            mesh_context=MeshContext.from_meshes(self.device_mesh, self.moe_mesh),
+            gradient_accumulation_steps=self.accumulated_gradient,
+            defer_fsdp_grad_sync=os.environ.get("MOLT_DEFER_GRAD_SYNC", "1") == "1",
+            max_grad_norm=max_grad_norm if max_grad_norm and max_grad_norm > 0 else None,
+        )
+        if isinstance(model, _get_model_wrapper_cls()):
+            model.model = engine
         else:
-            optimizer.step()
-        if scheduler is not None:
-            scheduler.step()
-        optimizer.zero_grad(set_to_none=True)
-
-    def offload_moments_to_cpu(self, optimizer: optim.Optimizer) -> None:
-        """Page the Adam moments back to CPU after a checkpoint resume (DCP restores
-        them onto the model param's GPU device). No-op unless the optimizer is
-        CPU-offloaded."""
-        if self._optimizer_offloader is not None:
-            self._optimizer_offloader.moments_to_cpu(optimizer)
+            model = engine
+        return model, optimizer, scheduler
 
     def sync_replicated_grads(self, params) -> None:
         """Mean-all-reduce gradients of replicated (non-FSDP-wrapped) params over the
@@ -494,9 +350,8 @@ class FsdpStrategy:
         FSDP2 only reduces grads of params inside its wrapped modules; a module added
         after wrapping (e.g. the critic's scalar value head) is replicated with a local
         grad per rank, so it must be averaged over the same ``dp_cp`` group FSDP uses.
-        Call right before ``optimizer_step``. Assumes a flat DP mesh (no HSDP/
-        ``dp_replicate``); if HSDP is added, ``dp_cp`` must still span the full
-        replicate × shard × cp set.
+        Call right before the Engine's optimizer step. Assumes a flat DP mesh (no
+        HSDP/``dp_replicate``).
         """
         group = self._get_dp_group(include_cp=True)
         if group is None:
@@ -504,6 +359,8 @@ class FsdpStrategy:
         world = dist.get_world_size(group=group)
         if world == 1:
             return
+        from molt.trainer.fsdp.optimizer_offload import local_shard
+
         for p in params:
             if p.grad is None:
                 continue
@@ -511,10 +368,15 @@ class FsdpStrategy:
             dist.all_reduce(grad, op=dist.ReduceOp.SUM, group=group)
             grad.div_(world)
 
-    def get_grad_norm(self, model: nn.Module) -> float:
-        return self._last_grad_norm
+    def offload_moments_to_cpu(self, optimizer) -> None:
+        """Page the Adam moments back to CPU after a checkpoint resume (DCP restores
+        them onto the model param's GPU device). No-op unless --fsdp.offload optimizer."""
+        if self.offload_optimizer:
+            from molt.trainer.fsdp.optimizer_offload import offload_moments_to_cpu
 
-    def _maybe_debug_grad_stats(self, model: nn.Module, optim_name: str) -> None:
+            offload_moments_to_cpu(optimizer)
+
+    def debug_grad_stats(self, model: nn.Module, optim_name: str) -> None:
         debug = os.environ.get("MOLT_FSDP_DEBUG_GRADS", "")
         if not debug or debug == "0":
             return
@@ -544,7 +406,7 @@ class FsdpStrategy:
             if patterns and not any(pattern in param_name for pattern in patterns):
                 continue
             total_tensors += 1
-            local_grad = local_shard(grad).detach()
+            local_grad = (grad.to_local() if isinstance(grad, DTensor) else grad).detach()
             total_elems += local_grad.numel()
             finite = torch.isfinite(local_grad)
             bad = local_grad.numel() - int(finite.sum().item())
@@ -577,9 +439,9 @@ class FsdpStrategy:
     def global_token_count(self, mask: torch.Tensor) -> torch.Tensor:
         """All-reduce ``mask.sum()`` across the data-parallel data mesh.
 
-        For CP, call this before ``make_cp_batch_and_ctx`` while each CP rank
-        still sees the full local sequence. Token denominators are reduced over
-        DP only because CP ranks share samples.
+        Call this before the model forward while every CP rank still sees the
+        full logical sequence. Token denominators are reduced over DP only
+        because CP ranks share samples.
         """
         local = mask if mask.ndim == 0 else mask.sum()
         device = torch.device("cuda", torch.cuda.current_device()) if torch.cuda.is_available() else local.device
@@ -682,7 +544,7 @@ class FsdpStrategy:
         return (not dist.is_initialized()) or dist.get_rank() == 0
 
     def _unwrap_model(self, model) -> nn.Module:
-        if isinstance(model, _get_actor_cls()):
+        if isinstance(model, _get_model_wrapper_cls()):
             return self._unwrap_model(model.model)
         if hasattr(model, "get_base_model_for_fsdp"):
             return model.get_base_model_for_fsdp()

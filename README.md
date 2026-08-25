@@ -120,8 +120,8 @@ RL on vLLM. Read every line that touches your gradients, in plain PyTorch.
 | RL | vLLM-backed online RL via `molt.cli.train_rl_ray` |
 | Runtime | Ray placement, async rollout queues, vLLM engines, partial rollout sync |
 | Model scale | AutoModel + FSDP2 with TP / EP / CP, MoE-native — e.g. DeepSeek-V3 at `--fsdp.ep_size 256` |
-| Model backend | **NVIDIA AutoModel is the primary path** — native CP / EP / TP, custom MoE+EP parallelizer, TE fused attention; everything model-side aligns with AutoModel's own recipes. The HF transformers path is a **non-preferred fallback** (AutoModel drops to it only when a model has no native class) supporting **text + flash_attention_2 + packing only — no CP / EP / TP** |
-| Optimizer | `adam` (default), with CPU offload for the largest actors (`--fsdp.offload optimizer`). `muon` (Newton–Schulz via Dion: Muon for 2D weights and grouped MoE experts, AdamW for embeddings / head / norms) is **experimental** — runs distributed (FSDP / EP) but has shown no consistent win over `adam` yet, which stays the recommended default |
+| Model backend | **NVIDIA AutoModel is the primary path** — native CP / EP / TP, custom MoE+EP parallelizer, TE fused attention; everything model-side aligns with AutoModel's own recipes. The HF transformers path is a **non-preferred dense fallback**; FA2 packing uses AutoModel indexed masks at CP1/PP1/EP1, while MoE auxiliary loss, CP, and EP require a native implementation. |
+| Optimizer | `adam` (default), with AutoModel full CPU offload for the largest actors (`--fsdp.offload full`). `muon` (Newton–Schulz via Dion: Muon for 2D weights and grouped MoE experts, AdamW for embeddings / head / norms) is **experimental** — runs distributed (FSDP / EP) but has shown no consistent win over `adam` yet, which stays the recommended default |
 
 ### Agents & rewards
 
@@ -506,7 +506,7 @@ Molt targets AutoModel custom models with FSDP2:
 | **Actor** | Tensor parallel | `--fsdp.tp_size 2` |
 | | Expert parallel | `--fsdp.ep_size 8` (e.g. `256` for DeepSeek-V3-class MoE) |
 | | Context parallel | `--fsdp.cp_size 8` (32K+ sequences), incl. VLMs and MoE routing replay |
-| | Optimizer CPU offload | `--fsdp.offload optimizer` (frees VRAM for the largest actors) |
+| | Full CPU offload | `--fsdp.offload full` (parameters and optimizer state use host memory) |
 | **vLLM rollout** | Tensor parallel | `--vllm.tensor_parallel_size 2` |
 | | Expert parallel | `--vllm.enable_expert_parallel` (EP = TP × DP) |
 | | Data parallel | `--vllm.data_parallel_size 4` (single-node mp; raises EP past TP — DeepSeek-V3-style TP8+DP4 → EP32) |
@@ -520,8 +520,10 @@ model gets the sharding its attention backend needs — round-robin for hybrid
 SSM / linear-attention models (Nemotron Omni, Qwen3.5-MoE), flat THD streams for
 sparse-attention models (GLM-5.2 DSA). VLM vision towers and routing replay shard
 with the sequence, so `--fsdp.cp_size` composes with `--data.image_key` and
-`--train.routing_replay`. Sample packing (`--fsdp.packing_samples`) is text-only
-and off by default; under CP it takes the THD path.
+`--train.routing_replay`. RL sample packing (`--fsdp.packing_samples`) is off by
+default and supports text and VLM through native THD or dense-HF FA2 indexed
+masks. Multi-axis mRoPE with packed THD CP is rejected until
+AutoModel can preserve its position layout through aligned CP sharding.
 
 ### ⚡ MTP rollout (speculative decoding)
 

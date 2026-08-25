@@ -93,36 +93,6 @@ def agg_loss(
     raise ValueError(f"Invalid loss_agg_mode: {loss_agg_mode}")
 
 
-class SFTLoss(nn.Module):
-    """
-    SFT Loss
-    """
-
-    def __init__(self, token_level_loss: bool = True, loss_agg_mode: str = "token-mean"):
-        super().__init__()
-        self.token_level_loss = token_level_loss
-        self.loss_agg_mode = loss_agg_mode
-
-    def forward(
-        self,
-        per_token_logps: torch.Tensor,
-        loss_mask: torch.Tensor,
-        dp_size: int = 1,
-        batch_num_tokens: Optional[torch.Tensor] = None,
-        global_batch_size: Optional[torch.Tensor] = None,
-    ) -> torch.Tensor:
-        if self.token_level_loss:
-            return agg_loss(
-                -per_token_logps,
-                loss_mask,
-                self.loss_agg_mode,
-                dp_size=dp_size,
-                batch_num_tokens=batch_num_tokens,
-                global_batch_size=global_batch_size,
-            )
-        return masked_mean(-per_token_logps, loss_mask, dim=-1).mean()
-
-
 class ValueLoss(nn.Module):
     """Clipped value-function loss for PPO.
 
@@ -341,9 +311,9 @@ class PolicyLoss(nn.Module):
         )
         advantages = torch.nan_to_num(advantages.float(), nan=0.0, posinf=0.0, neginf=0.0)
         if action_mask is not None:
-            mask = action_mask.bool()
-            policy_log_ratio = torch.where(mask, policy_log_ratio, torch.zeros_like(policy_log_ratio))
-            advantages = torch.where(mask, advantages, torch.zeros_like(advantages))
+            action_positions = action_mask.bool()
+            policy_log_ratio = torch.where(action_positions, policy_log_ratio, torch.zeros_like(policy_log_ratio))
+            advantages = torch.where(action_positions, advantages, torch.zeros_like(advantages))
 
         ratio = policy_log_ratio.clamp(min=-log_ratio_limit, max=log_ratio_limit).exp()
         loss, clip_ratio = self.policy_loss_fn(

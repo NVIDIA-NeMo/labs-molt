@@ -19,10 +19,13 @@
 import logging
 import os
 import socket
+from contextlib import ExitStack
 from typing import Dict, Type
 
 import ray
 import torch
+from nemo_automodel.components.distributed.mesh import MeshContext
+from nemo_automodel.engine import Engine
 from ray.util.placement_group import PlacementGroup, placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from tqdm import tqdm
@@ -30,6 +33,7 @@ from tqdm import tqdm
 from molt.models import Actor
 from molt.trainer.fsdp import FsdpStrategy
 from molt.trainer.placement import get_bundle_indices, ray_noset_visible_devices
+from molt.utils import get_tokenizer
 
 
 class BaseDistributedActor:
@@ -143,30 +147,32 @@ class ReferenceModelActor(BaseModelActor):
         )
         strategy.print(model)
 
-        self.model = self.strategy.prepare(model)
+        self.tokenizer = get_tokenizer(
+            pretrain,
+            model.model,
+            "left",
+            use_fast=not strategy.args.data.disable_fast_tokenizer,
+        )
+
+        model.model = Engine(
+            model.model,
+            mesh_context=MeshContext.from_meshes(strategy.device_mesh, strategy.moe_mesh),
+        )
+        self.model = model
         self.model.eval()
 
     def forward(self, experience) -> torch.Tensor:
-        """Reference log-probs for one rollout Experience. reload() first fetches the sample's heavy
-        tensors (token ids / images) from the producing runner's shared-memory store — they reach
-        this rank straight from the runner, never through the controller. Called per sample by
-        execute_batch; the controller attaches the result as base_action_log_probs."""
+        """Reference log-probs for one rollout Experience; the controller
+        attaches the result as base_action_log_probs."""
         experience = experience.reload()
         device = torch.cuda.current_device()
-
-        # VLM: merge pre-processed multimodal inputs.
-        mm_inputs = {}
-        if experience.mm_train_inputs and getattr(self.model, "is_vlm", False):
-            from molt.utils.vlm_utils import merge_mm_train_inputs
-
-            mm_inputs = merge_mm_train_inputs(experience.mm_train_inputs, device)
-
-        with torch.no_grad():
+        with torch.no_grad(), ExitStack() as forward_context:
             output = self.model(
-                experience.sequences.to(device),
-                experience.action_mask.to(device),
-                experience.attention_mask.to(device),
-                **mm_inputs,
+                experience.sequences.to(device, non_blocking=True),
+                action_mask=experience.action_mask.to(device, non_blocking=True),
+                attention_mask=experience.attention_mask.to(device, non_blocking=True),
+                cp_context_stack=forward_context,
+                mm_train_inputs=experience.mm_train_inputs if self.model.is_vlm else None,
             )
         return output["action_log_probs"].to("cpu")
 

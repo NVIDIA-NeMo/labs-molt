@@ -24,6 +24,7 @@ role-specific openers (Kimi), no reply terminator (GLM), alternation-enforced tu
 """
 
 import pytest
+import torch
 
 from molt.datasets.sft_dataset import SFTDataset, discover_reply_markers
 
@@ -150,6 +151,58 @@ CASES = [
     ("glm4.1", _glm, "<|assistant|>\n", "<|user|>", False),
     ("deepseek4", _deepseek, "<｜Assistant｜>", "<｜end▁of▁sentence｜>", True),
 ]
+
+
+def test_collate_returns_an_ordinary_padded_text_batch():
+    ds = object.__new__(SFTDataset)
+    ds.pad_token_id = 9
+    batch = ds.collate_fn(
+        [
+            {
+                "input_ids": torch.tensor([10, 11, 12]),
+                "attention_mask": torch.ones(3, dtype=torch.long),
+                "loss_mask": torch.tensor([True, False, False]),
+                "mm_train_inputs": None,
+            },
+            {
+                "input_ids": torch.tensor([20, 21]),
+                "attention_mask": torch.ones(2, dtype=torch.long),
+                "loss_mask": torch.tensor([False, True]),
+                "mm_train_inputs": None,
+            },
+        ]
+    )
+
+    torch.testing.assert_close(batch["input_ids"], torch.tensor([[10, 11, 12], [20, 21, 9]]))
+    torch.testing.assert_close(batch["attention_mask"], torch.tensor([[1, 1, 1], [1, 1, 0]]))
+    torch.testing.assert_close(batch["loss_mask"], torch.tensor([[True, False, False], [False, True, False]]))
+    assert batch["mm_train_inputs"] is None
+
+
+def test_collate_keeps_vlm_processor_inputs_per_sample():
+    ds = object.__new__(SFTDataset)
+    ds.pad_token_id = 0
+    pixel_values = torch.ones(1, 2)
+    media = {"pixel_values": pixel_values, "image_grid_thw": torch.tensor([[1, 2, 2]])}
+    batch = ds.collate_fn(
+        [
+            {
+                "input_ids": torch.tensor([10, 11, 12]),
+                "attention_mask": torch.ones(3, dtype=torch.long),
+                "loss_mask": torch.tensor([True, False, False]),
+                "mm_train_inputs": media,
+            },
+            {
+                "input_ids": torch.tensor([20, 21]),
+                "attention_mask": torch.ones(2, dtype=torch.long),
+                "loss_mask": torch.tensor([False, True]),
+                "mm_train_inputs": None,
+            },
+        ]
+    )
+
+    assert batch["mm_train_inputs"] == [media, None]
+    assert batch["mm_train_inputs"][0]["pixel_values"] is pixel_values
 
 
 @pytest.mark.parametrize("name, template, open_str, close_str, sup", CASES, ids=[c[0] for c in CASES])

@@ -184,6 +184,7 @@ RUN if [ "$INSTALL_TEST_DEPS" = "1" ]; then python -m pip install coverage pytes
     grep -ivE '^[[:space:]]*(dion|vllm|torch|torchvision|torchaudio|transformer[-_]engine|flash[-_]attn|flash[-_]linear[-_]attention|fla([-_]core)?|mamba[-_]ssm|causal[-_]conv1d|deep[-_]ep|ray)([=<>!~ ]|$)' \
         /tmp/requirements.txt > /tmp/req.filtered.txt && \
     python -m pip install -c /opt/torch-pin.txt -r /tmp/req.filtered.txt && \
+    python -c "from nemo_automodel import Engine; from nemo_automodel.components.datasets.vlm import merge_media_values, neat_packed_vlm_collater, pack_vlm_samples, packed_sequence_thd_vlm_collater, resolve_get_rope_index; from nemo_automodel.components.loss import token_entropy, token_log_probs; from nemo_automodel.components.loss.masked_ce import MaskedCrossEntropy; from nemo_automodel.components.moe.router_replay import RouterReplayAdapter" && \
     python -m pip install "ray[default]==2.55.0" && \
     python -m pip install --no-cache-dir --no-deps "flash-linear-attention==0.4.2" "fla-core==0.4.2" && \
     python -c "import importlib.util as u; assert u.find_spec('fla.ops.cp') and u.find_spec('fla.modules.convolution') and u.find_spec('fla.ops.gated_delta_rule'), 'fla CP ops missing'" && \

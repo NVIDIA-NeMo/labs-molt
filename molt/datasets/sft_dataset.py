@@ -18,7 +18,7 @@
 
 import json
 import os
-from typing import Callable, Dict, List, Optional
+from typing import Callable, List, Optional
 
 import torch
 from torch.utils.data import Dataset
@@ -176,7 +176,7 @@ class SFTDataset(Dataset):
                 "truncation cannot protect image placeholders."
             )
         self.pad_token_id = self.text_tokenizer.pad_token_id
-        if self.pad_token_id is None:  # not `or`: a real pad id can be 0
+        if self.pad_token_id is None:
             self.pad_token_id = self.text_tokenizer.eos_token_id
         if image_key and self.processor is None:
             raise ValueError("--data.image_key needs an AutoProcessor (must expose .image_processor).")
@@ -273,12 +273,17 @@ class SFTDataset(Dataset):
                 "it will contribute no loss. Likely over-length truncation dropped the assistant reply — "
                 "raise --data.max_len or shorten the sample."
             )
-        return (
-            torch.tensor([token_ids], dtype=torch.long),
-            torch.ones(1, len(token_ids), dtype=torch.long),
-            torch.tensor([loss_mask], dtype=torch.float32),
-            mm_inputs,
-        )
+        if len(token_ids) < 2:
+            raise ValueError("SFT samples need at least two tokens for next-token training")
+        if len(loss_mask) != len(token_ids):
+            raise ValueError("SFT loss_mask must have one prediction-position value per token")
+        tokens = torch.tensor(token_ids, dtype=torch.long)
+        return {
+            "input_ids": tokens,
+            "attention_mask": torch.ones_like(tokens),
+            "loss_mask": torch.tensor(loss_mask, dtype=torch.bool),
+            "mm_train_inputs": mm_inputs,
+        }
 
     def _tokenize(self, text: str, images):
         """Rendered text -> token ids (capped at max_length). VLM expands the
@@ -324,28 +329,16 @@ class SFTDataset(Dataset):
         # token t+1, so token t is supervised when token t+1 is a reply token.
         return [1.0 if (t + 1 < n and is_reply[t + 1]) else 0.0 for t in range(n)]
 
-    # ------------------------------------------------------------------
-    # Batching.
-    # ------------------------------------------------------------------
-    def collate_fn(self, items):
-        input_ids, attention_mask, loss_mask, mm_inputs = zip(*items)
-        return (
-            zero_pad_sequences(list(input_ids), "right", self.pad_token_id),
-            zero_pad_sequences(list(attention_mask), "right"),
-            zero_pad_sequences(list(loss_mask), "right"),
-            self._stack_mm_inputs(mm_inputs),
-        )
-
-    @staticmethod
-    def _stack_mm_inputs(mm_inputs) -> Dict[str, torch.Tensor]:
-        """Concatenate per-sample VLM tensors (pixel_values, image_grid_thw, ...)
-        along dim 0. Returns {} for a text-only batch."""
-        dicts = [m for m in mm_inputs if m]
-        if not dicts:
-            return {}
-        out: Dict[str, torch.Tensor] = {}
-        for key in set().union(*(m.keys() for m in dicts)):
-            tensors = [m[key] for m in dicts if torch.is_tensor(m.get(key))]
-            if tensors:
-                out[key] = torch.cat(tensors, dim=0)
-        return out
+    def collate_fn(self, samples):
+        """Pad token tensors and retain one processor result per VLM sample."""
+        media = [sample["mm_train_inputs"] for sample in samples]
+        return {
+            "input_ids": zero_pad_sequences(
+                [sample["input_ids"] for sample in samples], "right", self.pad_token_id, stack=True
+            ),
+            "attention_mask": zero_pad_sequences(
+                [sample["attention_mask"] for sample in samples], "right", stack=True
+            ),
+            "loss_mask": zero_pad_sequences([sample["loss_mask"] for sample in samples], "right", stack=True),
+            "mm_train_inputs": media if any(item is not None for item in media) else None,
+        }

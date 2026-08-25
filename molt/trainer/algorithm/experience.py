@@ -15,7 +15,7 @@
 
 import itertools
 from dataclasses import dataclass, field, fields
-from typing import Any, List, Union
+from typing import Any, List
 
 import ray
 import torch
@@ -33,10 +33,21 @@ def tensor_field(role: str, **kwargs):
     return field(metadata=metadata, **kwargs)
 
 
-def to(tensor: Union[torch.Tensor, list[torch.Tensor]], device):
-    if isinstance(tensor, list):
-        return [to(t, device) for t in tensor]
-    return tensor.to(device) if isinstance(tensor, torch.Tensor) else tensor
+def _map_tensors(value, fn):
+    """Apply ``fn`` to every tensor in a nested dict/list/tuple structure."""
+    if isinstance(value, torch.Tensor):
+        return fn(value)
+    if isinstance(value, dict):
+        return {key: _map_tensors(item, fn) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_map_tensors(item, fn) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_map_tensors(item, fn) for item in value)
+    return value
+
+
+def to(value, device, *, non_blocking: bool = False):
+    return _map_tensors(value, lambda t: t.to(device, non_blocking=non_blocking))
 
 
 def get_model_parallel_size(args) -> int:
@@ -90,7 +101,7 @@ class Experience:
     rollout_log_probs: torch.Tensor = tensor_field("step", default=None)  # (B, T-1) log pi_old(a|s)
     # R3 rollout routing replay: the rollout router's top-k expert ids per token, one row
     # per MoE layer. Stored seq-LAST as (B, num_moe_layers, topk, T) so it rides the same
-    # right-pad/concat/stack machinery as the (B, T) step tensors; the actor forward
+    # right-pad/concat/stack machinery as the (B, T) step tensors; the model forward
     # permutes it back to token-major and replays it. None when R3 off.
     routed_experts: torch.Tensor = tensor_field("step", default=None)
 
@@ -172,14 +183,17 @@ class Experience:
         return field_info is not None and field_info.metadata.get("tensor_role") == "episode"
 
     @torch.no_grad()
-    def to_device(self, device: torch.device):
+    def to_device(self, device: torch.device, *, non_blocking: bool = False):
         """Move all tensor fields to the specified device."""
         for name, value in self.__dict__.items():
-            if isinstance(value, dict):
-                setattr(self, name, {key: to(val, device) for key, val in value.items()})
-            else:
-                setattr(self, name, to(value, device))
+            setattr(self, name, to(value, device, non_blocking=non_blocking))
+        return self
 
+    @torch.no_grad()
+    def pin_memory(self):
+        """Pin every CPU tensor so the next CUDA transfer can be asynchronous."""
+        for name, value in self.__dict__.items():
+            setattr(self, name, _map_tensors(value, lambda t: t.pin_memory() if t.device.type == "cpu" else t))
         return self
 
 
