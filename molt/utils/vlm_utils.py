@@ -99,7 +99,7 @@ def _pad_to_common_hw(tensors: List[torch.Tensor]) -> List[torch.Tensor]:
 
 def merge_mm_train_inputs(items: list, device) -> Dict[str, Any]:
     """Merge per-sample processor tensors for a padded VLM forward."""
-    from nemo_automodel.components.datasets.vlm import merge_media_values
+    from nemo_automodel.components.datasets.vlm.utils import merge_media_values
 
     grouped: Dict[str, list[Any]] = {}
     for item in items:

@@ -135,7 +135,8 @@ def pack_vlm_batch(
     inputs use THD or indexed-mask packing, targets follow the same token
     order, and restore indices map real predictions back to the dense batch.
     """
-    from nemo_automodel.components.datasets.vlm import pack_vlm_samples, resolve_get_rope_index
+    from nemo_automodel._transformers.utils import resolve_get_rope_index
+    from nemo_automodel.components.datasets.vlm.neat_packing_vlm import pack_vlm_samples
 
     if not isinstance(media, list) or len(media) != sequences.shape[0]:
         raise ValueError("packed VLM forward requires one mm_train_inputs entry per sequence")
@@ -188,11 +189,11 @@ def pack_vlm_batch(
     )
     collate_kwargs = {"padding_idx": padding_token_id}
     if layout == "thd":
-        from nemo_automodel.components.datasets.vlm import packed_sequence_thd_vlm_collater
+        from nemo_automodel.components.datasets.vlm.collate_fns import packed_sequence_thd_vlm_collater
 
         collated = packed_sequence_thd_vlm_collater([packed], **collate_kwargs)
     else:
-        from nemo_automodel.components.datasets.vlm import neat_packed_vlm_collater
+        from nemo_automodel.components.datasets.vlm.collate_fns import neat_packed_vlm_collater
 
         collated = neat_packed_vlm_collater(
             [packed],
