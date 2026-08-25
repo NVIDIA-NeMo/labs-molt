@@ -66,9 +66,12 @@ def get_tokenizer(pretrain, model, padding_side="left", use_fast=True):
         # AutoProcessor wraps tokenizer + image_processor; downstream code
         # detects VLM via hasattr(tokenizer, "image_processor").
         tokenizer = AutoProcessor.from_pretrained(pretrain, trust_remote_code=True)
+        # A checkpoint whose config declares vision_config but ships no complete
+        # processor bundle (e.g. no preprocessor_config.json) makes AutoProcessor
+        # fall back to returning the bare tokenizer; use it directly.
+        inner = getattr(tokenizer, "tokenizer", tokenizer)
         # AutoProcessor doesn't delegate tokenizer attributes, so set them on
         # the inner tokenizer and mirror the essentials back.
-        inner = tokenizer.tokenizer
         inner.padding_side = padding_side
         if inner.pad_token is None:
             inner.pad_token = inner.eos_token
