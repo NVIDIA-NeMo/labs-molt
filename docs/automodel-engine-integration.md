@@ -34,7 +34,7 @@ boundary. AutoModel does not know PPO, advantages, action masks, or value loss.
 | Molt dataset/replay buffer | logical samples, tokens, media, masks, old/reference log-probabilities, advantages, returns, rollout routes |
 | Molt `Actor` / `Critic` | convert a logical batch to the model's padded or packed inputs, enter CP/R3 contexts, run the model, and restore dense token outputs |
 | Molt trainer | PPO/GSPO/CISPO, KL, entropy and value objectives; global token normalization; metrics and checkpoint cadence |
-| AutoModel model/distributed components | TP/CP/EP/FSDP model execution, vocab-parallel token log-probability and entropy primitives, router replay, task-head sharding |
+| AutoModel model/distributed components | TP/CP/EP/FSDP model execution, vocab-parallel token log-probability and entropy primitives, router replay |
 | AutoModel `Engine` | deferred FSDP synchronization, backward, distributed gradient finalization, clipping, optimizer update, gradient clearing, scheduler advancement |
 
 This keeps the policy worker readable while keeping model-layout mechanics out
@@ -50,9 +50,10 @@ denominator for the complete optimizer window, so unequal dynamic microbatches
 are normalized as one update.
 
 `CriticTrainer.training_step` has the same shape: critic forward, clipped value
-loss, backward, and step. The fp32 scalar value head is installed before FSDP,
-so it participates in normal gradient reduction, clipping, optimization, and
-checkpointing. Critic routing replay requires the critic to use the actor
+loss, backward, and step. The fp32 scalar value head is a molt-owned module
+installed after AutoModel wraps the backbone; it is replicated across ranks
+(rank-0 broadcast at init, gradient all-reduce via `sync_replicated_grads`
+before the optimizer step) and optimized together with the backbone. Critic routing replay requires the critic to use the actor
 checkpoint because captured actor routes have no semantic meaning for an
 unrelated MoE topology.
 
