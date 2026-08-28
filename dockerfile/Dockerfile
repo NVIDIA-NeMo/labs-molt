@@ -17,7 +17,7 @@
 #
 # Base: OFFICIAL Docker Hub pytorch/pytorch:2.13.0-cuda13.0-cudnn9-devel
 #   (torch 2.13.0 + CUDA 13.0 + cuDNN 9.20, python 3.12, Ubuntu 24.04).
-#   Chosen because torch 2.13.0+cu130 matches vLLM 0.27.x's hard torch==2.13.0 pin — NO torch
+#   Chosen because torch 2.13.0+cu130 matches vLLM 0.27/0.28's hard torch==2.13.0 pin — NO torch
 #   swap. The whole source stack (TE / flash-attn / mamba / DeepEP) is compiled against this
 #   torch, so the base torch version and vLLM must stay in lockstep.
 #
@@ -158,7 +158,7 @@ RUN apt-get update && apt-get install -y --allow-change-held-packages rdma-core 
     rm -rf /var/lib/apt/lists/* /opt/deepep.patch && cd / && rm -rf /opt/DeepEP
 # RDMA_CORE_HOME=/opt/rdma-core/build symlinks to the system (apt) rdma-core at runtime.
 
-# --- (e) vLLM 0.25.1 (cu130) ----------------------------------------------------
+# --- (e) vLLM 0.28.0 (cu130) ----------------------------------------------------
 # Pin the base cu130 torch trio via a constraints file so pip can never swap it; let pip
 # pull vLLM's cu13 kernel deps (flashinfer-cu13, nvidia-cutlass-dsl, etc.).
 # vllm[audio] (not bare vllm): the official Nemotron-Omni GA model carries a Parakeet
@@ -167,7 +167,7 @@ RUN apt-get update && apt-get install -y --allow-change-held-packages rdma-core 
 # vision-only RL and the encoder is frozen — but the weights must load. Torch-pinned so the
 # [audio] extra (librosa/soundfile; torchaudio already in base) can't swap the torch trio.
 # Baking it here removes the per-run, per-node rl_omni3 MOLT_INSTALL_AUDIO install.
-RUN python -m pip install -c /opt/torch-pin.txt "vllm[audio]==0.27.1"
+RUN python -m pip install -c /opt/torch-pin.txt "vllm[audio]==0.28.0"
 
 # --- VLM modeling-code runtime deps + molt requirements + fla -----------
 # requirements.txt minus what's already pinned/built above (torch trio, TE, flash-attn,
@@ -197,20 +197,23 @@ RUN python -m pip install --no-cache-dir "tilelang==0.1.11" "tile-kernels==1.0.0
 # is container-local, so every job would recompile the DSA kernels from scratch.
 ENV TILELANG_CACHE_DIR=/root/.cache/tilelang
 
-# vLLM 0.26 hard-pins nvidia-cutlass-dsl==4.6.0, whose cutlass.cute DSL dropped `ThrMma`. The
-# quack-kernels that dion pulls can lag that API and then AttributeError at import, taking
-# `import mamba_ssm` (mamba3 -> quack) down with it. Pin quack to the 4.6.0-compatible 0.6.1.
-# -c reuses the torch-trio pin from build start + cutlass 4.6.0 so this can't perturb the stack.
-RUN { cat /opt/torch-pin.txt; echo 'nvidia-cutlass-dsl==4.6.0'; } > /tmp/pin.txt && \
-    python -m pip install -c /tmp/pin.txt "quack-kernels==0.6.1" && rm -f /tmp/pin.txt
+# vLLM pins nvidia-cutlass-dsl (0.28.0 -> 4.6.2); the cutlass.cute DSL API moves between
+# releases, and the quack-kernels that dion pulls can lag it and then AttributeError at
+# import, taking `import mamba_ssm` (mamba3 -> quack) down with it. Pin quack to the
+# 4.6.2-compatible 0.6.4 (AutoModel's quack==0.6.1 metadata pin predates cutlass 4.6.2 —
+# pip warns about it, but 0.6.4 imports clean and passes the unit suite).
+# -c reuses the torch-trio pin from build start + cutlass 4.6.2 so this can't perturb the stack.
+RUN { cat /opt/torch-pin.txt; echo 'nvidia-cutlass-dsl==4.6.2'; } > /tmp/pin.txt && \
+    python -m pip install -c /tmp/pin.txt "quack-kernels==0.6.4" && rm -f /tmp/pin.txt
 
 # --- restore DeepEP's NVSHMEM ABI ----------------------------------------------
-# DeepEP (step c) built deep_ep_cpp.so against nvidia-nvshmem-cu13==3.6.5, but vLLM hard-pins
-# ==3.4.5, so its install above DOWNGRADED the wheel -> deep_ep_cpp.so then fails to load with
+# DeepEP (step c) built deep_ep_cpp.so against nvidia-nvshmem-cu13==3.6.5, but vLLM's dep set
+# can drag it back to ==3.4.5 (0.27.1 hard-pinned it; 0.28.0 keeps it only transitively) ->
+# deep_ep_cpp.so then fails to load with
 # `undefined symbol: nvshmem_selected_device_transport, version NVSHMEM`. Force nvshmem back to
 # 3.6.5 as the LAST pip action (a backward-compatible superset: it keeps 3.4.5's symbols for
-# vLLM while restoring the newer one DeepEP needs). --no-deps so pip does NOT re-drag vLLM's
-# ==3.4.5 pin, and re-create the unversioned .so symlink the DeepEP step made.
+# vLLM while restoring the newer one DeepEP needs). --no-deps so pip cannot re-drag the
+# older pin, and re-create the unversioned .so symlink the DeepEP step made.
 RUN python -m pip install --no-deps --force-reinstall nvidia-nvshmem-cu13==3.6.5 && \
     NVSHMEM_LIB_PATH=$(pip show nvidia-nvshmem-cu13 | awk '/^Location:/{print $2}')/nvidia/nvshmem/lib && \
     ln -sf ${NVSHMEM_LIB_PATH}/libnvshmem_host.so.3 ${NVSHMEM_LIB_PATH}/libnvshmem_host.so
