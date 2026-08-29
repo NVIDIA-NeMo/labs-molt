@@ -191,7 +191,9 @@ RUN if [ "$INSTALL_TEST_DEPS" = "1" ]; then python -m pip install coverage pytes
 
 # DSA sparse attention (backend.attn="tilelang"): AutoModel's `cuda` extra. The pin is
 # load-bearing — 0.1.9 compiles the kernels but its backward NaNs once an index block mixes
-# real keys with the -1 sentinel, which causal top-k always produces.
+# real keys with the -1 sentinel, which causal top-k always produces. vLLM 0.28.0 hard-pins
+# tilelang==0.1.12; this step deliberately downgrades it back (pip warns) — 0.1.12 is
+# unvalidated for the DSA backward, so keep this step AFTER the vLLM install.
 RUN python -m pip install --no-cache-dir "tilelang==0.1.11" "tile-kernels==1.0.0" "apache-tvm-ffi<=0.1.11"
 # Keep the kernel JIT cache under the bind-mounted /root/.cache; the default ~/.tilelang
 # is container-local, so every job would recompile the DSA kernels from scratch.
