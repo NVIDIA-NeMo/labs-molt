@@ -20,7 +20,39 @@ adds a flag and the SFT launcher silently keeps a stale default — exactly the
 ``--adam.lr`` vs ``--actor.adam.lr`` default skew this module now pins down.
 """
 
+import os
 from datetime import datetime
+
+
+def validate_ep_gradient_checkpoint(ep_size: int, gradient_checkpoint) -> None:
+    """Reject ep_size>1 + full activation checkpointing under HybridEP/DeepEP.
+
+    The upstream AutoModel expert dispatch recomputes tensor shapes that
+    differ from the forward pass under these dispatchers, triggering
+    CheckpointError on the first backward.  Guard early so users see a
+    clear message instead of a cryptic shape mismatch.
+    """
+    if ep_size <= 1:
+        return
+    # Inline the "is this full AC?" check from resolve_ac_mode to avoid
+    # importing molt.models (which chains into heavy GPU deps).
+    if isinstance(gradient_checkpoint, str):
+        v = gradient_checkpoint.strip().lower()
+        is_full = v not in ("", "false", "none", "off", "0", "selective")
+    else:
+        is_full = bool(gradient_checkpoint)
+    if not is_full:
+        return
+    dispatcher = os.environ.get("MOLT_MOE_DISPATCHER", "hybridep").lower()
+    if dispatcher not in ("hybridep", "deepep"):
+        return
+    raise ValueError(
+        f"Full activation checkpointing is incompatible with expert-parallel "
+        f"dispatch ({dispatcher}) when ep_size={ep_size}. "
+        f"Set --model.gradient_checkpoint none (SFT) or "
+        f"--actor.gradient_checkpoint none (RL), or override "
+        f"MOLT_MOE_DISPATCHER=torch."
+    )
 
 
 def add_fsdp_args(parser) -> None:

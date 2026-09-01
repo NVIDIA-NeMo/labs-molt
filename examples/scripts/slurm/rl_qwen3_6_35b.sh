@@ -40,11 +40,11 @@ export MOLT_PATH="$REPO_ROOT"
 export MODEL_PATH="${MODEL_PATH:-/path/to/models/Qwen3.6-35B-A3B}"
 export TP_SIZE="${TP_SIZE:-1}"
 export EP_SIZE="${EP_SIZE:-8}"
-# Activation checkpointing ON by default — safe under the deepep MoE dispatcher
-# (the actor.py code default), which makes the expert routing/recompute
-# deterministic. The legacy torch dispatcher could drift the recomputed MoE
-# tensors and raise `CheckpointError: Recomputed values ... different metadata`.
-export GRAD_CHECKPOINT="${GRAD_CHECKPOINT-full}"
+# Activation checkpointing OFF by default — full AC is incompatible with the
+# HybridEP/DeepEP MoE dispatcher under EP>1 (upstream AutoModel
+# recompute-shape mismatch → CheckpointError). Override GRAD_CHECKPOINT=full
+# only with MOLT_MOE_DISPATCHER=torch.
+export GRAD_CHECKPOINT="${GRAD_CHECKPOINT-none}"
 # CP=8 (te-native CP path). dp = world 16 / cp8 = 2, and train.batch_size >= dp
 # holds. CP shards the 32K sequence to 4096 tok/rank (non-GDN; GDN layers all-gather
 # the full sequence intra-node) — CP is for activation memory / long context; te

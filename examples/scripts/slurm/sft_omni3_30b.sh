@@ -70,10 +70,10 @@ MAX_SAMPLES="${MAX_SAMPLES:-8192}"
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-8}"
 MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-1}"
 
-# Omni3 native path: TE native cuDNN-fused attention. Grad-ckpt ON by default —
-# the deepep dispatcher makes the MoE recompute deterministic under AC.
+# Omni3 native path: TE native cuDNN-fused attention. Grad-ckpt OFF by default —
+# full AC is incompatible with EP>1 HybridEP/DeepEP dispatchers.
 FSDP_ATTN_IMPLEMENTATION="${FSDP_ATTN_IMPLEMENTATION:-te}"
-GRAD_CHECKPOINT="${GRAD_CHECKPOINT-full}"
+GRAD_CHECKPOINT="${GRAD_CHECKPOINT-none}"
 
 test -f "$CONTAINER_IMAGE"
 test -e "$SFT_DATASET"

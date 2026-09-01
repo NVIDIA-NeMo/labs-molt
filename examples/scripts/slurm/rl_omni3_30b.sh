@@ -45,7 +45,7 @@ export MODEL_PATH="${MODEL_PATH:-/path/to/models/NVIDIA-Nemotron-3-Nano-Omni-30B
 export TP_SIZE="${TP_SIZE:-1}"        # AutoModel custom MoE asserts TP=1
 export EP_SIZE="${EP_SIZE:-8}"        # only model-state shard knob for this MoE
 export CP_SIZE="${CP_SIZE:-8}"        # CP8 fits 32K on the 2-node DP2 actor (omni3 SFT-validated); hybrid-SSM CP fix is in
-export GRAD_CHECKPOINT="${GRAD_CHECKPOINT-full}"   # all blocks activation-checkpointed
+export GRAD_CHECKPOINT="${GRAD_CHECKPOINT-none}"   # full AC incompatible with EP>1 HybridEP/DeepEP
 # Custom AutoModel models reject flash_attention_2 (it silently falls to sdpa);
 # TE is the intended fused-attention backend for the native path.
 export FSDP_ATTN_IMPLEMENTATION="${FSDP_ATTN_IMPLEMENTATION:-te}"

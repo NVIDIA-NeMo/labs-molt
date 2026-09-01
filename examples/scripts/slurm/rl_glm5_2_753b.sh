@@ -40,8 +40,8 @@ export MODEL_PATH="${MODEL_PATH:-/path/to/models/GLM-5.2}"
 # 256 experts / 256 = 1 expert/rank.
 export TP_SIZE="${TP_SIZE:-1}"
 export EP_SIZE="${EP_SIZE:-256}"
-# Activation checkpointing ON (safe under the hybridep MoE dispatcher; deterministic
-# recompute).
+# Activation checkpointing ON (safe because MOLT_MOE_DISPATCHER=torch below;
+# full AC is incompatible with hybridep/deepep under EP>1).
 export GRAD_CHECKPOINT="${GRAD_CHECKPOINT-full}"
 # CP=16 (DSA is THD-native: the model-owned sharder flattens [B,S] and contiguous-shards
 # from seq_lens). It also sets the DP width: dp = world 256 / cp16 = 16, and a rollout

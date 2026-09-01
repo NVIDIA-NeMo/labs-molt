@@ -113,7 +113,7 @@ TRAIN_ARGS=(
   --fsdp.tp_size "$TP_SIZE"
   --fsdp.ep_size "$EP_SIZE"
   --fsdp.cp_size "$CP_SIZE"
-  --model.gradient_checkpoint full
+  --model.gradient_checkpoint none
   --adam.lr "${LR:-1e-6}"
   --model.aux_loss_coef "${MOE_AUX_LOSS_COEF:-0.001}"
   --logger.wandb.project "${WANDB_PROJECT:-molt_sft_qwen3_6}"

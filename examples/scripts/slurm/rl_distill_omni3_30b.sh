@@ -57,7 +57,7 @@ export REF_MODEL_PATH="${REF_MODEL_PATH:-}"
 export TP_SIZE="${TP_SIZE:-1}"        # AutoModel custom MoE asserts TP=1
 export EP_SIZE="${EP_SIZE:-8}"        # only model-state shard knob for this MoE
 export CP_SIZE="${CP_SIZE:-8}"        # shard sequence; CP8 leaves headroom for the colocated teacher
-export GRAD_CHECKPOINT="${GRAD_CHECKPOINT-full}"
+export GRAD_CHECKPOINT="${GRAD_CHECKPOINT-none}"
 export FSDP_ATTN_IMPLEMENTATION="${FSDP_ATTN_IMPLEMENTATION:-te}"
 
 # 16K by default (vs 32K for plain RL): the colocated teacher adds a full model's params to

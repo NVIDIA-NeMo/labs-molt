@@ -102,7 +102,7 @@ python3 -u -m molt.cli.train_rl_ray \
   --fsdp.tp_size 1 \
   --fsdp.ep_size 4 \
   --fsdp.cp_size 2 \
-  --actor.gradient_checkpoint full \
+  --actor.gradient_checkpoint none \
   --actor.freeze_visual_encoder \
   --actor.adam.lr 2e-6 \
   --actor.eps_clip_low_high 0.2 0.28 \

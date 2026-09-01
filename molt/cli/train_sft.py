@@ -153,6 +153,7 @@ if __name__ == "__main__":
         add_logger_args,
         add_optimizer_args,
         resolve_ckpt_retention,
+        validate_ep_gradient_checkpoint,
     )
 
     # ====================== Shared blocks (same surface as train_rl_ray) ======================
@@ -261,6 +262,8 @@ if __name__ == "__main__":
     # --- Parallelism / FSDP ---
     if args.fsdp.pp_size > 1:
         raise NotImplementedError("Molt trainers are not pipeline-parallel aware yet; set --fsdp.pp_size 1")
+
+    validate_ep_gradient_checkpoint(args.fsdp.ep_size, args.model.gradient_checkpoint)
 
     if args.data.image_key and args.fsdp.packing_samples:
         raise ValueError(
