@@ -194,13 +194,18 @@ cd labs-molt
 pip install -e ".[vllm]"          # local development only — the container bakes everything in
 ```
 
+> **Requires CUDA 13.** The git-pinned AutoModel is only compatible with the CUDA-13 torch
+> build (`torch==2.13.0+cu130`); a CUDA-12 environment will not work. If your host driver is
+> older than 580 (native CUDA 13), use the container instead — it ships the CUDA
+> forward-compatibility layer and enables it automatically.
+
 **The recommended path is the project container** (`dockerfile/Dockerfile`). It bakes the
-full CUDA-13 stack — torch 2.11 · vLLM · TransformerEngine · flash-attn · mamba · DeepEP ·
+full CUDA-13 stack — torch 2.13 · vLLM · TransformerEngine · flash-attn · mamba · DeepEP ·
 NVIDIA AutoModel — built for A100 / H100 / H200 / B200·GB200, so it runs SFT and RL as-is
 with no local dependency wrangling. Pull the prebuilt image from Docker Hub:
 
 ```bash
-docker pull hijkzzz/molt:latest   # or a pinned release: hijkzzz/molt:0.1.3
+docker pull hijkzzz/molt:latest   # or a pinned release: hijkzzz/molt:0.1.7
 ```
 
 ...or build it yourself from the Dockerfile (e.g. to change the CUDA / vLLM / AutoModel pins):
