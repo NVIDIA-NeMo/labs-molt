@@ -133,8 +133,11 @@ class RolloutRayActor:
         """
         import uvicorn
         from vllm.entrypoints.openai import api_server as _api
-        from vllm.entrypoints.openai.cli_args import make_arg_parser
 
+        try:  # vLLM 0.29 moved the serve CLI into entrypoints.launchers (openai.cli_args is gone)
+            from vllm.entrypoints.launchers.cli_args import make_arg_parser
+        except ImportError:
+            from vllm.entrypoints.openai.cli_args import make_arg_parser
         try:  # location moved across vLLM versions (utils.argparse_utils -> entrypoints.utils)
             from vllm.utils.argparse_utils import FlexibleArgumentParser
         except ImportError:
