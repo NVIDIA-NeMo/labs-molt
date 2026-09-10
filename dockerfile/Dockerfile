@@ -177,6 +177,8 @@ RUN python -m pip install -c /opt/torch-pin.txt "vllm[audio]==0.29.0"
 # NOTE: nemo-automodel is intentionally NOT filtered out — it installs from the requirements.txt
 # git pin here, baking AutoModel into the image (self-contained for Docker Hub). The runtime
 # PYTHONPATH sibling-checkout override (above) takes precedence over this baked copy.
+# transformers is deliberately NOT pinned anywhere in this repo: AutoModel's exact pin wins here
+# (vLLM only sets a floor), so its validated transformers version travels with the AutoModel bump.
 ARG INSTALL_TEST_DEPS=0
 COPY requirements.txt /tmp/requirements.txt
 RUN if [ "$INSTALL_TEST_DEPS" = "1" ]; then python -m pip install coverage pytest; fi && \
@@ -188,12 +190,6 @@ RUN if [ "$INSTALL_TEST_DEPS" = "1" ]; then python -m pip install coverage pytes
     python -m pip install --no-cache-dir --no-deps "flash-linear-attention==0.4.2" "fla-core==0.4.2" && \
     python -c "import importlib.util as u; assert u.find_spec('fla.ops.cp') and u.find_spec('fla.modules.convolution') and u.find_spec('fla.ops.gated_delta_rule'), 'fla CP ops missing'" && \
     rm -f /tmp/requirements.txt /tmp/req.filtered.txt
-
-# transformers 5.17.0 on top of AutoModel's exact ==5.15.1 metadata pin (pip warns; imports
-# clean, unit suite passes); vLLM 0.29.0 only needs >=5.10.4. Kept out of requirements.txt on
-# purpose — a second hard pin in the same resolve would be ResolutionImpossible — and it must
-# come AFTER the requirements install above, which otherwise settles on AutoModel's pin.
-RUN python -m pip install -c /opt/torch-pin.txt "transformers==5.17.0"
 
 # DSA sparse attention (backend.attn="tilelang"): AutoModel's `cuda` extra. The pin is
 # load-bearing — 0.1.9 compiles the kernels but its backward NaNs once an index block mixes
