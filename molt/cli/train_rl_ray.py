@@ -719,7 +719,8 @@ if __name__ == "__main__":
         "--rollout.num_runners",
         type=int,
         default=2,
-        help="Router path: number of runner-pool actors (rollouts + in-process reward grading)",
+        help="Router path: number of runner-pool actors (rollouts + in-process reward grading). Rollouts "
+        "are dispatched one per call, so up to vllm_generate_batch_size * n_samples_per_prompt runners stay busy.",
     )
     parser.add_argument(
         "--rollout.vllm_generate_batch_size", type=int, default=None, help="Batch size for vLLM generating samples"

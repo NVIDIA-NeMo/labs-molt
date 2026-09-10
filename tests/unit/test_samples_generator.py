@@ -482,3 +482,33 @@ def test_warm_resume_state_dict_noop_when_disabled(tmp_path):
     gen.args = SimpleNamespace(ckpt=SimpleNamespace(warm_resume_rollouts=False, path=str(tmp_path / "ckpt")))
     gen._finished_samples = [SimpleNamespace(group_ids=["g0"], heavy_ref=None)]
     assert gen.state_dict() == {}
+
+
+def test_dispatch_spreads_each_groups_rollouts_over_runners_and_rejoins_them(monkeypatch):
+    generator = object.__new__(SamplesGenerator)
+    generator.args = SimpleNamespace(
+        rollout=SimpleNamespace(n_samples_per_prompt=4),
+        algo=SimpleNamespace(advantage=SimpleNamespace(is_correction_level="off")),
+    )
+    generator._rr = 0
+    calls = []
+
+    def runner(name):
+        def remote(prompt, label, img, sampling_params, max_length, n_samples, tools=None, group_id=None):
+            calls.append((prompt, n_samples, group_id))
+            return f"{name}:{prompt}"
+
+        return SimpleNamespace(run_group=SimpleNamespace(remote=remote))
+
+    generator.agent_runners = [runner("r0"), runner("r1")]
+    monkeypatch.setattr(samples_generator, "_gather_group", SimpleNamespace(remote=lambda *parts: list(parts)))
+
+    refs = generator._dispatch_to_agent_runners(["p0", "p1"], ["l0", "l1"])
+
+    # One re-joined ref per prompt group; its n_samples rollouts were dispatched one per call,
+    # round-robined across the runners...
+    assert refs == [["r0:p0", "r1:p0", "r0:p0", "r1:p0"], ["r0:p1", "r1:p1", "r0:p1", "r1:p1"]]
+    assert all(n_samples == 1 for _, n_samples, _ in calls)
+    # ...and all of a prompt's rollouts share one group_id that differs across prompts.
+    group_ids = {prompt: {gid for p, _, gid in calls if p == prompt} for prompt in ("p0", "p1")}
+    assert len(group_ids["p0"]) == 1 and len(group_ids["p1"]) == 1 and group_ids["p0"] != group_ids["p1"]

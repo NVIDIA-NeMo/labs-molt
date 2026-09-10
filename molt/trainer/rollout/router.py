@@ -304,7 +304,7 @@ class AgentRunnerActor:
     Loads the agent runner + tokenizer, holds one aiohttp session to the router + a
     ``RouterGenerateClient`` over it, and runs N rollouts of a prompt concurrently. Grading
     and VLM image processing run in-process (GIL-bound), so a fleet of these actors
-    (``--rollout.num_runners``) parallelizes that work; the trainer round-robins prompts
+    (``--rollout.num_runners``) parallelizes that work; the trainer round-robins rollouts
     across them (no pool wrapper — just a list + an index)."""
 
     def __init__(self, agent_path, router_url, *, model_path=None, model_name="policy"):
@@ -339,8 +339,13 @@ class AgentRunnerActor:
     async def ready(self):
         return True
 
-    async def run_group(self, prompt, label, images, sampling_params, max_length, n_samples, tools=None):
+    async def run_group(
+        self, prompt, label, images, sampling_params, max_length, n_samples, tools=None, group_id=None
+    ):
         """N rollouts of one prompt (unchanged runner) -> per step-sample ``(experience, drop_reason)``.
+
+        The trainer dispatches one rollout per call and passes the prompt's ``group_id`` so the
+        rollouts it spreads over several runners still form one group (see _gather_group).
 
         Each usable trajectory is built into a train-ready Experience HERE, on the producing runner,
         then `offload`ed: its heavy tensors (images / token ids / rollout routing) stay in THIS
@@ -350,7 +355,7 @@ class AgentRunnerActor:
         rollout is dropped, never sinks the group."""
         from molt.trainer.rollout.samples_generator import SamplesGenerator
 
-        group_id = uuid4().hex
+        group_id = group_id or uuid4().hex
         tasks = [
             self._runner.execute(
                 prompt=prompt,
