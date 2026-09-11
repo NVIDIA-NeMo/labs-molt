@@ -20,6 +20,7 @@ import copy
 import os
 from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
+from uuid import uuid4
 
 import numpy as np
 import ray
@@ -81,6 +82,12 @@ def _collect_prompt_batch(dataloader_iter, num_prompts: int):
     return prompts, labels, images, tools, exhausted
 
 
+@ray.remote(num_cpus=0)
+def _gather_group(*parts):
+    """Re-join one prompt group's per-rollout results (runs once all of them finished)."""
+    return [item for part in parts for item in part]
+
+
 def _sample_group_key(sample) -> int | str:
     """Stable prompt-group key when rollout samples carry grouping metadata."""
     sample_group_ids = getattr(sample, "group_ids", None)
@@ -102,7 +109,7 @@ class SamplesGenerator:
         self.args = strategy.args
 
         self.tokenizer = tokenizer
-        # Runner actors driving rollouts through the vllm-router; prompts are round-robined
+        # Runner actors driving rollouts through the vllm-router; rollouts are round-robined
         # across them (self._rr) — no pool wrapper, just a list + an index.
         self.agent_runners = agent_runners
         self._rr = 0
@@ -446,9 +453,11 @@ class SamplesGenerator:
     def _dispatch_to_agent_runners(
         self, prompts: List[str], labels: List[str], *, images: List = None, tools: List = None, **generate_kwargs
     ) -> List:
-        """Round-robin each prompt group onto the runner actors; each ``run_group`` returns a
-        Ray ref of that group's Trajectories, consumed by the streaming loop / filtering /
-        experience maker exactly as before."""
+        """Round-robin each ROLLOUT onto the runner actors and re-join a prompt's rollouts into
+        one ref per group, consumed by the streaming loop / filtering / experience maker exactly
+        as before. Per-rollout (not per-group) dispatch: a runner's event loop is shared by all its
+        in-flight rollouts (grading, image processing and blocking tool calls run in-process), so
+        a group's N rollouts land on N runners instead of one."""
         sampling_params = SamplingParams(
             temperature=generate_kwargs.get("temperature", 1.0),
             top_p=generate_kwargs.get("top_p", 1.0),
@@ -467,11 +476,17 @@ class SamplesGenerator:
 
         refs = []
         for prompt, label, img, tool in zip(prompts, labels, images, tools):
-            actor = self.agent_runners[self._rr % len(self.agent_runners)]
-            self._rr += 1
-            refs.append(
-                actor.run_group.remote(prompt, label, img, sampling_params, truncate_length, n_samples, tools=tool)
-            )
+            group_id = uuid4().hex
+            parts = []
+            for _ in range(n_samples):
+                actor = self.agent_runners[self._rr % len(self.agent_runners)]
+                self._rr += 1
+                parts.append(
+                    actor.run_group.remote(
+                        prompt, label, img, sampling_params, truncate_length, 1, tools=tool, group_id=group_id
+                    )
+                )
+            refs.append(_gather_group.remote(*parts))
         return refs
 
     @staticmethod
