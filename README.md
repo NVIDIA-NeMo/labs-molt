@@ -424,6 +424,14 @@ manually (or refresh it), run:
 python3 examples/python/utils/prepare_geo3k.py --num-proc 8 --out-dir .tmp/geo3k
 ```
 
+The Qwen3-4B text-math scripts (`rl_qwen3_4b.sh` / `sft_qwen3_4b.sh`) likewise
+auto-prepare `.tmp/proRL_text_rl` (DeepScaleR-Preview train / AIME-2024 eval) via
+`examples/python/utils/prepare_math.py`; the slurm variants expect the same directory:
+
+```bash
+python3 examples/python/utils/prepare_math.py --num-proc 8 --out-dir .tmp/proRL_text_rl
+```
+
 Or point `PROMPT_DATASET` / `EVAL_DATASET` at your own data.
 
 Slurm usage:

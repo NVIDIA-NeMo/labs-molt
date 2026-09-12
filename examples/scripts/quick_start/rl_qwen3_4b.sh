@@ -28,10 +28,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${MOLT_PATH:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
 MODEL_PATH="${MODEL_PATH:?Set MODEL_PATH to a Qwen3-4B checkpoint.}"
 
-# Same dataset path as slurm/rl_qwen3_4b.sh — the proRL text-math RL split.
-PROMPT_DATASET="${PROMPT_DATASET:-$REPO_ROOT/.tmp/proRL_text_rl/train}"
-EVAL_DATASET="${EVAL_DATASET:-$REPO_ROOT/.tmp/proRL_text_rl/eval}"
-test -e "$PROMPT_DATASET" || { echo "PROMPT_DATASET not found: $PROMPT_DATASET — prepare proRL_text_rl first."; exit 1; }
+# Text-math RL data (DeepScaleR train / AIME-2024 eval), same path as
+# slurm/rl_qwen3_4b.sh — auto-prep if missing.
+DATA_DIR="$REPO_ROOT/.tmp/proRL_text_rl"
+if [ ! -d "$DATA_DIR/train" ]; then
+  echo "[quickstart] preparing text-math data (agentica-org/DeepScaleR-Preview-Dataset) — one-time"
+  python3 "$REPO_ROOT/examples/python/utils/prepare_math.py" --num-proc 8 --out-dir "$DATA_DIR"
+fi
+PROMPT_DATASET="${PROMPT_DATASET:-$DATA_DIR/train}"
+EVAL_DATASET="${EVAL_DATASET:-$DATA_DIR/eval}"
 SAVE_ROOT="${SAVE_ROOT:-$REPO_ROOT/outputs/quick_start-qwen3-4b/run}"
 
 GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
@@ -85,7 +90,7 @@ python3 -u -m molt.cli.train_rl_ray \
   --vllm.gpu_memory_utilization 0.8 \
   --vllm.distributed_executor_backend mp \
   --fsdp.param_dtype bf16 \
-  --fsdp.attn_implementation flash_attention_2 \
+  --fsdp.attn_implementation "${FSDP_ATTN_IMPLEMENTATION:-te}" \
   --fsdp.tp_size 1 \
   --fsdp.ep_size 1 \
   --fsdp.cp_size 1 \
