@@ -16,6 +16,7 @@
 # Adapted from OpenRLHF (https://github.com/OpenRLHF/OpenRLHF),
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
+import math
 from typing import List
 
 import torch
@@ -58,6 +59,7 @@ class NaiveReplayBuffer:
         self.dynamic_batch = dynamic_batch
         self.dynamic_indices: List[List[int]] = []
         self.dynamic_optimizer_step: List[int] = []
+        self.pad_to_multiple = 1
 
     @torch.no_grad()
     def append(self, experience: Experience) -> None:
@@ -88,7 +90,7 @@ class NaiveReplayBuffer:
     def collate_fn(self, batch) -> Experience:
         if self.dynamic_batch:
             batch = batch[0]
-        return make_experience_batch(batch)
+        return make_experience_batch(batch, self.pad_to_multiple)
 
     def setup_dynamic_batch(self, strategy):
         args = strategy.args
@@ -121,18 +123,46 @@ class NaiveReplayBuffer:
                     f"{local_train_batch_size}-sample train batch (buffer={len(sample_lengths)})."
                 )
 
-        # split by train_batch_size, sync num_microbatches across dp
+        # Split by train_batch_size, then sync num_microbatches across DP.
         num_microbatches = []
+        padded_partitions = []
+        over_budget_indices = set()
+        if not args.fsdp.packing_samples:
+            cp_multiple = 2 * args.fsdp.cp_size if args.fsdp.cp_size > 1 else 1
+            self.pad_to_multiple = math.lcm(cp_multiple, args.train.dynamic_batch_pad_to_multiple)
+            token_budget = args.train.max_tokens_per_gpu * args.fsdp.cp_size * args.fsdp.tp_size
+
+            def padded_cost(indices):
+                max_length = max(sample_lengths[index] for index in indices)
+                aligned_max_length = (
+                    max_length + self.pad_to_multiple - 1
+                ) // self.pad_to_multiple * self.pad_to_multiple
+                return len(indices) * aligned_max_length
+
         for i in range(num_steps):
             start, end = i * local_train_batch_size, (i + 1) * local_train_batch_size
-            num_microbatches.append(
-                get_minimum_num_micro_batch_size(
-                    sample_lengths[start:end],
-                    args.train.max_tokens_per_gpu,
-                    args.fsdp.cp_size,
-                    args.fsdp.tp_size,
+            if args.fsdp.packing_samples:
+                num_microbatches.append(
+                    get_minimum_num_micro_batch_size(
+                        sample_lengths[start:end],
+                        args.train.max_tokens_per_gpu,
+                        args.fsdp.cp_size,
+                        args.fsdp.tp_size,
+                    )
                 )
-            )
+                continue
+
+            partitions = []
+            ordered_indices = sorted(range(start, end), key=lambda index: (-sample_lengths[index], index))
+            for index in ordered_indices:
+                if partitions and padded_cost(partitions[-1] + [index]) <= token_budget:
+                    partitions[-1].append(index)
+                else:
+                    partitions.append([index])
+                if padded_cost([index]) > token_budget:
+                    over_budget_indices.add(index)
+            padded_partitions.append(partitions)
+            num_microbatches.append(len(partitions))
 
         num_microbatches = torch.tensor(num_microbatches, dtype=torch.int, device=torch.cuda.current_device())
         num_microbatches = strategy.all_reduce(num_microbatches, op="max")
@@ -143,13 +173,45 @@ class NaiveReplayBuffer:
         data_partitions = []
         for i, num_mbs in enumerate(num_microbatches):
             start, end = i * local_train_batch_size, (i + 1) * local_train_batch_size
-            samples = sample_lengths[start:end]
-            partitions = get_seqlen_balanced_partitions(samples, num_mbs, equal_size=False)  # List[List[int]], index
-            for j in range(num_mbs):
-                for k in range(len(partitions[j])):
-                    partitions[j][k] += start
+            if args.fsdp.packing_samples:
+                samples = sample_lengths[start:end]
+                partitions = get_seqlen_balanced_partitions(
+                    samples, num_mbs, equal_size=False
+                )  # List[List[int]], index
+                for j in range(num_mbs):
+                    for k in range(len(partitions[j])):
+                        partitions[j][k] += start
+            else:
+                partitions = padded_partitions[i]
+                while len(partitions) < num_mbs:
+                    candidates = [j for j, partition in enumerate(partitions) if len(partition) > 1]
+                    assert candidates, f"Cannot split {end - start} samples into {num_mbs} non-empty microbatches"
+                    split_index = min(
+                        candidates,
+                        key=lambda j: (-padded_cost(partitions[j]), min(partitions[j])),
+                    )
+                    partition = partitions[split_index]
+                    midpoint = len(partition) // 2
+                    partitions[split_index : split_index + 1] = [partition[:midpoint], partition[midpoint:]]
+
+                partitions.sort(key=lambda partition: (-padded_cost(partition), min(partition)))
+                selected_indices = [index for partition in partitions for index in partition]
+                assert len(partitions) == num_mbs
+                assert all(partitions)
+                assert sorted(selected_indices) == list(range(start, end))
+                assert all(
+                    padded_cost(partition) <= token_budget
+                    or (len(partition) == 1 and partition[0] in over_budget_indices)
+                    for partition in partitions
+                )
             micro_batch_indices.extend(partitions)
             data_partitions.append(partitions)
+
+        if over_budget_indices:
+            strategy.print(
+                f"[ReplayBuffer] {len(over_budget_indices)} sample(s) exceed the padded dynamic-batch token budget "
+                "and remain singleton microbatches; they may OOM."
+            )
         self.dynamic_indices = micro_batch_indices
         self.sample_batch_size = 1
 

@@ -19,6 +19,7 @@ from typing import Any, List, Union
 
 import ray
 import torch
+import torch.nn.functional as F
 
 from molt.utils.logging_utils import init_logger
 from molt.utils.seqlen_balancing import get_seqlen_balanced_partitions
@@ -221,15 +222,23 @@ def split_experience_batch(experience: Experience) -> List[Experience]:
     return items
 
 
-def make_experience_batch(items: List[Experience]) -> Experience:
+def make_experience_batch(items: List[Experience], pad_to_multiple: int = 1) -> Experience:
     """Combine individual single-sample Experiences into a batched Experience."""
     if not items:
         raise ValueError("Empty items list")
+    if pad_to_multiple < 1:
+        raise ValueError("pad_to_multiple must be at least 1")
 
     # A rollout with no captured routing has routed_experts=None; fill it (sized to its own
     # sequence) before batching so a mix doesn't drop the batch's routing or crash on
     # None.size(-1).
     _fill_missing_routed_experts(items)
+    extra_padding = 0
+    if pad_to_multiple > 1:
+        if any(item.sequences is None for item in items):
+            raise ValueError("pad_to_multiple requires materialized sequences")
+        sequence_length = max(item.sequences.size(-1) for item in items)
+        extra_padding = -sequence_length % pad_to_multiple
 
     kwargs = {}
     for f in fields(Experience):
@@ -243,6 +252,8 @@ def make_experience_batch(items: List[Experience]) -> Experience:
                 # valid expert id and would force pad tokens to expert 0. Others pad with 0.
                 pad_value = -1 if f.name == "routed_experts" else 0
                 kwargs[f.name] = zero_pad_sequences(tensors, "right", stack=True, value=pad_value)
+                if extra_padding:
+                    kwargs[f.name] = F.pad(kwargs[f.name], (0, extra_padding), value=pad_value)
             elif Experience.is_episode_tensor_field(f.name) or first.dim() == 0:
                 kwargs[f.name] = torch.stack(tensors)
             else:
