@@ -41,6 +41,7 @@ def train(args):
         moe_config=strategy.moe_config,
         activation_checkpointing=args.model.gradient_checkpoint,
         packing_samples=args.fsdp.packing_samples,
+        use_liger_kernel=args.fsdp.use_liger_kernel,
         freeze_visual_encoder=args.model.freeze_visual_encoder,
         moe_aux_loss_coef=args.model.aux_loss_coef,
     )

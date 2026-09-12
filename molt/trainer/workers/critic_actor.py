@@ -268,6 +268,7 @@ class CriticModelActor(BaseModelActor):
             moe_config=strategy.moe_config,
             activation_checkpointing=args.actor.gradient_checkpoint,
             packing_samples=args.fsdp.packing_samples,
+            use_liger_kernel=args.fsdp.use_liger_kernel,
             temperature=args.rollout.temperature,
             freeze_visual_encoder=getattr(args.actor, "freeze_visual_encoder", False),
             # Critic router freeze: its own --critic.freeze_moe_router, or inherit the actor's flag.
