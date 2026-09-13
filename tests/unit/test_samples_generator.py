@@ -97,7 +97,7 @@ def test_generate_samples_returns_batch_as_rollouts_finish_and_keeps_pool_satura
     generator = object.__new__(SamplesGenerator)
     generator.args = SimpleNamespace(
         rollout=SimpleNamespace(batch_size=3, n_samples_per_prompt=1, vllm_generate_batch_size=5),
-        algo=SimpleNamespace(dynamic_filtering_enable=False, advantage=SimpleNamespace(estimator="reinforce")),
+        algo=SimpleNamespace(dynamic_filtering_enable=False),
         ckpt=SimpleNamespace(warm_resume_rollouts=False),
         actor=SimpleNamespace(num_nodes=1, num_gpus_per_node=1),
         fsdp=SimpleNamespace(cp_size=1, tp_size=1),
@@ -119,53 +119,11 @@ def test_generate_samples_returns_batch_as_rollouts_finish_and_keeps_pool_satura
     assert exhausted is False
 
 
-def test_generate_samples_drops_incomplete_group_for_group_estimator(monkeypatch):
-    generator = object.__new__(SamplesGenerator)
-    generator.args = SimpleNamespace(
-        rollout=SimpleNamespace(batch_size=1, n_samples_per_prompt=2, vllm_generate_batch_size=1),
-        algo=SimpleNamespace(
-            dynamic_filtering_enable=False, advantage=SimpleNamespace(estimator="reinforce_baseline")
-        ),
-        ckpt=SimpleNamespace(warm_resume_rollouts=False),
-        actor=SimpleNamespace(num_nodes=1, num_gpus_per_node=1),
-        fsdp=SimpleNamespace(cp_size=1, tp_size=1),
-    )
-    generator.prompts_dataloader = _prompt_loader(1)
-    _wire_fake_vllm(generator, monkeypatch, _sample)
-
-    samples, rollout_metrics, _, exhausted = generator.generate_samples()
-
-    assert samples == []
-    assert rollout_metrics == {
-        "rollout/dropped/incomplete_group": 1.0,
-        "rollout/dropped/total": 1.0,
-    }
-    assert exhausted is True
-
-
-def test_generate_samples_keeps_incomplete_group_for_per_sample_estimator(monkeypatch):
-    generator = object.__new__(SamplesGenerator)
-    generator.args = SimpleNamespace(
-        rollout=SimpleNamespace(batch_size=1, n_samples_per_prompt=2, vllm_generate_batch_size=1),
-        algo=SimpleNamespace(dynamic_filtering_enable=False, advantage=SimpleNamespace(estimator="reinforce")),
-        ckpt=SimpleNamespace(warm_resume_rollouts=False),
-        actor=SimpleNamespace(num_nodes=1, num_gpus_per_node=1),
-        fsdp=SimpleNamespace(cp_size=1, tp_size=1),
-    )
-    generator.prompts_dataloader = _prompt_loader(1)
-    _wire_fake_vllm(generator, monkeypatch, _sample)
-
-    samples, rollout_metrics, _, _ = generator.generate_samples()
-
-    assert [sample.group_ids[0] for sample in samples] == ["p0"]
-    assert rollout_metrics == {}
-
-
 def test_generate_samples_emits_short_batch_when_dataloader_exhausted(monkeypatch):
     generator = object.__new__(SamplesGenerator)
     generator.args = SimpleNamespace(
         rollout=SimpleNamespace(batch_size=4, n_samples_per_prompt=1, vllm_generate_batch_size=5),
-        algo=SimpleNamespace(dynamic_filtering_enable=False, advantage=SimpleNamespace(estimator="reinforce")),
+        algo=SimpleNamespace(dynamic_filtering_enable=False),
         ckpt=SimpleNamespace(warm_resume_rollouts=False),
         actor=SimpleNamespace(num_nodes=1, num_gpus_per_node=1),
         fsdp=SimpleNamespace(cp_size=1, tp_size=1),
@@ -227,27 +185,11 @@ def test_generate_eval_samples_defaults_to_rollout_batch_size(monkeypatch):
     assert dispatch_sizes == [2, 2, 1]
 
 
-def test_generate_eval_samples_keeps_incomplete_group_for_group_estimator(monkeypatch):
-    generator = object.__new__(SamplesGenerator)
-    generator.args = SimpleNamespace(
-        rollout=SimpleNamespace(batch_size=1, n_samples_per_prompt=2),
-        eval=SimpleNamespace(batch_size=1),
-        algo=SimpleNamespace(
-            dynamic_filtering_enable=False, advantage=SimpleNamespace(estimator="reinforce_baseline")
-        ),
-    )
-    _wire_eval_generator(generator, monkeypatch, num_prompts=1)
-
-    samples = generator.generate_eval_samples()
-
-    assert [sample.group_ids[0] for sample in samples] == ["p0"]
-
-
 def test_generate_samples_pool_persists_across_calls(monkeypatch):
     generator = object.__new__(SamplesGenerator)
     generator.args = SimpleNamespace(
         rollout=SimpleNamespace(batch_size=3, n_samples_per_prompt=1, vllm_generate_batch_size=5),
-        algo=SimpleNamespace(dynamic_filtering_enable=False, advantage=SimpleNamespace(estimator="reinforce")),
+        algo=SimpleNamespace(dynamic_filtering_enable=False),
         ckpt=SimpleNamespace(warm_resume_rollouts=False),
         actor=SimpleNamespace(num_nodes=1, num_gpus_per_node=1),
         fsdp=SimpleNamespace(cp_size=1, tp_size=1),
@@ -276,7 +218,7 @@ def test_generate_samples_terminates_when_dataset_not_divisible_by_batch(monkeyp
     generator = object.__new__(SamplesGenerator)
     generator.args = SimpleNamespace(
         rollout=SimpleNamespace(batch_size=3, n_samples_per_prompt=1, vllm_generate_batch_size=5),
-        algo=SimpleNamespace(dynamic_filtering_enable=False, advantage=SimpleNamespace(estimator="reinforce")),
+        algo=SimpleNamespace(dynamic_filtering_enable=False),
         ckpt=SimpleNamespace(warm_resume_rollouts=False),
         actor=SimpleNamespace(num_nodes=1, num_gpus_per_node=1),
         fsdp=SimpleNamespace(cp_size=1, tp_size=1),
@@ -308,7 +250,7 @@ def test_generate_samples_drops_epoch_tail_smaller_than_dp_groups(monkeypatch):
     generator = object.__new__(SamplesGenerator)
     generator.args = SimpleNamespace(
         rollout=SimpleNamespace(batch_size=3, n_samples_per_prompt=1, vllm_generate_batch_size=5),
-        algo=SimpleNamespace(dynamic_filtering_enable=False, advantage=SimpleNamespace(estimator="reinforce")),
+        algo=SimpleNamespace(dynamic_filtering_enable=False),
         ckpt=SimpleNamespace(warm_resume_rollouts=False),
         actor=SimpleNamespace(num_nodes=1, num_gpus_per_node=2),
         fsdp=SimpleNamespace(cp_size=1, tp_size=1),
@@ -337,7 +279,7 @@ def test_generator_keeps_no_checkpoint_state_and_resumes_from_dataloader(monkeyp
     generator = object.__new__(SamplesGenerator)
     generator.args = SimpleNamespace(
         rollout=SimpleNamespace(batch_size=3, n_samples_per_prompt=1, vllm_generate_batch_size=5),
-        algo=SimpleNamespace(dynamic_filtering_enable=False, advantage=SimpleNamespace(estimator="reinforce")),
+        algo=SimpleNamespace(dynamic_filtering_enable=False),
         ckpt=SimpleNamespace(warm_resume_rollouts=False),
         actor=SimpleNamespace(num_nodes=1, num_gpus_per_node=1),
         fsdp=SimpleNamespace(cp_size=1, tp_size=1),
@@ -369,11 +311,7 @@ def test_generate_samples_drops_filtered_groups_and_refills_their_slots(monkeypa
     generator = object.__new__(SamplesGenerator)
     generator.args = SimpleNamespace(
         rollout=SimpleNamespace(batch_size=2, n_samples_per_prompt=1, vllm_generate_batch_size=2),
-        algo=SimpleNamespace(
-            dynamic_filtering_enable=True,
-            dynamic_filtering_range=(0.0, 1.0),
-            advantage=SimpleNamespace(estimator="reinforce_baseline"),
-        ),
+        algo=SimpleNamespace(dynamic_filtering_enable=True, dynamic_filtering_range=(0.0, 1.0)),
     )
     generator.prompts_dataloader = _prompt_loader(10)
 
