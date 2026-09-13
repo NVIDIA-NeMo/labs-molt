@@ -544,10 +544,11 @@ def test_stitch_returns_one_trajectory_stamped_with_reward():
     msgs = [{"role": "user", "content": "Q0"}]
     act1, _ = _drive(state, session, msgs)
     _drive(state, session, msgs + [{"role": "assistant", "content": act1}, {"role": "user", "content": "OBS1"}])
-    out = stitch_session(state, "sid", Result(reward=1.0, score=0.5))
+    out = stitch_session(state, "sid", Result(reward=1.0, feedback="wrong unit", score=0.5))
     assert len(out) == 1
     assert len(out[0].action_ranges) == 2  # both turns on the one trajectory
     assert out[0].reward == 1.0 and out[0].scores == 0.5
+    assert out[0].feedback == "wrong unit"
 
 
 # ---------------------------------------------------------------------------

@@ -15,7 +15,7 @@
 
 import itertools
 from dataclasses import dataclass, field, fields
-from typing import Any, List, Union
+from typing import Any, List, Optional, Union
 
 import ray
 import torch
@@ -115,6 +115,7 @@ class Experience:
     # Metadata (not part of RL computation)
     prompts: list[str] = field(default_factory=list)
     labels: list[str] = field(default_factory=list)
+    feedbacks: List[Optional[str]] = field(default_factory=list)
     images: list = field(default_factory=list)  # per-sample image paths/URLs for VLM (None entries for text-only)
     mm_train_inputs: list = field(default_factory=list)  # per-sample processor outputs (pixel_values dicts) for VLM
     info: dict = field(default_factory=dict)  # per-sample metrics for logging

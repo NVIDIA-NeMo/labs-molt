@@ -100,7 +100,8 @@ def _extract_generation_logprobs(action_token_ids, generation_logprobs):
 # Result — Gymnasium-style return type from Env.step() and ChatAgent.run().
 # Fields mirror gymnasium.Env.step return:
 #   observation, reward, terminated, truncated, info
-# Molt extras: score (scoreboard), images (multimodal), sampling_params.
+# Molt extras: score (scoreboard), feedback (privileged environment feedback),
+# images (multimodal), sampling_params.
 # ---------------------------------------------------------------------------
 @dataclass
 class Result:
@@ -112,6 +113,7 @@ class Result:
     score: float | torch.Tensor | None = None  # defaults to reward at trainer boundary
     images: list | None = None
     sampling_params: object = None
+    feedback: str | None = None  # rollout-level feedback for algorithms such as SDPO
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +155,7 @@ class Trajectory:
     extra_logs: dict = field(default_factory=dict)
     group_id: str | None = None  # one per prompt group (N rollouts); GRPO baseline averaging
     rollout_id: str | None = None  # one per rollout; multi-turn step-samples dedup
+    feedback: str | None = None
 
     def append_action(self, action_tokens, action_logprobs=None, off_policy_len=0):
         start = len(self.observation_tokens)
@@ -231,10 +234,11 @@ class Env(ABC):
                 ``sampling_params`` (this turn's params).
 
         Returns:
-            Result with a scalar ``reward`` (required). Optional: ``observation``
-            (next-turn feedback text for multi-turn), ``score`` (defaults to
-            reward), ``info`` (logged metrics), ``images``, ``sampling_params``,
-            and ``terminated`` / ``truncated`` to end the episode.
+            Result with a scalar ``reward`` (required). Optional: ``feedback``
+            (rollout-level privileged feedback), ``observation`` (next-turn
+            feedback text for multi-turn), ``score`` (defaults to reward),
+            ``info`` (logged metrics), ``images``, ``sampling_params``, and
+            ``terminated`` / ``truncated`` to end the episode.
         """
         raise NotImplementedError
 
@@ -410,6 +414,8 @@ class StepEnvRunner(Runner):
                 score_val = _first_scalar(result.score) if result.score is not None else reward_val
 
                 trajectory.reward += reward_val
+                if result.feedback is not None:
+                    trajectory.feedback = result.feedback
                 trajectory.scores = score_val
                 trajectory.extra_logs = result.info or {}
 
