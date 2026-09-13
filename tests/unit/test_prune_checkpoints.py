@@ -114,3 +114,18 @@ def test_no_warning_when_regular_eviction_satisfies_budget(tmp_path):
 
     assert set(os.listdir(root)) == {"step-2"}
     assert not strategy.messages
+
+
+def test_max_num_evicts_oldest_regardless_of_metric(tmp_path):
+    """--ckpt.max_num is age-based: a higher metric.json does not protect an older checkpoint."""
+    root = str(tmp_path)
+    cm = _cm()
+    for name, age_s, metric in [("step-1", 20, 0.9), ("step-2", 10, 0.5), ("step-3", 0, 0.5)]:
+        path = _make_ckpt_dir(root, name, 1024)
+        cm._write_ckpt_metric(path, metric, metric_key="eval_pass1")  # writing bumps the dir mtime, so age it after
+        stamp = time.time() - age_s
+        os.utime(path, (stamp, stamp))
+
+    cm._prune_checkpoints(root, current_tag="step-3", max_num=2, max_mem=0, is_best=False)
+
+    assert set(os.listdir(root)) == {"step-2", "step-3"}
