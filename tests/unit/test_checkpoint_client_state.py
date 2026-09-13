@@ -36,7 +36,7 @@ from molt.trainer.fsdp.checkpoint import CheckpointManager
 
 
 class _FakeStrategy:
-    def print(self, *msg):  # _read_ckpt_metric logs warnings through this
+    def print(self, *msg):  # CheckpointManager logs warnings through this
         pass
 
 
@@ -122,23 +122,11 @@ def test_load_missing_extra_state_is_empty(tmp_path):
 
 
 def test_metric_round_trip(tmp_path):
-    """metric.json: scalar coercion (python/torch/numpy) + read back as float."""
-    cm = _cm()
-    for raw, expected in [
-        (0.788, 0.788),
-        (torch.tensor(0.5), 0.5),
-        (None, None),
-    ]:
-        cm._write_ckpt_metric(str(tmp_path), raw, metric_key="eval/accuracy")
-        assert cm._read_ckpt_metric(str(tmp_path)) == expected
-
-    # numpy scalar (advantage/eval metrics are often numpy) coerces too
+    """metric.json: python/torch/numpy scalars land as plain JSON numbers (no type-tagging)."""
     import numpy as np
 
-    cm._write_ckpt_metric(str(tmp_path), np.float32(0.25), metric_key="k")
-    assert abs(cm._read_ckpt_metric(str(tmp_path)) - 0.25) < 1e-6
-
-    # the written file is plain JSON (no type-tagging)
-    with open(cm._get_ckpt_metric_path(str(tmp_path))) as f:
-        payload = json.load(f)
-    assert abs(payload["metric_value"] - 0.25) < 1e-6
+    cm = _cm()
+    for raw, expected in [(0.788, 0.788), (torch.tensor(0.5), 0.5), (None, None), (np.float32(0.25), 0.25)]:
+        cm._write_ckpt_metric(str(tmp_path), raw, metric_key="eval/accuracy")
+        with open(cm._get_ckpt_metric_path(str(tmp_path))) as f:
+            assert json.load(f)["metric_value"] == expected

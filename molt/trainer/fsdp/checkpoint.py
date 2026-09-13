@@ -161,19 +161,6 @@ class CheckpointManager:
         path = self._get_ckpt_metric_path(ckpt_dir)
         self._atomic_write_json(path, {"metric_key": metric_key, "metric_value": metric_value})
 
-    def _read_ckpt_metric(self, ckpt_dir: str) -> float | None:
-        metric_path = self._get_ckpt_metric_path(ckpt_dir)
-        if not os.path.exists(metric_path):
-            return None
-        try:
-            with open(metric_path) as f:
-                payload = json.load(f)
-            value = payload.get("metric_value") if isinstance(payload, dict) else None
-            return None if value is None else float(value)
-        except (OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            self.strategy.print(f"Warning: failed to read checkpoint metric from {metric_path}: {exc}")
-            return None
-
     @staticmethod
     def _dir_size(path: str) -> int:
         total = 0
@@ -278,14 +265,10 @@ class CheckpointManager:
             )
             if overflow_num == 0 and not overflow_mem:
                 break
-            candidates = sorted(
-                [(path, self._read_ckpt_metric(path), mtime) for path, mtime in regular_subdirs],
-                key=lambda item: (
-                    item[1] is not None,
-                    item[1] if item[1] is not None else float("-inf"),
-                    item[2],
-                ),
-            )
+            # Oldest first, as --ckpt.max_num documents. Ordering by metric.json instead made a
+            # checkpoint saved after an eval dip get evicted before older, better-scoring ones,
+            # so a chain could keep `latest` plus stale checkpoints and lose the recent fallbacks.
+            candidates = sorted(regular_subdirs, key=lambda item: item[1])
             if not candidates:
                 # regular_subdirs is exhausted (only current_tag/best* dirs remain, both
                 # protected from eviction) but max_mem is still over budget: warn instead of
