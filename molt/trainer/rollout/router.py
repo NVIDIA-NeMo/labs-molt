@@ -373,6 +373,7 @@ class AgentRunnerActor:
         for r in await asyncio.gather(*tasks, return_exceptions=True):  # a failed rollout must not sink the group
             if isinstance(r, BaseException):
                 print(f"[runner] dropping failed rollout in group {group_id}: {r!r}", flush=True)
+                results.append((None, "runner_error"))
                 continue
             rollout_id = uuid4().hex
             for traj in r if isinstance(r, list) else [r]:

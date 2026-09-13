@@ -266,3 +266,22 @@ def test_agent_runner_actor_init_is_synchronous():
     """Ray actor constructors are synchronous; an async __init__ would not be awaited."""
     actor_cls = getattr(AgentRunnerActor, "__ray_actor_class__", AgentRunnerActor)
     assert not inspect.iscoroutinefunction(actor_cls.__init__)
+
+
+def test_agent_runner_reports_each_failed_rollout():
+    class _FailingRunner:
+        async def execute(self, **kwargs):
+            raise RuntimeError("agent failed")
+
+    actor_cls = getattr(AgentRunnerActor, "__ray_actor_class__", AgentRunnerActor)
+    actor = object.__new__(actor_cls)
+    actor._runner = _FailingRunner()
+    actor._tokenizer = None
+    actor._client = None
+    actor._media_ids = set()
+
+    results = asyncio.run(
+        actor.run_group("prompt", "label", None, SimpleNamespace(), 128, 2, group_id="group")
+    )
+
+    assert results == [(None, "runner_error"), (None, "runner_error")]
