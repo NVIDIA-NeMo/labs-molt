@@ -280,16 +280,6 @@ class PolicyTrainer:
                 # update is computed from exactly the data the current weights
                 # generated. max_epochs is asserted == 1, so this is one step.
                 accum_steps = max(max_steps, 1)
-            elif not dynamic:
-                # Only run complete accumulation windows; partial windows leave
-                # gradients live because optimizer_step() has not stepped yet.
-                remainder = max_steps % accum_steps
-                if remainder:
-                    max_steps -= remainder
-                    self.strategy.print(
-                        f"[PolicyRL] dropping {remainder} trailing actor microbatches "
-                        f"(< grad_accum={accum_steps}) to avoid partial gradients."
-                    )
             # slime global token-mean: every microbatch of one optimizer-step
             # batch ("window") shares a single token denominator summed over all
             # its microbatches and all DP ranks. Buffer the window, count its
@@ -302,7 +292,10 @@ class PolicyTrainer:
                 if dynamic:
                     window_end = bool(self.replay_buffer.dynamic_optimizer_step[step])
                 else:
-                    window_end = len(window) == accum_steps
+                    # The last window absorbs a remainder smaller than grad_accum (as the
+                    # on-policy path takes the whole buffer), so no sample is dropped.
+                    remaining = max_steps - step - 1
+                    window_end = remaining == 0 or (len(window) == accum_steps and remaining >= accum_steps)
                 if not window_end:
                     continue
                 local_tokens = sum(exp.action_mask.sum() for exp in window)

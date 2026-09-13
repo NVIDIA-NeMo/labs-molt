@@ -107,24 +107,17 @@ class NaiveReplayBuffer:
             num_steps = 1 if sample_lengths else 0
         else:
             local_train_batch_size = args.train.batch_size // dp_size
-            # Async generation can deliver a short buffer at episode boundaries.
-            # Also, multi-turn agents may flatten to a variable number of samples
-            # per prompt — use the actual buffer size, not the formula.
-            num_steps = len(sample_lengths) // local_train_batch_size
-            # balance_experiences only equalizes the per-rank count to a multiple
-            # of dp_size, not of local_train_batch_size, so a remainder here is
-            # dropped from this update. Surface it instead of dropping silently.
-            dropped = len(sample_lengths) - num_steps * local_train_batch_size
-            if dropped:
-                strategy.print(
-                    f"[ReplayBuffer] dropping {dropped} trailing sample(s) per rank that don't fill a "
-                    f"{local_train_batch_size}-sample train batch (buffer={len(sample_lengths)})."
-                )
+            # Async generation can deliver a short buffer at episode boundaries, and
+            # multi-turn agents flatten to a variable number of samples per prompt, so
+            # use the actual buffer size; a remainder joins the last window (see below).
+            num_steps = max(1, len(sample_lengths) // local_train_batch_size) if sample_lengths else 0
 
         # split by train_batch_size, sync num_microbatches across dp
+        windows = [(i * local_train_batch_size, (i + 1) * local_train_batch_size) for i in range(num_steps)]
+        if windows:  # the last window absorbs the remainder, as the on-policy path takes the whole buffer
+            windows[-1] = (windows[-1][0], len(sample_lengths))
         num_microbatches = []
-        for i in range(num_steps):
-            start, end = i * local_train_batch_size, (i + 1) * local_train_batch_size
+        for start, end in windows:
             num_microbatches.append(
                 get_minimum_num_micro_batch_size(
                     sample_lengths[start:end],
@@ -141,8 +134,7 @@ class NaiveReplayBuffer:
         # balance the number of microbatches across steps
         micro_batch_indices = []
         data_partitions = []
-        for i, num_mbs in enumerate(num_microbatches):
-            start, end = i * local_train_batch_size, (i + 1) * local_train_batch_size
+        for (start, end), num_mbs in zip(windows, num_microbatches):
             samples = sample_lengths[start:end]
             partitions = get_seqlen_balanced_partitions(samples, num_mbs, equal_size=False)  # List[List[int]], index
             for j in range(num_mbs):

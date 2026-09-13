@@ -135,10 +135,6 @@ class CriticTrainer:
             max_steps = len(dataloader)
             if self.args.train.force_on_policy and not dynamic:
                 accum_steps = max(max_steps, 1)
-            elif not dynamic:
-                remainder = max_steps % accum_steps
-                if remainder:
-                    max_steps -= remainder
 
             # Same window / global-token-mean contract as PolicyTrainer.policy_train.
             window = []
@@ -146,9 +142,11 @@ class CriticTrainer:
                 if step >= max_steps:
                     break
                 window.append(experience)
-                window_end = (
-                    bool(self.replay_buffer.dynamic_optimizer_step[step]) if dynamic else len(window) == accum_steps
-                )
+                if dynamic:
+                    window_end = bool(self.replay_buffer.dynamic_optimizer_step[step])
+                else:  # the last window absorbs the remainder, as in policy_train
+                    remaining = max_steps - step - 1
+                    window_end = remaining == 0 or (len(window) == accum_steps and remaining >= accum_steps)
                 if not window_end:
                     continue
                 local_tokens = sum(exp.action_mask.sum() for exp in window)

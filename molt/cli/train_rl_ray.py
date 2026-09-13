@@ -769,8 +769,7 @@ if __name__ == "__main__":
             "batch and run a single optimizer step at the final microbatch, instead of splitting "
             "the rollout into several train.batch_size / grad-accum windows. Needed for multi-turn "
             "flatten, where the per-rollout sample count is variable and a fixed train.batch_size "
-            "would make every step after the first off-policy and drop the trailing samples. "
-            "Requires --train.max_epochs 1."
+            "would make every step after the first off-policy. Requires --train.max_epochs 1."
         ),
     )
 

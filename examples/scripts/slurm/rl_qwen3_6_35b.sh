@@ -166,9 +166,8 @@ DASHBOARD_PORT="${DASHBOARD_PORT:-8265}"
 MAX_LENGTH="${MAX_LENGTH:-65536}"
 MAX_SAMPLES="${MAX_SAMPLES:-8192}"
 # rollout_batch_size = unique prompts the trainer dispatches per
-# `make_experience` call. The trainer's policy_train loop drops trailing
-# microbatches when `microbatches_per_rollout < grad_accum`, so size
-# `rollout_batch_size * n_samples >= train_batch_size` to avoid no-op steps.
+# `make_experience` call. The trainer steps once per `train_batch_size` window; a
+# remainder joins the last window, so no samples are dropped whatever the ratio.
 # Default sized for one rollout = one full grad-accum window:
 #   rollout_batch_size * n_samples = train_batch_size  (1 rollout per step)
 ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-16}"

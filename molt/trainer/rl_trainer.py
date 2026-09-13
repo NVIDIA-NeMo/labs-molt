@@ -116,8 +116,12 @@ def prepare_datasets(strategy, tokenizer):
         rounds = -(-len(prompts_dataset) // args.rollout.batch_size)
         max_steps = rounds * args.train.num_episodes * args.train.max_epochs
     else:
-        steps = -(-len(prompts_dataset) * args.rollout.n_samples_per_prompt // args.train.batch_size)
-        max_steps = steps * args.train.num_episodes * args.train.max_epochs
+        # Each rollout round trains on its own buffer and its last window absorbs the
+        # remainder (a buffer under train.batch_size is one step, like on-policy), so
+        # count max(1, floor) steps per round rather than one global ceil.
+        rounds = -(-len(prompts_dataset) // args.rollout.batch_size)
+        steps_per_round = max(1, args.rollout.batch_size * args.rollout.n_samples_per_prompt // args.train.batch_size)
+        max_steps = rounds * steps_per_round * args.train.num_episodes * args.train.max_epochs
     return prompts_dataloader, eval_dataloader, max_steps
 
 

@@ -187,8 +187,8 @@ DASHBOARD_PORT="${DASHBOARD_PORT:-8265}"
 MAX_LENGTH="${MAX_LENGTH:-65536}"
 MAX_SAMPLES="${MAX_SAMPLES:-8192}"
 # rollout_batch_size = unique prompts dispatched per make_experience call.
-# Keep rollout_batch_size * n_samples >= train_batch_size or the policy_train
-# loop drops trailing microbatches; the default sizes one rollout per grad step.
+# The trainer steps once per train_batch_size window and folds a remainder into the
+# last one (no samples dropped); the default sizes one rollout per grad step.
 ROLLOUT_BATCH_SIZE="${ROLLOUT_BATCH_SIZE:-16}"
 ROLLOUT_GENERATE_BATCH_SIZE="${ROLLOUT_GENERATE_BATCH_SIZE:-8}"
 N_SAMPLES_PER_PROMPT="${N_SAMPLES_PER_PROMPT:-8}"
