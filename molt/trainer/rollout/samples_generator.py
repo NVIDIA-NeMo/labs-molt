@@ -614,6 +614,7 @@ class SamplesGenerator:
             routed_experts=routed_experts,
             prompts=[response.prompt],
             labels=[response.label],
+            feedbacks=[response.feedback],
             images=[response.images],
             mm_train_inputs=[response.mm_train_inputs],
             group_ids=[response.group_id] if response.group_id is not None else [],

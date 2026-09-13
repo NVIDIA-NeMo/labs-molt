@@ -33,7 +33,7 @@ class _Tokenizer:
 class _OneStepEnv(Env):
     async def step(self, state, **kwargs):
         state["sampling_params"].max_tokens = 1
-        return Result(reward=[2.0], score=[3.0], observation="!", terminated=True)
+        return Result(reward=[2.0], feedback="wrong unit", score=[3.0], observation="!", terminated=True)
 
 
 class _Engine:
@@ -68,6 +68,7 @@ def test_step_env_runner_isolates_sampling_params_per_trajectory():
     assert params.max_tokens == 8
     assert len({id(item) for item in engine.seen_sampling_params}) == 2
     assert [output.reward for output in outputs] == [2.0, 2.0]
+    assert [output.feedback for output in outputs] == ["wrong unit", "wrong unit"]
     assert [output.scores for output in outputs] == [3.0, 3.0]
 
 
