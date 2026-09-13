@@ -58,6 +58,8 @@ class CheckpointManager:
         # Use AutoModel's Checkpointer: its custom-model save_pretrained mixin
         # requires it (raises "No checkpointer provided" otherwise). Outputs
         # consolidated HF safetensors that vLLM can hot-load.
+        # Read the PEFT config off the wrapper before unwrapping strips it away.
+        peft_config = getattr(model, "peft_config", None)
         model = self.strategy._unwrap_model(model)
         # Declare the export precision on the config and every nested sub-config: loaders (vLLM/HF)
         # build each submodule at its config dtype, so a stale fp32 `dtype` (an fp32 master) left on
@@ -65,8 +67,8 @@ class CheckpointManager:
         from molt.utils.utils import convert_to_torch_dtype
 
         self._set_config_dtype(model.config, convert_to_torch_dtype(self.strategy.param_dtype))
-        ckpt = self._build_checkpointer(output_dir, save_consolidated=True, model=model)
-        ckpt.save_model(model=model, weights_path=output_dir, tokenizer=tokenizer)
+        ckpt = self._build_checkpointer(output_dir, save_consolidated=True, model=model, peft_config=peft_config)
+        ckpt.save_model(model=model, weights_path=output_dir, tokenizer=tokenizer, peft_config=peft_config)
         if dist.is_initialized():
             dist.barrier()
         self._promote_hf_export(output_dir)
@@ -108,7 +110,9 @@ class CheckpointManager:
             shutil.move(src, dst)
         shutil.rmtree(model_dir, ignore_errors=True)
 
-    def _build_checkpointer(self, output_dir: str, save_consolidated: bool, model: nn.Module | None = None):
+    def _build_checkpointer(
+        self, output_dir: str, save_consolidated: bool, model: nn.Module | None = None, peft_config=None
+    ):
         from nemo_automodel.components.checkpoint.checkpointing import Checkpointer, CheckpointingConfig
 
         model_cache_dir, model_repo_id = self._checkpoint_source(model) if model is not None else (None, None)
@@ -121,7 +125,9 @@ class CheckpointManager:
             model_repo_id=model_repo_id,
             save_consolidated=save_consolidated,
             original_model_root_dir=model_cache_dir,
-            is_peft=False,
+            # PEFT runs train adapters only and leave the base bit-identical, so AutoModel saves
+            # and loads just the adapter safetensors and skips consolidation.
+            is_peft=peft_config is not None,
         )
         return Checkpointer(
             config=config,
@@ -295,6 +301,7 @@ class CheckpointManager:
         """DCP-format checkpoint for resumable training (model + optimizer +
         scheduler + RL stats). HF-safetensors export goes through ``save_model``.
         """
+        peft_config = getattr(model, "peft_config", None)
         model = self.strategy._unwrap_model(model)
         is_rank0 = (not dist.is_initialized()) or dist.get_rank() == 0
         is_best = tag.startswith("best")
@@ -308,8 +315,8 @@ class CheckpointManager:
         save_dir = os.path.join(ckpt_path, tag)
         os.makedirs(save_dir, exist_ok=True)
 
-        ckpt = self._build_checkpointer(save_dir, save_consolidated=False, model=model)
-        ckpt.save_model(model=model, weights_path=save_dir, tokenizer=None)
+        ckpt = self._build_checkpointer(save_dir, save_consolidated=False, model=model, peft_config=peft_config)
+        ckpt.save_model(model=model, weights_path=save_dir, tokenizer=None, peft_config=peft_config)
         optimizer = kwargs.get("optimizer")
         scheduler = kwargs.get("scheduler")
         if optimizer is not None:
@@ -339,6 +346,7 @@ class CheckpointManager:
         if load_dir is None:
             return None, {}
 
+        peft_config = getattr(model, "peft_config", None)
         model = self.strategy._unwrap_model(model)
 
         # Load the model through the SAME AutoModel Checkpointer that save_ckpt uses,
@@ -352,23 +360,18 @@ class CheckpointManager:
         # dcp.load matched the model's NATIVE keys against the HF-keyed shards, so for
         # adapter models the renamed params were silently skipped (allow_partial_load)
         # and the resume kept base weights; dense models were unaffected (native == HF).
-        ckpt = self._build_checkpointer(load_dir, save_consolidated=False, model=model)
+        ckpt = self._build_checkpointer(load_dir, save_consolidated=False, model=model, peft_config=peft_config)
         ckpt.load_model(model=model, model_path=os.path.join(load_dir, "model"))
 
         optim_dir = os.path.join(load_dir, "optim")
         if optimizer is not None and os.path.isdir(optim_dir):
-            import torch.distributed.checkpoint as dcp
-            from nemo_automodel.components.checkpoint.stateful_wrappers import OptimizerState
-            from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
-
-            optimizer_state = OptimizerState(model, optimizer, scheduler)
-            optim_state_dict = optimizer_state.state_dict()
-            dcp.load(
-                optim_state_dict,
-                checkpoint_id=optim_dir,
-                planner=DefaultLoadPlanner(allow_partial_load=True),
-            )
-            optimizer_state.load_state_dict(optim_state_dict)
+            # Symmetric with save_ckpt: route through Checkpointer.load_optimizer so
+            # both sides build OptimizerState with the same is_peft / has_expert_parallelism
+            # gates. The prior hand-rolled dcp.load ignored those flags and used the DCP
+            # (get_optimizer_state_dict) shape, while PEFT+EP saves use the NATIVE
+            # optimizer.state_dict() shape — under allow_partial_load the mismatched keys
+            # were silently skipped and the resumed AdamW ran with zero moments.
+            ckpt.load_optimizer(optimizer=optimizer, model=model, weights_path=load_dir, scheduler=scheduler)
             # With --fsdp.offload optimizer the Adam moments must live on CPU; DCP
             # restores them onto the model param's GPU device, so page them back.
             self.strategy.offload_moments_to_cpu(optimizer)

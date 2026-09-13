@@ -60,3 +60,14 @@ def test_experts_to_muon_false_keeps_experts_on_adamw():
     matrix, vector, _, _ = _classify_params(_model(GroupedExpertsDeepEP()), experts_to_muon=False)
     assert not any(p.ndim == 3 for p in matrix)
     assert any(p.ndim == 3 for p in vector)
+
+
+def test_lora_adapters_go_to_adamw():
+    # Muon's orthogonalized update is defined for a full-rank weight, not for a rank-r factor
+    # pair. Both 2D adapters would otherwise land in the Muon group as plain linear weights.
+    m = nn.Module()
+    m.lora_A = nn.Linear(8, 2, bias=False)
+    m.lora_B = nn.Linear(2, 8, bias=False)
+    matrix, vector, _, _ = _classify_params(m, experts_to_muon=True)
+    assert matrix == []
+    assert len(vector) == 2
