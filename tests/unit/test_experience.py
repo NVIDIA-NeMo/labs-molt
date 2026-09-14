@@ -132,6 +132,17 @@ def test_text_info_survives_batching_and_splitting():
     assert [item.info["feedback"] for item in split_experience_batch(batch)] == ["wrong unit", "syntax error"]
 
 
+def test_text_info_missing_on_some_samples_batches_as_none():
+    # Env feedback is usually set on failures only; whichever sample comes first, the batch keeps
+    # the key with None for the samples that lack it (no KeyError, no silently dropped key).
+    with_text = Experience(sequences=torch.tensor([1, 2]), info={"feedback": "wrong unit"})
+    without = Experience(sequences=torch.tensor([3]), info={})
+    assert make_experience_batch([with_text, without]).info["feedback"] == ["wrong unit", None]
+    batch = make_experience_batch([without, with_text])
+    assert batch.info["feedback"] == [None, "wrong unit"]
+    assert [item.info["feedback"] for item in split_experience_batch(batch)] == [None, "wrong unit"]
+
+
 def test_experience_offload_reload_roundtrip(monkeypatch):
     # offload() moves the heavy fields into the object store (leaving a ref) and keeps the
     # lightweight ones in place; reload() restores them exactly. The controller only ever reads
