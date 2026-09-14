@@ -581,12 +581,14 @@ class SamplesGenerator:
         if score_val is not None:
             info["score"] = torch.tensor([score_val])
 
-        # Convert extra logs to tensors for downstream consumers. Skip non-numeric values (e.g. string
-        # task ids) — `torch.tensor([str])` raises "too many dimensions 'str'".
+        # Convert numeric logs to tensors for metrics. Keep strings available to algorithms that
+        # consume textual environment feedback.
         for key, value in (response.extra_logs or {}).items():
             value = _to_scalar(value)
             if isinstance(value, (int, float, bool)):
                 info[key] = torch.tensor([value])
+            elif isinstance(value, str):
+                info[key] = value
 
         # R3: per-token rollout routing aligned with `sequences` (one [L, K] expert-id row per token),
         # seq last after the permute below.

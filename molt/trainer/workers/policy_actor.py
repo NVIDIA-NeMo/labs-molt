@@ -572,7 +572,7 @@ class PolicyTrainer:
             if isinstance(v, torch.Tensor):
                 metrics[k] = v
                 weights[k] = "token" if v.dim() == 0 else "sample"
-            elif isinstance(v, list):
+            elif isinstance(v, list) and all(isinstance(item, (int, float, bool, torch.Tensor)) for item in v):
                 metrics[k] = torch.tensor(v, dtype=torch.float)
                 weights[k] = "sample"
 

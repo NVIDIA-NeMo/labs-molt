@@ -367,12 +367,14 @@ def test_process_response_counts_only_action_tokens_for_multiturn_lengths():
             rollout_log_probs=[float(i) for i in range(8)],
             reward=1.0,
             scores=1.0,
+            extra_logs={"feedback": "wrong unit"},
         ),
         media_ids=set(),
         truncate_length=8,
     )
 
     assert drop_reason is None
+    assert experience.info["feedback"] == "wrong unit"
     assert experience.response_length.item() == 3
     assert experience.action_mask.sum().item() == 3
     torch.testing.assert_close(

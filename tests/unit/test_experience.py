@@ -23,6 +23,7 @@ from molt.trainer.algorithm.experience import (
     balance_experiences,
     get_model_parallel_size,
     make_experience_batch,
+    split_experience_batch,
 )
 from molt.trainer.rollout.experience_maker import RemoteExperienceMaker
 
@@ -118,6 +119,17 @@ def test_distributed_advantages_match_materialized():
     for i in range(8):
         assert torch.allclose(per_sample[i].advantages[0], concat.advantages[i])
         assert torch.allclose(per_sample[i].returns[0], concat.returns[i])
+
+
+def test_text_info_survives_batching_and_splitting():
+    items = [
+        Experience(sequences=torch.tensor([1, 2]), info={"feedback": "wrong unit"}),
+        Experience(sequences=torch.tensor([3]), info={"feedback": "syntax error"}),
+    ]
+
+    batch = make_experience_batch(items)
+    assert batch.info["feedback"] == ["wrong unit", "syntax error"]
+    assert [item.info["feedback"] for item in split_experience_batch(batch)] == ["wrong unit", "syntax error"]
 
 
 def test_experience_offload_reload_roundtrip(monkeypatch):
