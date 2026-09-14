@@ -20,7 +20,8 @@
 # (1,460 MATH problems), where BF16 PG-IS is known to drift. 1,000 episodes x 12 rounds = 12,000 updates; one
 # rollout per prompt, 128 rollouts per update, lr 1e-6 cosine, wd 0.1, temperature 1.0, 8k responses, no KL;
 # 512 rollouts stay in flight and up to 8 finished batches queue ahead of the trainer, so vLLM never waits
-# for training. FlashREINFORCE is a composition of configs:
+# for training; sequences are packed up to MAX_TOKENS_PER_GPU tokens per micro-batch (DYNAMIC_BATCH=0 trains
+# one sequence per micro-batch). FlashREINFORCE is a composition of configs:
 #   --train.force_on_policy                           PPO ratio == 1 -> plain REINFORCE gradient
 #   --algo.advantage.is_correction_level seq          IS weight pi/mu against the vLLM behavior logprobs,
 #   --algo.advantage.is_correction_gating binary_kl     gated per sequence by the mean sampled-token
@@ -51,6 +52,8 @@ SAVE_ROOT="${SAVE_ROOT:-$REPO_ROOT/outputs/quick_start-flash-reinforce-r1d-1p5b/
 GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
 ACTOR_GPUS="${ACTOR_GPUS:-1}"
 VLLM_ENGINES="${VLLM_ENGINES:-7}"
+DYNAMIC_BATCH="${DYNAMIC_BATCH:-1}"; [ "$DYNAMIC_BATCH" = "0" ] && DYNAMIC_BATCH=""
+MAX_TOKENS_PER_GPU="${MAX_TOKENS_PER_GPU:-24576}"
 # Packed sequences need a varlen attention kernel: Transformer Engine when installed, else HF FA2.
 ATTN_IMPL="${FSDP_ATTN_IMPLEMENTATION:-$(python3 -c "import transformer_engine" 2>/dev/null && echo te || echo flash_attention_2)}"
 
@@ -103,6 +106,7 @@ python3 -u -m molt.cli.train_rl_ray \
   --fsdp.param_dtype bf16 \
   --fsdp.attn_implementation "$ATTN_IMPL" \
   --fsdp.packing_samples \
+  ${DYNAMIC_BATCH:+--train.dynamic_batch_enable --train.max_tokens_per_gpu "$MAX_TOKENS_PER_GPU"} \
   --actor.gradient_checkpoint full \
   --actor.adam.lr 1e-6 \
   --actor.adam.weight_decay 0.1 \
