@@ -270,6 +270,7 @@ class PolicyLoss(nn.Module):
         is_correction_mode: str = "mask",
         loss_agg_mode: str = "token-mean",
         loss_mode: str = "ppo",
+        is_correction_gating: str = "ratio",
     ) -> None:
         super().__init__()
         self.clip_eps_low = clip_eps_low
@@ -307,19 +308,28 @@ class PolicyLoss(nn.Module):
                 f"dual_clip is a PPO-only extra bound; it has no effect under loss_mode={self.loss_mode!r}"
             )
 
+        self.is_correction_gating = is_correction_gating
+
         if self.is_correction_level not in {"off", "token", "seq", "geo"}:
             raise ValueError(f"is_correction_level must be off/token/seq/geo, got {self.is_correction_level}")
         if self.is_correction_mode not in {"mask", "clip", "trunc"}:
             raise ValueError(f"is_correction_mode must be mask/clip/trunc, got {self.is_correction_mode}")
-        # seq/geo aggregate the ratio into a per-sequence GATE; survivors keep their
-        # per-token IS weight, so only mask (reject out-of-band sequences) is meaningful.
-        # clip/trunc would replace the per-token weight with one clamped sequence weight,
-        # discarding the per-token IS — reject that combination.
-        if self.is_correction_level in {"seq", "geo"} and self.is_correction_mode != "mask":
-            raise ValueError(
-                f"is_correction_level={self.is_correction_level} only supports is_correction_mode=mask "
-                f"(seq/geo are rejection filters, not per-token weights); got mode={self.is_correction_mode}"
-            )
+        if self.is_correction_gating not in {"ratio", "binary_kl", "tv"}:
+            raise ValueError(f"is_correction_gating must be ratio/binary_kl/tv, got {self.is_correction_gating}")
+        # Only the per-token ratio is a weight that can be clamped (clip/trunc); per-sequence gates
+        # (seq/geo) and divergence gates (binary_kl/tv) are rejection filters, so only mask applies.
+        if self.is_correction_mode != "mask" and self.is_correction_level not in {"off", "token"}:
+            raise ValueError(f"is_correction_level={self.is_correction_level} only supports is_correction_mode=mask")
+        if self.is_correction_gating != "ratio":
+            if self.is_correction_mode != "mask" or self.is_correction_level == "geo":
+                raise ValueError(
+                    f"is_correction_gating={self.is_correction_gating} only supports mode mask, level token/seq"
+                )
+            # A divergence is bounded from above only; the default ratio band [0.5, 5] would reject everything.
+            if (self.is_correction_threshold or [0])[0] > 0:
+                raise ValueError(
+                    f"is_correction_gating={self.is_correction_gating} takes an upper bound only (a single delta)"
+                )
 
     def forward(
         self,
@@ -372,33 +382,45 @@ class PolicyLoss(nn.Module):
             ).clamp(min=-log_ratio_limit, max=log_ratio_limit)
             token_ratio = torch.exp(is_log_ratio).detach()
 
-            # (1) per-UNIT off-policy ratio (unit = token, or per-sequence for
-            # seq/geo — kept at [B, 1] so the filter metric can stay per-sequence).
-            # is_correction_level selects the aggregation.
-            if self.is_correction_level == "token":
-                unit_ratio = token_ratio
-            elif self.is_correction_level == "seq":
-                # product of a sequence's token ratios = exp(sum of log-ratios).
+            # (1) per-token gating statistic: the importance ratio itself (TIS) or the sampled-token
+            # divergence between rollout and train policy (binary_kl / tv: a trust region).
+            if self.is_correction_gating == "ratio":
+                gating_stat = token_ratio
+            elif self.is_correction_gating == "binary_kl":
+                p = rollout_log_probs.float().exp().clamp(1e-6, 1 - 1e-6)
+                q = old_log_probs.float().exp().clamp(1e-6, 1 - 1e-6)
+                gating_stat = p * (p.log() - q.log()) + (1 - p) * ((1 - p).log() - (1 - q).log())
+            elif self.is_correction_gating == "tv":
+                gating_stat = (rollout_log_probs.float().exp() - old_log_probs.float().exp()).abs()
+            else:
+                raise ValueError(f"unknown is_correction_gating {self.is_correction_gating}")
+            # aggregated per sequence (kept at [B, 1] so the filter metric stays per-sequence) for
+            # seq/geo: ratio product = exp(sum), geometric mean = exp(mean), divergence = its mean.
+            if self.is_correction_level == "seq" and self.is_correction_gating == "ratio":
                 seq_log = (is_log_ratio * action_mask.float()).sum(dim=-1, keepdim=True)
-                unit_ratio = torch.exp(seq_log.clamp(min=-log_ratio_limit, max=log_ratio_limit))
-            else:  # "geo" — per-sequence geometric mean = exp(mean of log-ratios).
-                seq_log = masked_mean(is_log_ratio, action_mask, dim=-1).unsqueeze(-1)
-                unit_ratio = torch.exp(seq_log)
+                gating_stat = torch.exp(seq_log.clamp(min=-log_ratio_limit, max=log_ratio_limit))
+            elif self.is_correction_level == "seq":
+                gating_stat = masked_mean(gating_stat, action_mask, dim=-1).unsqueeze(-1)
+            elif self.is_correction_level == "geo":
+                gating_stat = torch.exp(masked_mean(is_log_ratio, action_mask, dim=-1).unsqueeze(-1))
+            elif self.is_correction_level != "token":
+                raise ValueError(f"unknown is_correction_level {self.is_correction_level}")
 
-            # (2) gate the per-unit ratio (is_correction_mode) -> per-token coefficient
-            # + per-unit filtered flag.
+            # (2) gate the per-unit statistic (is_correction_mode) -> per-token coefficient
+            # + per-unit filtered flag. Survivors always carry their per-token IS ratio.
             if self.is_correction_mode == "mask":
-                # Drop out-of-band units; weight the survivors by their per-token ratio.
-                keep = (unit_ratio >= low) & (unit_ratio <= high)
+                keep = (gating_stat >= low) & (gating_stat <= high)
                 coef = torch.where(keep.expand_as(token_ratio), token_ratio, torch.zeros_like(token_ratio))
                 unit_filtered = ~keep
             elif self.is_correction_mode == "clip":
                 # Keep every unit, clamp its weight into [low, high] (applied per-token).
-                coef = unit_ratio.clamp(min=low, max=high).expand_as(token_ratio)
-                unit_filtered = (unit_ratio < low) | (unit_ratio > high)
-            else:  # "trunc" — cap only the upper tail; small weights unchanged.
-                coef = unit_ratio.clamp(max=high).expand_as(token_ratio)
-                unit_filtered = unit_ratio > high
+                coef = gating_stat.clamp(min=low, max=high).expand_as(token_ratio)
+                unit_filtered = (gating_stat < low) | (gating_stat > high)
+            elif self.is_correction_mode == "trunc":  # cap only the upper tail; small weights unchanged.
+                coef = gating_stat.clamp(max=high).expand_as(token_ratio)
+                unit_filtered = gating_stat > high
+            else:
+                raise ValueError(f"unknown is_correction_mode {self.is_correction_mode}")
 
             loss = coef * loss
             # Filter fraction reported at the unit's own granularity: per (masked)

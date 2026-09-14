@@ -434,11 +434,22 @@ if __name__ == "__main__":
     parser.add_argument(
         "--algo.advantage.estimator",
         type=str,
-        choices=["reinforce", "rloo", "reinforce_baseline", "grpo", "dr_grpo", "on_policy_distill", "gae"],
+        choices=[
+            "reinforce",
+            "rloo",
+            "reinforce_baseline",
+            "grpo",
+            "dr_grpo",
+            "on_policy_distill",
+            "gae",
+            "flash_reinforce",
+        ],
         default="reinforce",
         help="Advantage estimation method: reinforce, rloo, reinforce_baseline, grpo, dr_grpo, "
-        "on_policy_distill (per-token reverse KL to the --ref.model_name_or_path teacher), or gae "
-        "(PPO value baseline — builds a colocated critic; see --critic.*)",
+        "on_policy_distill (per-token reverse KL to the --ref.model_name_or_path teacher), gae "
+        "(PPO value baseline — builds a colocated critic; see --critic.*), or flash_reinforce "
+        "(FlashREINFORCE: reward minus the rollout-batch mean, no group, no whitening — the "
+        "n_samples_per_prompt=1 estimator; see examples/scripts/quick_start/rl_flash_reinforce_r1d_1p5b.sh)",
     )
     parser.add_argument("--algo.advantage.gamma", type=float, default=1, help="discount factor")
     parser.add_argument(
@@ -462,9 +473,19 @@ if __name__ == "__main__":
         type=str,
         default="off",
         choices=["off", "token", "seq", "geo"],
-        help="Granularity of the gated ratio: off (correction disabled), token (each token), "
-        "seq (product = exp(sum), unbiased/high-variance), geo (per-seq geometric mean = exp(mean), "
-        "balanced). seq/geo are rejection filters and require --is_correction_mode mask.",
+        help="Granularity of the gated statistic: off (correction disabled), token (each token), "
+        "seq (ratio: product = exp(sum), unbiased/high-variance; binary_kl/tv: per-sequence mean), "
+        "geo (per-seq geometric mean ratio = exp(mean), balanced). seq/geo are rejection filters and "
+        "require --is_correction_mode mask.",
+    )
+    parser.add_argument(
+        "--algo.advantage.is_correction_gating",
+        type=str,
+        default="ratio",
+        choices=["ratio", "binary_kl", "tv"],
+        help="Statistic the IS-correction gate reads: ratio (the importance weight itself, TIS) or the sampled-token "
+        "binary_kl / tv divergence between rollout and train policy (a trust region; FlashREINFORCE = binary_kl at "
+        "level seq, the per-sequence mean). Divergences only mask, with --is_correction_threshold delta.",
     )
     parser.add_argument(
         "--algo.advantage.is_correction_mode",
@@ -477,9 +498,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--algo.advantage.is_correction_threshold",
         type=float,
-        nargs=2,
+        nargs="+",
         default=[0.5, 5.0],
-        help="Low and high bounds [low, high] for the off-policy IS ratio pi_train/pi_rollout.",
+        help="Bounds on the gated statistic: LOW HIGH is the [low, high] band on the off-policy IS ratio "
+        "pi_train/pi_rollout; a single HIGH is an upper bound only (no lower bound, e.g. a trust-region delta).",
     )
     parser.add_argument(
         "--algo.kl.use_loss", action="store_true", default=False, help="whether to use KL loss from GRPO"
@@ -551,6 +573,14 @@ if __name__ == "__main__":
             "logs entropy_loss; positive values encourage higher entropy. "
             "0 or unset skips entropy computation."
         ),
+    )
+    parser.add_argument(
+        "--actor.loss_agg_mode",
+        type=str,
+        default="token-mean",
+        choices=["token-mean", "seq-mean-token-mean"],
+        help="Policy-loss aggregation: token-mean (global token mean) or seq-mean-token-mean (sample mean: every "
+        "sequence weighs the same).",
     )
     parser.add_argument("--reward.clip_range", type=float, nargs=2, default=(-10, 10), help="Reward clip range")
 
@@ -902,6 +932,12 @@ if __name__ == "__main__":
         )
 
     # --- Algorithm setup & defaults ---
+    threshold = args.algo.advantage.is_correction_threshold
+    if len(threshold) == 1:  # a single value is the upper bound; no lower bound
+        args.algo.advantage.is_correction_threshold = [float("-inf"), threshold[0]]
+    elif len(threshold) != 2:
+        raise ValueError("--algo.advantage.is_correction_threshold takes HIGH or LOW HIGH")
+
     if args.actor.eps_clip_low_high is None:
         # Default to the standard symmetric PPO clip; every launch script passes
         # --actor.eps_clip_low_high explicitly, so this is just the bare-CLI default.

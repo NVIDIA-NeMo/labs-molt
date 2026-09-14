@@ -22,6 +22,7 @@ Ray · vLLM · NVIDIA AutoModel — the smallest PyTorch-native stack for
 <br/>
 
 [**Paper**](https://arxiv.org/abs/2607.21653) ·
+[**News**](#-news) ·
 [**Architecture**](#-architecture) ·
 [**Why Molt**](#-why-molt) ·
 [**Quick Start**](#-quick-start) ·
@@ -44,6 +45,10 @@ PyTorch. That is the whole stack: **~9.2K lines of RL code that scale to
 1T-class MoE** on vLLM with TP / EP / CP — think DeepSeek-V3 at
 `--fsdp.ep_size 256`, Adam CPU offload for the largest actors. One agent
 API, one trainable actor, clean enough to read end-to-end.
+
+## 📰 News
+
+- **2026-09** · Molt now supports [FlashREINFORCE](https://www.researchgate.net/publication/414274571_FlashREINFORCE_FLASHREINFORCE_CRITIC-FREE_SINGLE-ROLLOUT_ASYNCHRONOUS_RL_FOR_AGENTIC_LANGUAGE_MODELS), critic-free single-rollout RL with stable training beyond 6,000 steps — see the [quick start](examples/scripts/quick_start/rl_flash_reinforce_r1d_1p5b.sh).
 
 ## 🧩 Architecture
 
@@ -164,8 +169,8 @@ per-token importance ratio `pi_train / pi_rollout`, gated by two knobs:
 - `--algo.advantage.is_correction_mode {mask, clip, trunc}` — treatment of a unit
   outside the band. `mask` drops it (zero gradient); `clip` clamps its weight into
   the band; `trunc` clamps only the upper tail.
-- `--algo.advantage.is_correction_threshold LOW HIGH` — the `[low, high]` band on the
-  ratio (recipes use a tight `0.99 1.01`).
+- `--algo.advantage.is_correction_threshold [LOW] HIGH` — the `[low, high]` band on the
+  ratio (recipes use a tight `0.99 1.01`); a single value is an upper bound only.
 
 The named schemes and their prior art:
 
@@ -270,6 +275,7 @@ Common RL switches:
 | Keep rollout alive during sync | `--train.partial_rollout_enable` |
 | Filter by agent scores | `--algo.dynamic_filtering_enable --algo.dynamic_filtering_range 0.0 1.0` |
 | Correct async rollout logprobs | `--algo.advantage.is_correction_level geo` (seq-mask-tis; token-level adds `--algo.advantage.is_correction_mode clip/trunc/mask`) |
+| FlashREINFORCE (critic-free, single-rollout) | `--train.force_on_policy --algo.advantage.estimator flash_reinforce --algo.advantage.is_correction_level seq --algo.advantage.is_correction_gating binary_kl --algo.advantage.is_correction_threshold 5e-3 --actor.loss_agg_mode seq-mean-token-mean` — see [the quick start](examples/scripts/quick_start/rl_flash_reinforce_r1d_1p5b.sh) |
 | Freeze MoE routing (stabilize MoE RL) | `--actor.freeze_moe_router` |
 | On-policy distillation | `--algo.advantage.estimator on_policy_distill --ref.model_name_or_path /path/to/teacher` |
 | Independent eval sampling | `--eval.temperature`, `--eval.top_p`, `--eval.max_new_tokens`, `--eval.n_samples_per_prompt` (unset ones fall back to rollout) |

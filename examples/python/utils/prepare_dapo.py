@@ -22,6 +22,11 @@ rows). Eval: BytedTsinghua-SIA/AIME-2024 (30 problems).
 Both sources already ship `prompt` (chat-style list) and `reward_model`
 (`{ground_truth, style}`), so this script only deduplicates the train
 split, optionally subsamples, and writes to disk in load_from_disk format.
+
+Any dataset with that schema converts the same way, e.g. the FP16 sanity test
+(sail/Sanity-Test-R1D-1.5B: 1,460 MATH problems, AIME 2024 + 2025 as `test`):
+  python prepare_dapo.py --train-source sail/Sanity-Test-R1D-1.5B \
+    --eval-source sail/Sanity-Test-R1D-1.5B --eval-split test --out-dir .tmp/prep_sanity_r1d
 """
 
 import argparse
@@ -58,6 +63,7 @@ def main():
         help="HF dataset id for eval split.",
     )
     parser.add_argument("--config", default="default", help="HF dataset config name (train).")
+    parser.add_argument("--eval-split", default="train", help="Split of --eval-source to use.")
     parser.add_argument("--max-train", type=int, default=20000, help="Cap on train rows after dedup.")
     parser.add_argument("--max-eval", type=int, default=None, help="Cap on eval rows.")
     parser.add_argument("--out-dir", type=Path, default=Path(".tmp/dapo_math_17k"))
@@ -85,7 +91,7 @@ def main():
     train_ds = train_ds.select(keep_indices)
     print(f"deduped to {len(train_ds)} unique train rows")
 
-    eval_ds = load_dataset(args.eval_source, split="train")
+    eval_ds = load_dataset(args.eval_source, split=args.eval_split)
     if args.max_eval is not None:
         eval_ds = eval_ds.select(range(min(args.max_eval, len(eval_ds))))
 

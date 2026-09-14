@@ -123,3 +123,17 @@ def test_singleton_group_behavior_differs_between_grpo_and_rloo():
     _adv_r, ret_r = _run("rloo", [2.0], [[0]])
     assert torch.allclose(ret_g, torch.zeros(1))
     assert torch.allclose(ret_r, torch.tensor([2.0]))
+
+
+def test_flash_reinforce_uses_global_batch_mean_and_ignores_groups():
+    """flash_reinforce is the n=1 estimator: baseline = mean over ALL rollouts (0.25), whatever
+    the singleton-group layout, and no whitening (advantages == returns)."""
+    adv, ret = _run("flash_reinforce", _R, [[0], [1], [2], [3]])
+    assert torch.allclose(ret, torch.tensor([0.75, -0.25, -0.25, -0.25]))
+    assert torch.allclose(adv, ret)
+
+
+def test_flash_reinforce_single_outcome_class_is_zero():
+    """All failures / all successes carry no contrastive signal: the centered advantage is zero."""
+    _adv, ret = _run("flash_reinforce", [1.0, 1.0, 1.0], [[0], [1], [2]])
+    assert torch.equal(ret, torch.zeros(3))

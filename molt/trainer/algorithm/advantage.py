@@ -196,6 +196,19 @@ def reinforce_baseline(
     return normalize_advantages(returns, ctx), returns
 
 
+@register_advantage_estimator("flash_reinforce")
+def flash_reinforce(
+    rewards: torch.Tensor, groups: List[List[int]], ctx: AdvantageContext
+) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+    """FlashREINFORCE: A_i = R_i - mean(R) over the WHOLE rollout batch (the n=1 regime
+    has no prompt group to average), no whitening. For binary rewards this balances the
+    positive and negative gradient mass; a batch with a single outcome class is a no-op step.
+    """
+    advantages = rewards - rewards.mean()
+    returns = broadcast_advantages(advantages, ctx)
+    return [ret.clone() for ret in returns], returns
+
+
 @register_advantage_estimator("dr_grpo")
 def dr_grpo(
     rewards: torch.Tensor, groups: List[List[int]], ctx: AdvantageContext

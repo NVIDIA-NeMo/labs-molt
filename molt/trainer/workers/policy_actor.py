@@ -21,7 +21,7 @@ import socket
 import time
 from contextlib import ExitStack
 from dataclasses import fields
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import ray
 import torch
@@ -109,6 +109,8 @@ class PolicyTrainer:
                 if self.args.algo.advantage.is_correction_level != "off"
                 else None
             ),
+            loss_agg_mode=self.args.actor.loss_agg_mode,
+            is_correction_gating=self.args.algo.advantage.is_correction_gating,
         )
 
         # Add the MoE router load-balancing aux loss only when its coefficient is set.
@@ -307,6 +309,12 @@ class PolicyTrainer:
                     continue
                 local_tokens = sum(exp.action_mask.sum() for exp in window)
                 batch_num_tokens = self.strategy.global_token_count(local_tokens)
+                # The seq-mean aggregation modes divide by the window's global
+                # SEQUENCE count instead; reduce it the same way as the token count.
+                batch_num_seqs = None
+                if self.actor_loss_fn.loss_agg_mode != "token-mean":
+                    local_seqs = torch.tensor(sum(exp.action_mask.shape[0] for exp in window))
+                    batch_num_seqs = self.strategy.global_token_count(local_seqs)
                 for idx, exp in enumerate(window):
                     exp.to_device(device)
                     # Full per-sequence lengths drive the FLOP estimate (forward
@@ -315,7 +323,9 @@ class PolicyTrainer:
                     local_seq_count += float(seqlens.numel())
                     local_token_sum += float(seqlens.sum())
                     is_optimizer_step = idx == len(window) - 1
-                    status = self.training_step(exp, kl_ctl, batch_num_tokens, len(window), is_optimizer_step)
+                    status = self.training_step(
+                        exp, kl_ctl, batch_num_tokens, len(window), is_optimizer_step, batch_num_seqs
+                    )
                     self._record_status(status, status_list, pbar)
                     if force_on_policy and self.replay_buffer.cpu_offload:
                         # The window spans the whole rollout; offload each
@@ -354,6 +364,7 @@ class PolicyTrainer:
         batch_num_tokens: torch.Tensor,
         num_microbatches: int,
         is_optimizer_step: bool,
+        batch_num_seqs: Optional[torch.Tensor] = None,
     ) -> Dict[str, object]:
         self.actor.train()
 
@@ -436,6 +447,7 @@ class PolicyTrainer:
             rollout_log_probs=rollout_log_probs,
             dp_size=loss_data_parallel_size,
             batch_num_tokens=batch_num_tokens,
+            global_batch_size=batch_num_seqs,
         )
         experience.info["policy_clip_ratio"] = clip_ratio.detach()
         experience.info["policy_kl"] = policy_kl.detach()
