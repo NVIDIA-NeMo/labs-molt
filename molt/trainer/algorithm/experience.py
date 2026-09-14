@@ -211,6 +211,9 @@ def split_experience_batch(experience: Experience) -> List[Experience]:
                                 f"Size of {f.name}[{k}] ({len(v)}) does not match batch_size ({batch_size})"
                             )
                         d[k] = v[i]
+                    elif batch_size == 1:
+                        # A freshly generated rollout can carry scalar metadata before replay-buffer append.
+                        d[k] = v
                     else:
                         raise TypeError(f"Unsupported type for {f.name}[{k}]: {type(v)}")
                 kwargs[f.name] = d

@@ -63,6 +63,7 @@ if "vllm" not in sys.modules:
     sys.modules["vllm"] = fake_vllm
 
 from molt.agents.base import Trajectory
+from molt.trainer.algorithm.replay_buffer import NaiveReplayBuffer
 from molt.trainer.rollout import samples_generator
 from molt.trainer.rollout.samples_generator import SamplesGenerator
 
@@ -355,7 +356,7 @@ def test_dynamic_filtering_counts_compaction_segments_once_per_rollout(monkeypat
     assert dict(score_stats) == {"score_sum": 1.0, "score_n": 2, "groups": 1.0, "all_pass": 0.0, "all_fail": 0.0}
 
 
-def test_process_response_counts_only_action_tokens_for_multiturn_lengths():
+def test_process_response_preserves_text_info_through_replay_buffer_append():
     experience, drop_reason = SamplesGenerator._process_response_into_experience(
         Trajectory(
             prompt="p",
@@ -385,6 +386,10 @@ def test_process_response_counts_only_action_tokens_for_multiturn_lengths():
         experience.rollout_log_probs,
         torch.tensor([[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0]]),
     )
+
+    replay_buffer = NaiveReplayBuffer(sample_batch_size=1, cpu_offload=False)
+    replay_buffer.append(experience)
+    assert replay_buffer.items[0].info["feedback"] == "wrong unit"
 
 
 def test_process_response_rejects_action_ranges_outside_trajectory():
