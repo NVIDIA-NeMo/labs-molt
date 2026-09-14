@@ -233,8 +233,10 @@ class Env(ABC):
         Returns:
             Result with a scalar ``reward`` (required). Optional: ``observation``
             (next-turn feedback text for multi-turn), ``score`` (defaults to
-            reward), ``info`` (logged metrics), ``images``, ``sampling_params``,
-            and ``terminated`` / ``truncated`` to end the episode.
+            reward), ``info`` (numeric values are logged as metrics; string values
+            stay on the sample as textual feedback and are None on samples that omit
+            them), ``images``, ``sampling_params``, and ``terminated`` / ``truncated``
+            to end the episode.
         """
         raise NotImplementedError
 

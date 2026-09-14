@@ -248,14 +248,12 @@ def make_experience_batch(items: List[Experience]) -> Experience:
             else:
                 raise ValueError(f"Unsupported tensor field batching rule for {f.name}")
         elif isinstance(first, dict):
+            # Union of the samples' keys: an env cannot be asked to set every info key on every
+            # sample (text feedback usually comes with failures only), so a missing value is None
+            # instead of a KeyError or a silently dropped key.
             kwargs[f.name] = {}
-            for key in first:
-                vals = [getattr(item, f.name)[key] for item in items]
-                if not vals:
-                    continue
-                first_type = type(vals[0])
-                if not all(isinstance(v, first_type) for v in vals):
-                    raise TypeError(f"Inconsistent types in {f.name}[{key}]")
+            for key in dict.fromkeys(k for item in items for k in getattr(item, f.name)):
+                vals = [getattr(item, f.name).get(key) for item in items]
                 if all(isinstance(v, (int, float)) for v in vals):
                     kwargs[f.name][key] = torch.tensor(vals)
                 else:
