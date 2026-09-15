@@ -14,12 +14,13 @@
 # limitations under the License.
 
 import math
+import sys
 
 import pytest
 import torch
 
 from molt.models import PolicyLoss
-from molt.models.utils import compute_approx_kl
+from molt.models.utils import compute_approx_kl, log_probs_from_logits
 
 
 def test_seq_mask_tis_uses_raw_token_importance_weights_for_kept_sequences():
@@ -488,3 +489,88 @@ def test_seq_mean_token_mean_weighs_every_sequence_the_same():
     torch.testing.assert_close(loss, torch.tensor(-1.5))
     loss.backward()
     torch.testing.assert_close(logp.grad, torch.tensor([[-0.5, -0.5], [-0.5, 0.0]]))
+
+
+@pytest.fixture
+def unfused_log_probs(monkeypatch):
+    # Exercise the portable fallback even when FlashAttention is installed.
+    monkeypatch.setitem(sys.modules, "flash_attn.ops.triton.cross_entropy", None)
+    return log_probs_from_logits
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+@pytest.mark.parametrize("temperature", [0.7, 1.0, 1.3])
+@pytest.mark.parametrize("n_tokens", [31, 257, 513])
+def test_log_probs_match_dense_values_and_gradients(unfused_log_probs, dtype, temperature, n_tokens):
+    generator = torch.Generator().manual_seed(42)
+    logits = torch.randn(2, n_tokens, 17, generator=generator, dtype=dtype).requires_grad_()
+    reference = logits.detach().clone().requires_grad_()
+    labels = torch.randint(17, (2, n_tokens), generator=generator)
+    weights = torch.randn(2, n_tokens, generator=generator)
+
+    actual = unfused_log_probs(logits, labels, temperature=temperature)
+    expected = (reference.float() / temperature).log_softmax(-1).gather(-1, labels.unsqueeze(-1)).squeeze(-1)
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-6)
+    actual_grad = torch.autograd.grad((actual * weights).sum(), logits)[0]
+    expected_grad = torch.autograd.grad((expected * weights).sum(), reference)[0]
+    torch.testing.assert_close(actual_grad, expected_grad)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("n_tokens", [512, 2048])
+def test_log_probs_do_not_retain_fp32_vocabulary_copies(unfused_log_probs, dtype, n_tokens):
+    vocab_size = 127
+    logits = torch.randn(n_tokens, vocab_size, dtype=dtype, requires_grad=True)
+    labels = torch.zeros(n_tokens, dtype=torch.long)
+    saved = []
+
+    def pack(tensor):
+        saved.append((tensor.dtype, tensor.shape))
+        return tensor
+
+    with torch.autograd.graph.saved_tensors_hooks(pack, lambda tensor: tensor):
+        log_probs = unfused_log_probs(logits, labels, temperature=0.7)
+
+    # Keeping every upcast chunk until backward recreates the full FP32 allocation.
+    assert not any(dtype == torch.float32 and len(shape) == 2 and shape[-1] == vocab_size for dtype, shape in saved)
+    log_probs.sum().backward()
+    assert torch.isfinite(logits.grad).all()
+
+
+def test_log_probs_noncontiguous_inputs_and_inference(unfused_log_probs):
+    logits = torch.randn(2, 257, 17, dtype=torch.bfloat16).transpose(0, 1).requires_grad_()
+    labels = torch.randint(17, (2, 257)).T
+    expected = logits.float().log_softmax(-1).gather(-1, labels.unsqueeze(-1)).squeeze(-1)
+    actual = unfused_log_probs(logits, labels)
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(
+        torch.autograd.grad(actual.sum(), logits)[0], torch.autograd.grad(expected.sum(), logits)[0]
+    )
+    with torch.no_grad():
+        inference = unfused_log_probs(logits, labels)
+    assert not inference.requires_grad
+    torch.testing.assert_close(inference, actual.detach())
+
+
+def test_log_probs_policy_update_matches_dense_reference(unfused_log_probs):
+    torch.manual_seed(42)
+    model = torch.nn.Linear(8, 33)
+    reference = torch.nn.Linear(8, 33)
+    reference.load_state_dict(model.state_dict())
+    inputs = torch.randn(2, 257, 8)
+    labels = torch.randint(33, (2, 257))
+    advantages = torch.randn(2, 257)
+    mask = torch.ones_like(labels, dtype=torch.bool)
+    mask[0, -17:] = False
+    actual = unfused_log_probs(model(inputs).to(torch.bfloat16), labels, temperature=0.7)
+    expected = (reference(inputs).to(torch.bfloat16).float() / 0.7).log_softmax(-1)
+    expected = expected.gather(-1, labels.unsqueeze(-1)).squeeze(-1)
+    for log_probs in (actual, expected):
+        loss, *_ = PolicyLoss()(log_probs, log_probs.detach(), advantages, action_mask=mask)
+        loss.backward()
+    for parameter, expected_parameter in zip(model.parameters(), reference.parameters()):
+        torch.testing.assert_close(parameter.grad, expected_parameter.grad, rtol=1e-2, atol=1e-5)
+    torch.optim.SGD(model.parameters(), lr=0.01).step()
+    torch.optim.SGD(reference.parameters(), lr=0.01).step()
+    for parameter, expected_parameter in zip(model.parameters(), reference.parameters()):
+        torch.testing.assert_close(parameter, expected_parameter)
