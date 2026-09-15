@@ -21,6 +21,7 @@ from typing import Optional, Union
 import torch
 import torch.nn as nn
 from torch.distributed.tensor import DTensor
+from torch.utils.checkpoint import checkpoint
 
 
 def resolve_ac_mode(value: Union[bool, str, None]) -> Union[bool, str]:
@@ -110,14 +111,37 @@ def log_probs_from_logits(logits: torch.Tensor, labels: torch.Tensor, temperatur
         except ImportError:
             pass
 
-    # Chunked fp32 logsumexp+gather. Bounds peak memory at
+    chunk_size = 256
+    if (
+        logits.element_size() < 4
+        and torch.is_grad_enabled()
+        and logits.requires_grad
+        and flat_logits.size(0) > chunk_size
+    ):
+        # Autograd otherwise retains every upcast chunk until backward, recreating
+        # the full FP32 allocation. Recompute each small chunk from the original
+        # logits during backward; calls below fit in one chunk and do not recurse.
+        return torch.cat(
+            [
+                checkpoint(
+                    log_probs_from_logits,
+                    chunk,
+                    targets,
+                    temperature,
+                    use_reentrant=False,
+                    preserve_rng_state=False,
+                )
+                for chunk, targets in zip(flat_logits.split(chunk_size), flat_labels.split(chunk_size))
+            ]
+        ).view(*batch_dim)
+
+    # Chunked fp32 logsumexp+gather. Bounds temporary memory at
     # chunk_size * vocab * 4 bytes (256 * 152K * 4 ≈ 156 MiB) and avoids the
     # [B*S, V] fp32 spike that OOMs at long sequences with large vocab models
     # like Qwen3.6 (152K vocab) when callers pass bf16 logits. Empirically a
     # 1024 chunk OOMs on 80GB H100 once optimizer+activations are loaded.
     n_rows = flat_logits.shape[0]
     out = torch.empty(n_rows, device=logits.device, dtype=torch.float32)
-    chunk_size = 256
     for s_idx in range(0, n_rows, chunk_size):
         end_idx = min(s_idx + chunk_size, n_rows)
         chunk = flat_logits[s_idx:end_idx].float()
