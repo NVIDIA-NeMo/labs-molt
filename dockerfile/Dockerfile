@@ -13,17 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# molt — the project image: CUDA-13 (native CUDA 13; A100 sm_80, H100/H200 sm_90, B200 sm_100 on
-# x86_64; GB200 sm_100 / GB300 sm_103 on aarch64 Grace hosts — the build platform picks the base
-# stage and the GPU architecture lists below).
+# molt — the project image: CUDA-13, ONE Dockerfile for x86_64 (A100 sm_80, H100/H200 sm_90,
+# B200 sm_100) and aarch64 Grace-Blackwell (GB200 sm_100 / GB300 sm_103). The base is the
+# multi-arch nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04 (CUDA 13.0 toolkit, Ubuntu 24.04), so the
+# same definition resolves per platform with no per-arch stages — the build platform is the only
+# input that changes.
 #
-# Base: OFFICIAL Docker Hub pytorch/pytorch:2.13.0-cuda13.0-cudnn9-devel
-#   (torch 2.13.0 + CUDA 13.0 + cuDNN 9.20, python 3.12, Ubuntu 24.04).
-#   Chosen because torch 2.13.0+cu130 matches vLLM 0.27–0.29's hard torch==2.13.0 pin — NO torch
-#   swap. The whole source stack (TE / flash-attn / mamba / DeepEP) is compiled against this
-#   torch, so the base torch version and vLLM must stay in lockstep.
-#   It has no arm64 manifest, so aarch64 starts from nvidia/cuda (same Ubuntu 24.04 / CUDA 13.0)
-#   and pip-installs the identical cu130 torch trio from download.pytorch.org (aarch64 wheels).
+# torch 2.13.0+cu130 (+ matching torchvision/torchaudio) is pip-installed from download.pytorch.org
+# into Ubuntu's python 3.12: the very wheels the official pytorch/pytorch:2.13.0-cuda13.0 image
+# ships (same nvcc 13.0.88 / cudart 13.0.96), but that image has no arm64 manifest. torch 2.13.0
+# matches vLLM 0.27–0.29's hard torch==2.13.0 pin — NO torch swap. The whole source stack (TE /
+# flash-attn / mamba / DeepEP) is compiled against this torch, so the base torch version and vLLM
+# must stay in lockstep.
 #
 # Runs BOTH SFT and RL (vLLM) for omni3 (Nemotron-H Mamba2+MoE) and qwen3.6 (Qwen3.5-MoE).
 # System stack baked in: TE + flash-attn + DeepEP + mamba + fla + vLLM.
@@ -33,28 +34,11 @@
 # checkout to PYTHONPATH; since PYTHONPATH is searched before site-packages, that dev
 # checkout transparently OVERRIDES the baked copy when present — both coexist, no conflict.
 #
-# Build (when docker is available):  docker build -f dockerfile/Dockerfile -t molt:cu13 .
-# On an arm64 host the same command builds the Grace-Blackwell image (docker, buildx and podman
-# all set TARGETARCH from the build platform; --platform linux/arm64 cross-builds under emulation).
-# (The bring-up was done via enroot on the cluster; see .tmp/cu13_build_steps.txt for the
-#  enroot-on-lustre import quirks, which are moot for a real docker build.)
-# No default: buildah resolves stage dependencies with the default but substitutes FROM with the
-# platform value, so `=amd64` makes an arm64 podman build pull a non-existent "base-arm64" image.
-ARG TARGETARCH
-ARG BASE_IMAGE=pytorch/pytorch:2.13.0-cuda13.0-cudnn9-devel
-ARG BASE_IMAGE_ARM64=nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04
-FROM ${BASE_IMAGE} AS base-amd64
-
-FROM ${BASE_IMAGE_ARM64} AS base-arm64
-# Ubuntu's python 3.12 lands in the same /usr/local/lib/python3.12/dist-packages layout as the
-# pytorch base. Debian's pip has no RECORD, so a current pip is layered over it, not upgraded.
-ENV PIP_BREAK_SYSTEM_PACKAGES=1 PIP_ROOT_USER_ACTION=ignore PIP_NO_CACHE_DIR=1
-RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-dev python3-pip python-is-python3 && \
-    rm -rf /var/lib/apt/lists/* && \
-    python -m pip install --upgrade --ignore-installed pip setuptools wheel && \
-    python -m pip install torch==2.13.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
-
-FROM base-${TARGETARCH}
+# Build:  docker build -f dockerfile/Dockerfile -t molt:cu13 .
+# The same command on an arm64 host builds the Grace-Blackwell image; from x86_64 cross-build with
+# `docker buildx build --platform linux/arm64` (QEMU emulation — raise MAX_JOBS on a big host).
+ARG BASE_IMAGE=nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04
+FROM ${BASE_IMAGE}
 
 # Ubuntu 24.04 system python is PEP-668 "externally-managed" -> allow pip into it.
 ENV PIP_BREAK_SYSTEM_PACKAGES=1 \
@@ -62,6 +46,15 @@ ENV PIP_BREAK_SYSTEM_PACKAGES=1 \
     PIP_NO_CACHE_DIR=1 \
     DEBIAN_FRONTEND=noninteractive \
     RDMA_CORE_HOME=/opt/rdma-core/build
+
+# --- python 3.12 + the cu130 torch trio ------------------------------------------
+# Ubuntu's python lands in /usr/local/lib/python3.12/dist-packages (SITE below). Debian's pip has
+# no RECORD, so a current pip is layered over it (--ignore-installed), not upgraded. pip picks the
+# x86_64 or aarch64 wheels from the build platform.
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-dev python3-pip python-is-python3 && \
+    rm -rf /var/lib/apt/lists/* && \
+    python -m pip install --upgrade --ignore-installed pip setuptools wheel && \
+    python -m pip install torch==2.13.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
 
 # python 3.12 site-packages. GPU arches: A100 sm_80 (Ampere) + H100/H200 sm_90 (Hopper) +
 # B200/GB200 sm_100 (Blackwell). ARCH_LIST / NVTE_CUDA_ARCHS drive the TE / flash-attn /
@@ -75,6 +68,9 @@ ARG SITE=/usr/local/lib/python3.12/dist-packages
 ARG ARCH_LIST="8.0 9.0 10.0"
 ARG NVTE_CUDA_ARCHS="80;90;100"
 ARG DEEPEP_ARCH_LIST="9.0 10.0"
+# nvcc jobs for the flash-attn / mamba / DeepEP source builds. 8 fits a 32 GB build host; raise
+# it on large hosts and for emulated arm64 cross-builds, where each job is many times slower.
+ARG MAX_JOBS=8
 
 # torch's bundled nvidia-*-cu13 wheels hold cudnn.h / nccl.h / cublas etc. The bare base
 # has no system NCCL/cuDNN dev headers, so every --no-build-isolation source build (TE,
@@ -130,7 +126,7 @@ RUN python -m pip install nvidia-mathdx==25.1.1 && \
 RUN git clone https://github.com/Dao-AILab/flash-attention.git /opt/flash-attention && \
     cd /opt/flash-attention && git checkout v2.8.3 && \
     CPATH="$(for d in ${SITE}/nvidia/*/include; do printf '%s:' "$d"; done)${CPATH:-}" \
-    FLASH_ATTENTION_FORCE_BUILD=TRUE MAX_JOBS=8 TORCH_CUDA_ARCH_LIST="${ARCH_LIST}" \
+    FLASH_ATTENTION_FORCE_BUILD=TRUE MAX_JOBS=${MAX_JOBS} TORCH_CUDA_ARCH_LIST="${ARCH_LIST}" \
         python -m pip install --no-build-isolation --no-deps . && \
     cd / && rm -rf /opt/flash-attention
 
@@ -143,7 +139,7 @@ RUN for repo in "https://github.com/Dao-AILab/causal-conv1d.git@v1.6.2@/opt/caus
         find csrc -type f \( -name '*.cu' -o -name '*.cuh' -o -name '*.h' -o -name '*.cpp' \) \
             -exec sed -i -e 's/cub::LaneId()/(threadIdx.x \& 31u)/g' -e 's/cub::CTA_SYNC()/__syncthreads()/g' {} + && \
         CPATH="$(for d in ${SITE}/nvidia/*/include; do printf '%s:' "$d"; done)${CPATH:-}" \
-        env "${flag}=TRUE" MAX_JOBS=8 TORCH_CUDA_ARCH_LIST="${ARCH_LIST}" \
+        env "${flag}=TRUE" MAX_JOBS=${MAX_JOBS} TORCH_CUDA_ARCH_LIST="${ARCH_LIST}" \
             python -m pip install --no-build-isolation --no-deps . && cd /; \
     done && rm -rf /opt/causal-conv1d /opt/mamba
 
@@ -175,7 +171,7 @@ RUN apt-get update && apt-get install -y --allow-change-held-packages rdma-core 
     ln -sf ${NVSHMEM_LIB_PATH}/libnvshmem_host.so.3 ${NVSHMEM_LIB_PATH}/libnvshmem_host.so && \
     env RDMA_CORE_HOME=${RDMA_CORE_HOME} HYBRID_EP_MULTINODE=1 \
         LD_LIBRARY_PATH=/usr/local/cuda/lib64/:${LD_LIBRARY_PATH:-} \
-        TORCH_CUDA_ARCH_LIST="${DEEPEP_ARCH_LIST}" MAX_JOBS=8 \
+        TORCH_CUDA_ARCH_LIST="${DEEPEP_ARCH_LIST}" MAX_JOBS=${MAX_JOBS} \
         python -m pip install --no-cache-dir --no-build-isolation -v . && \
     apt-get purge -y libnvidia-ml-dev && apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/* /opt/deepep.patch && cd / && rm -rf /opt/DeepEP
