@@ -13,20 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Publish hijkzzz/molt:<version> (+ latest) to Docker Hub as one amd64+arm64 tag. Each platform builds
-# natively on the CI runners that already build the test image (x86 = the default runner, arm64 = the
-# GB200 runner Automodel's CI uses), pushed by digest; a last step joins the two digests into the tag.
+# Publish hijkzzz/molt:<version.txt> (+ latest) to Docker Hub as one amd64+arm64 tag, on demand from
+# the Actions tab. Each platform builds natively on the CI runners that already build the test image
+# (x86 = the default runner, arm64 = the GB200 runner Automodel's CI uses), pushed by digest; a last
+# step joins the two digests into the tag.
 # Secrets: DOCKERHUB_USERNAME / DOCKERHUB_TOKEN. Variable ARM64_RUNNER overrides the arm64 runner label.
 name: Release image
 
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
-      tag:
-        description: Image tag to publish (default version.txt)
-        required: false
       latest:
         description: Also move the latest tag
         type: boolean
@@ -114,11 +110,10 @@ jobs:
           password: ${{ secrets.DOCKERHUB_TOKEN }}
       - name: Create the multi-arch tags
         env:
-          TAG: ${{ inputs.tag }}
-          LATEST: ${{ github.event_name == 'push' || inputs.latest }}
+          LATEST: ${{ inputs.latest }}
         run: |
           set -euo pipefail
-          VER=${TAG:-$(tr -d ' \n' < version.txt)}
+          VER=$(tr -d ' \n' < version.txt)
           tags=(-t "$IMAGE:$VER"); [ "$LATEST" = "true" ] && tags+=(-t "$IMAGE:latest")
           cd /tmp/digests
           docker buildx imagetools create "${tags[@]}" $(printf "$IMAGE@sha256:%s " *)
