@@ -38,6 +38,8 @@ permissions:
 
 env:
   IMAGE: hijkzzz/molt
+  # BuildKit layer cache lives in a side repository so the image repository lists release tags only.
+  CACHE: hijkzzz/molt-buildcache
 
 jobs:
   pre-flight:
@@ -78,8 +80,8 @@ jobs:
           context: .
           platforms: linux/${{ matrix.arch }}
           outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache-${{ matrix.arch }}
-          cache-to: type=registry,ref=${{ env.IMAGE }}:buildcache-${{ matrix.arch }},mode=max
+          cache-from: type=registry,ref=${{ env.CACHE }}:${{ matrix.arch }}
+          cache-to: type=registry,ref=${{ env.CACHE }}:${{ matrix.arch }},mode=max
       - name: Export digest
         run: |
           mkdir -p /tmp/digests
