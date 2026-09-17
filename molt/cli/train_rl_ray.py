@@ -17,6 +17,7 @@
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
 import argparse
+import copy
 import os
 
 from molt.trainer.algorithm.experience import get_model_parallel_size
@@ -67,7 +68,9 @@ def train(args):
 
     # configure strategy
     strategy = get_strategy(args)
-    strategy.print(args)
+    printed_args = copy.deepcopy(args)
+    printed_args.logger.wandb.key = None  # driver logs are often shared; never echo the W&B key
+    strategy.print(printed_args)
 
     # Init vLLM before actor/ref placement. vLLM's mp backend asks Ray for
     # whole-node bundles (for example 8 GPUs); if actor/ref one-GPU bundles are

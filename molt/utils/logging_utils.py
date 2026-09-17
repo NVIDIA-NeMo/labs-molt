@@ -18,6 +18,7 @@
 # Copyright (c) SkyPilot authors, licensed under the Apache License, Version 2.0.
 """Logging configuration for molt."""
 
+import copy
 import logging
 import os
 import sys
@@ -80,12 +81,15 @@ class WandbLogger:
 
         if not wandb.api.api_key:
             wandb.login(key=args.logger.wandb.key)
+        # The run config is uploaded and visible to everyone who can see the project: keep the key out.
+        config = copy.deepcopy(args)
+        config.logger.wandb.key = None
         wandb.init(
             entity=args.logger.wandb.org,
             project=args.logger.wandb.project,
             group=args.logger.wandb.group,
             name=args.logger.wandb.run_name,
-            config=args.__dict__,
+            config=config.__dict__,
             reinit=True,
         )
 
