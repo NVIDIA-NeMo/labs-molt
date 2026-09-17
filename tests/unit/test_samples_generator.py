@@ -283,6 +283,7 @@ def test_generator_keeps_no_checkpoint_state_and_resumes_from_dataloader(monkeyp
     generator.args = SimpleNamespace(
         rollout=SimpleNamespace(batch_size=3, n_samples_per_prompt=1, vllm_generate_batch_size=5),
         algo=SimpleNamespace(dynamic_filtering_enable=False),
+        train=SimpleNamespace(partial_rollout_enable=True),  # the in-flight p3-p6 need the saturated pool
         ckpt=SimpleNamespace(warm_resume_rollouts=False),
         actor=SimpleNamespace(num_nodes=1, num_gpus_per_node=1),
         fsdp=SimpleNamespace(cp_size=1, tp_size=1),
