@@ -13,17 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# molt — the project image: CUDA-13 (native CUDA 13; A100 sm_80, H100/H200 sm_90, B200 sm_100 on
-# x86_64; GB200 sm_100 / GB300 sm_103 on aarch64 Grace hosts — the build platform picks the base
-# stage and the GPU architecture lists below).
+# molt — the project image: CUDA-13 (native CUDA 13; A100 sm_80, H100/H200 sm_90, B200 sm_100, and
+# GB200 sm_100 / GB300 sm_103 on aarch64 Grace hosts). One Dockerfile and one base for both CPU
+# architectures: the same file builds the amd64 and the arm64 image of a multi-arch tag.
 #
-# Base: OFFICIAL Docker Hub pytorch/pytorch:2.13.0-cuda13.0-cudnn9-devel
-#   (torch 2.13.0 + CUDA 13.0 + cuDNN 9.20, python 3.12, Ubuntu 24.04).
-#   Chosen because torch 2.13.0+cu130 matches vLLM 0.27–0.29's hard torch==2.13.0 pin — NO torch
-#   swap. The whole source stack (TE / flash-attn / mamba / DeepEP) is compiled against this
-#   torch, so the base torch version and vLLM must stay in lockstep.
-#   It has no arm64 manifest, so aarch64 starts from nvidia/cuda (same Ubuntu 24.04 / CUDA 13.0)
-#   and pip-installs the identical cu130 torch trio from download.pytorch.org (aarch64 wheels).
+# Base: OFFICIAL Docker Hub nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04 (multi-arch; CUDA 13.0
+#   toolkit + cuDNN 9, Ubuntu 24.04) plus Ubuntu's python 3.12 and the cu130 torch 2.13.0 trio from
+#   download.pytorch.org, which ships x86_64 and aarch64 wheels. (pytorch/pytorch:2.13.0-cuda13.0-
+#   cudnn9-devel carries the same torch but publishes no arm64 manifest.)
+#   torch 2.13.0+cu130 matches vLLM 0.27–0.29's hard torch==2.13.0 pin — NO torch swap. The whole
+#   source stack (TE / flash-attn / mamba / DeepEP) is compiled against this torch, so the torch
+#   version and vLLM must stay in lockstep.
 #
 # Runs BOTH SFT and RL (vLLM) for omni3 (Nemotron-H Mamba2+MoE) and qwen3.6 (Qwen3.5-MoE).
 # System stack baked in: TE + flash-attn + DeepEP + mamba + fla + vLLM.
@@ -34,27 +34,13 @@
 # checkout transparently OVERRIDES the baked copy when present — both coexist, no conflict.
 #
 # Build (when docker is available):  docker build -f dockerfile/Dockerfile -t molt:cu13 .
-# On an arm64 host the same command builds the Grace-Blackwell image (docker, buildx and podman
-# all set TARGETARCH from the build platform; --platform linux/arm64 cross-builds under emulation).
+# The same command on an arm64 host builds the Grace-Blackwell image;
+#   docker buildx build --platform linux/amd64,linux/arm64 --push -t hijkzzz/molt:<ver> .
+# publishes one multi-arch tag that `docker pull` resolves per host.
 # (The bring-up was done via enroot on the cluster; see .tmp/cu13_build_steps.txt for the
 #  enroot-on-lustre import quirks, which are moot for a real docker build.)
-# No default: buildah resolves stage dependencies with the default but substitutes FROM with the
-# platform value, so `=amd64` makes an arm64 podman build pull a non-existent "base-arm64" image.
-ARG TARGETARCH
-ARG BASE_IMAGE=pytorch/pytorch:2.13.0-cuda13.0-cudnn9-devel
-ARG BASE_IMAGE_ARM64=nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04
-FROM ${BASE_IMAGE} AS base-amd64
-
-FROM ${BASE_IMAGE_ARM64} AS base-arm64
-# Ubuntu's python 3.12 lands in the same /usr/local/lib/python3.12/dist-packages layout as the
-# pytorch base. Debian's pip has no RECORD, so a current pip is layered over it, not upgraded.
-ENV PIP_BREAK_SYSTEM_PACKAGES=1 PIP_ROOT_USER_ACTION=ignore PIP_NO_CACHE_DIR=1
-RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-dev python3-pip python-is-python3 && \
-    rm -rf /var/lib/apt/lists/* && \
-    python -m pip install --upgrade --ignore-installed pip setuptools wheel && \
-    python -m pip install torch==2.13.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
-
-FROM base-${TARGETARCH}
+ARG BASE_IMAGE=nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04
+FROM ${BASE_IMAGE}
 
 # Ubuntu 24.04 system python is PEP-668 "externally-managed" -> allow pip into it.
 ENV PIP_BREAK_SYSTEM_PACKAGES=1 \
@@ -92,10 +78,17 @@ RUN ln -snf /usr/share/zoneinfo/Etc/UTC /etc/localtime && echo Etc/UTC > /etc/ti
     echo 'tzdata tzdata/Areas select Etc' | debconf-set-selections && \
     echo 'tzdata tzdata/Zones/Etc select UTC' | debconf-set-selections && \
     apt-get update && apt-get install -y --no-install-recommends \
-        build-essential gdb git gosu libomp-dev python3-dev sudo \
+        python3 python3-dev python3-pip python-is-python3 \
+        build-essential gdb git gosu libomp-dev sudo \
         libopenmpi-dev libnvidia-ml-dev ca-certificates \
         pkg-config cython3 cmake ninja-build && \
     rm -rf /var/lib/apt/lists/*
+
+# --- torch trio (cu130 wheels, both architectures) -------------------------------
+# Debian's pip/setuptools/wheel carry no RECORD and cannot be upgraded in place, so current ones are
+# layered over them. The trio is pinned to exactly what vLLM 0.29.0 requires.
+RUN python -m pip install --ignore-installed pip setuptools wheel && \
+    python -m pip install torch==2.13.0 torchvision==0.28.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cu130
 
 # --- pip tooling + source-build deps + dion -------------------------------------
 # --no-build-isolation builds use the system python, so their build + runtime deps must
@@ -108,8 +101,6 @@ RUN T=$(python -c "import torch; print(torch.__version__)") && \
     TV=$(python -c "import torchvision; print(torchvision.__version__)") && \
     TA=$(python -c "import torchaudio; print(torchaudio.__version__)") && \
     printf 'torch==%s\ntorchvision==%s\ntorchaudio==%s\n' "$T" "$TV" "$TA" > /opt/torch-pin.txt && \
-    python -m pip install --upgrade pip setuptools && \
-    python -m pip install --ignore-installed --no-deps wheel && \
     python -m pip install -c /opt/torch-pin.txt pybind11 setuptools_scm ninja cmake pydantic onnxscript onnx importlib_metadata && \
     (python -m pip uninstall -y xgboost pynvml opencv-python-headless || true) && \
     python -m pip install -c /opt/torch-pin.txt "dion @ git+https://github.com/microsoft/dion.git"

@@ -219,8 +219,9 @@ docker pull hijkzzz/molt:latest   # or a pinned release: hijkzzz/molt:0.1.7
 docker build -f dockerfile/Dockerfile -t hijkzzz/molt:latest .
 ```
 
-The same Dockerfile builds the Grace-Blackwell (GB200 / GB300, aarch64) image: run it on an arm64
-host (docker or rootless podman), or cross-build with `docker buildx build --platform linux/arm64`.
+From 0.1.9 the Docker Hub tags are multi-arch (amd64 + arm64), so the same `docker pull` works on
+x86 and on Grace-Blackwell (GB200 / GB300) hosts. The one Dockerfile builds both: run it on the
+matching host, or `docker buildx build --platform linux/amd64,linux/arm64 --push` to publish a tag.
 
 The released package is also on PyPI for checkout-free installs:
 
