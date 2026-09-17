@@ -198,7 +198,10 @@ class SamplesGenerator:
         does not wait for the slow tail of the dispatched batch. The unfinished
         rollouts (and any surplus finished groups) persist on the instance across
         calls, so vLLM never drains between training steps: generation of the next
-        batch fully overlaps training of the current one.
+        batch fully overlaps training of the current one. That carry-over is what
+        --train.partial_rollout_enable means: the refit pauses/resumes the engines and the
+        unfinished rollouts continue under the new weights. Without it the pool is sized
+        to the batch and drained before returning, so no rollout ever spans a refit.
 
         Multi-turn agents emit several step-samples per rollout, so we chunk by
         GROUP (= prompt): each returned batch holds `rollout.batch_size` prompts,
@@ -219,6 +222,7 @@ class SamplesGenerator:
 
         groups_per_batch = self.args.rollout.batch_size
         inflight_capacity = getattr(self.args.rollout, "vllm_generate_batch_size", None) or groups_per_batch
+        partial_rollout = getattr(getattr(self.args, "train", None), "partial_rollout_enable", False)
         dynamic_filtering = self.args.algo.dynamic_filtering_enable
 
         def finished_group_count() -> int:
@@ -236,6 +240,8 @@ class SamplesGenerator:
         while finished_group_count() < groups_per_batch:
             # Refill so the runner pool keeps `inflight_capacity` rollouts in flight (engines stay saturated).
             free_slots = inflight_capacity - len(self._inflight_rollouts)
+            if not partial_rollout:  # never more outstanding than this batch still needs: the pool ends empty
+                free_slots = min(free_slots, groups_per_batch - finished_group_count() - len(self._inflight_rollouts))
             if free_slots > 0 and self._dataloader_iter is not None:
                 prompts, labels, images, tools, dataloader_exhausted = _collect_prompt_batch(
                     self._dataloader_iter, free_slots

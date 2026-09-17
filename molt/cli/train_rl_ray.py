@@ -971,6 +971,14 @@ if __name__ == "__main__":
     # Set vLLM generate_batch_size to rollout_batch_size if not specified
     if not args.rollout.vllm_generate_batch_size:
         args.rollout.vllm_generate_batch_size = args.rollout.batch_size
+    if args.rollout.vllm_generate_batch_size > args.rollout.batch_size and not args.train.partial_rollout_enable:
+        # More rollouts in flight than one batch means the unfinished tail carries over the weight refit:
+        # that is partial rollout, so turn it on instead of silently capping the pool at the batch.
+        print(
+            "[Rollout] --rollout.vllm_generate_batch_size exceeds --rollout.batch_size; enabling "
+            "--train.partial_rollout_enable so the in-flight surplus survives the weight refit."
+        )
+        args.train.partial_rollout_enable = True
 
     # --- Algorithm checks ---
     # Group-relative estimators need >1 sample per prompt to form a baseline during training;
