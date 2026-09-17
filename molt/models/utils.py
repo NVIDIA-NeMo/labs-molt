@@ -125,14 +125,12 @@ def log_probs_from_logits(logits: torch.Tensor, labels: torch.Tensor, temperatur
         return chunk.gather(dim=-1, index=chunk_labels.unsqueeze(-1)).squeeze(-1) - torch.logsumexp(chunk, dim=-1)
 
     chunk_size = 256
-    return torch.cat(
-        [
-            torch.utils.checkpoint.checkpoint(
-                chunk_log_probs, flat_logits[i : i + chunk_size], flat_labels[i : i + chunk_size], use_reentrant=False
-            )
-            for i in range(0, flat_logits.shape[0], chunk_size)
-        ]
-    ).view(*batch_dim)
+    out = []
+    for start in range(0, flat_logits.shape[0], chunk_size):
+        chunk_logits = flat_logits[start : start + chunk_size]
+        chunk_labels = flat_labels[start : start + chunk_size]
+        out.append(torch.utils.checkpoint.checkpoint(chunk_log_probs, chunk_logits, chunk_labels, use_reentrant=False))
+    return torch.cat(out).view(*batch_dim)
 
 
 def masked_mean(tensor: torch.Tensor, mask: Optional[torch.Tensor], dim: int = None) -> torch.Tensor:
