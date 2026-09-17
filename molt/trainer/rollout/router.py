@@ -378,9 +378,13 @@ class AgentRunnerActor:
             rollout_id = uuid4().hex
             for traj in r if isinstance(r, list) else [r]:
                 traj.group_id, traj.rollout_id = group_id, rollout_id
-                exp, drop_reason = SamplesGenerator._process_response_into_experience(
-                    traj, self._media_ids, max_length
-                )
+                try:
+                    exp, drop_reason = SamplesGenerator._process_response_into_experience(
+                        traj, self._media_ids, max_length
+                    )
+                except Exception as e:  # a malformed trajectory must not sink the group either
+                    print(f"[runner] dropping unconvertible rollout in group {group_id}: {e!r}", flush=True)
+                    exp, drop_reason = None, "convert_error"
                 if exp is None:
                     results.append((None, drop_reason))
                     continue

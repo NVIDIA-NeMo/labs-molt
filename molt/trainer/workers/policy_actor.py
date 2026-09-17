@@ -526,6 +526,7 @@ class PolicyTrainer:
                 name="actor",
                 accumulate=not self.args.train.dynamic_batch_enable,
                 scale_loss_by_accumulation=False,
+                num_microbatches=num_microbatches,
                 # Defer the grad reduce-scatter to the optimizer-step microbatch when
                 # enabled; otherwise sync every microbatch (default). See _defer_grad_sync.
                 sync_gradients=(is_optimizer_step if self._defer_grad_sync else True),

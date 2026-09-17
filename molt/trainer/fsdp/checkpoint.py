@@ -328,6 +328,16 @@ class CheckpointManager:
         if dist.is_initialized():
             dist.barrier()
 
+    @staticmethod
+    def _reapply_cli_optimizer_hyperparams(optimizer, scheduler, flags) -> None:
+        """DCP restores the checkpoint's param_groups too; re-apply the CLI hyperparameters (lr, betas,
+        weight decay) and keep the schedule position: the in-flight lr scales with the base lr."""
+        for group, flag in zip(optimizer.param_groups, flags):
+            group["lr"] *= flag["initial_lr"] / group["initial_lr"]
+            group.update({k: v for k, v in flag.items() if k != "lr"})
+        if scheduler is not None:
+            scheduler.base_lrs = [group["initial_lr"] for group in optimizer.param_groups]
+
     def load_ckpt(self, model: nn.Module, ckpt_path: str, optimizer=None, scheduler=None, **kwargs):
         """Load the most recent DCP checkpoint under ``ckpt_path``. Returns
         ``(load_path, states)`` where ``states`` carries ``client_state`` keys
@@ -356,11 +366,17 @@ class CheckpointManager:
         ckpt.load_model(model=model, model_path=os.path.join(load_dir, "model"))
 
         optim_dir = os.path.join(load_dir, "optim")
-        if optimizer is not None and os.path.isdir(optim_dir):
+        if optimizer is not None:
+            if not os.path.isdir(optim_dir):
+                # Resuming with fresh Adam moments and a restarted LR schedule must be an explicit choice.
+                raise FileNotFoundError(
+                    f"{load_dir} has no optim/ state; set LOAD_MODEL_ONLY=1 to resume the weights only."
+                )
             import torch.distributed.checkpoint as dcp
             from nemo_automodel.components.checkpoint.stateful_wrappers import OptimizerState
             from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
 
+            flags = [{k: v for k, v in group.items() if k != "params"} for group in optimizer.param_groups]
             optimizer_state = OptimizerState(model, optimizer, scheduler)
             optim_state_dict = optimizer_state.state_dict()
             dcp.load(
@@ -369,6 +385,7 @@ class CheckpointManager:
                 planner=DefaultLoadPlanner(allow_partial_load=True),
             )
             optimizer_state.load_state_dict(optim_state_dict)
+            self._reapply_cli_optimizer_hyperparams(optimizer, scheduler, flags)
             # With --fsdp.offload optimizer the Adam moments must live on CPU; DCP
             # restores them onto the model param's GPU device, so page them back.
             self.strategy.offload_moments_to_cpu(optimizer)

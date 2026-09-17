@@ -280,8 +280,30 @@ def test_agent_runner_reports_each_failed_rollout():
     actor._client = None
     actor._media_ids = set()
 
-    results = asyncio.run(
-        actor.run_group("prompt", "label", None, SimpleNamespace(), 128, 2, group_id="group")
-    )
+    results = asyncio.run(actor.run_group("prompt", "label", None, SimpleNamespace(), 128, 2, group_id="group"))
 
     assert results == [(None, "runner_error"), (None, "runner_error")]
+
+
+def test_agent_runner_drops_unconvertible_trajectory(monkeypatch):
+    from molt.trainer.rollout.samples_generator import SamplesGenerator
+
+    class _Runner:
+        async def execute(self, **kwargs):
+            return SimpleNamespace()
+
+    def _invalid(traj, media_ids, max_length):
+        raise ValueError("Invalid action range (0, 9) for trajectory length 4")
+
+    monkeypatch.setattr(SamplesGenerator, "_process_response_into_experience", staticmethod(_invalid))
+    actor_cls = getattr(AgentRunnerActor, "__ray_actor_class__", AgentRunnerActor)
+    actor = object.__new__(actor_cls)
+    actor._runner = _Runner()
+    actor._tokenizer = None
+    actor._client = None
+    actor._media_ids = set()
+
+    results = asyncio.run(actor.run_group("prompt", "label", None, SimpleNamespace(), 128, 2, group_id="group"))
+
+    # The conversion error is reported per rollout instead of failing the whole group task.
+    assert results == [(None, "convert_error"), (None, "convert_error")]
