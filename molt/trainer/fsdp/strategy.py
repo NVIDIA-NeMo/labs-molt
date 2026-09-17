@@ -422,10 +422,13 @@ class FsdpStrategy:
                 # grads over dp_cp, dividing by cp again. So without the cp_size factor
                 # the load-balance gradient is cp_size× too weak (the main loss gets its
                 # matching cp_size from the gather-sum backward above; AutoModel sets this
-                # to dp_cp_size for the identical reason). The 1/accum averages the per-microbatch aux over
-                # the optimizer-step window. Net: coef * mean(aux), cluster-invariant.
+                # to dp_cp_size for the identical reason). The 1/num_microbatches averages the
+                # per-microbatch aux over the optimizer-step window (the caller's actual window: under
+                # dynamic batching / force_on_policy it differs from accumulated_gradient). Net:
+                # coef * mean(aux), cluster-invariant.
+                num_microbatches = kwargs.get("num_microbatches") or self.accumulated_gradient
                 MoEAuxLossAutoScaler.main_loss_backward_scale = torch.tensor(
-                    self.cp_size / max(1, self.accumulated_gradient),
+                    self.cp_size / max(1, num_microbatches),
                     device=loss.device,
                 )
         loss.backward()

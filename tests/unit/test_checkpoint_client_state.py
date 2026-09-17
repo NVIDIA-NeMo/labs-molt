@@ -130,3 +130,35 @@ def test_metric_round_trip(tmp_path):
         cm._write_ckpt_metric(str(tmp_path), raw, metric_key="eval/accuracy")
         with open(cm._get_ckpt_metric_path(str(tmp_path))) as f:
             assert json.load(f)["metric_value"] == expected
+
+
+def test_reapply_cli_optimizer_hyperparams_rescales_lr_and_keeps_schedule_position():
+    """A resumed run follows its own flags: the checkpoint's param_groups must not win."""
+    param = torch.nn.Parameter(torch.zeros(1))
+
+    def build(lr, weight_decay):
+        optimizer = torch.optim.AdamW([param], lr=lr, weight_decay=weight_decay)
+        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda step: 0.5 if step >= 5 else 1.0)
+        return optimizer, scheduler
+
+    # Checkpoint: 5 steps at lr 1e-6 -> the schedule is on its 0.5 plateau.
+    ckpt_optimizer, ckpt_scheduler = build(lr=1e-6, weight_decay=0.1)
+    for _ in range(5):
+        ckpt_optimizer.step()
+        ckpt_scheduler.step()
+
+    # Resume with lr 2e-6 and no weight decay from the CLI.
+    optimizer, scheduler = build(lr=2e-6, weight_decay=0.0)
+    flags = [{k: v for k, v in group.items() if k != "params"} for group in optimizer.param_groups]
+    optimizer.load_state_dict(ckpt_optimizer.state_dict())
+    scheduler.load_state_dict(ckpt_scheduler.state_dict())
+    assert optimizer.param_groups[0]["lr"] == 5e-7  # the restore reverted to the checkpoint's lr
+
+    _cm()._reapply_cli_optimizer_hyperparams(optimizer, scheduler, flags)
+
+    group = optimizer.param_groups[0]
+    assert group["lr"] == 1e-6  # 2e-6 * 0.5: new base lr, same schedule position
+    assert group["weight_decay"] == 0.0
+    assert scheduler.base_lrs == [2e-6]
+    scheduler.step()
+    assert scheduler.get_last_lr() == [1e-6]
