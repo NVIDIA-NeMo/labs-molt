@@ -43,11 +43,15 @@ ARG BASE_IMAGE=nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04
 FROM ${BASE_IMAGE}
 
 # Ubuntu 24.04 system python is PEP-668 "externally-managed" -> allow pip into it.
+# CUDA_HOME: the nvidia/cuda base does not set it (the earlier pytorch/pytorch base did), and
+# DeepEP's runtime JIT builds its nvcc command from it -> "/bin/nvcc: not found" on the first
+# MoE expert-parallel training step. Other JIT users (flashinfer, TE) also read it first.
 ENV PIP_BREAK_SYSTEM_PACKAGES=1 \
     PIP_ROOT_USER_ACTION=ignore \
     PIP_NO_CACHE_DIR=1 \
     DEBIAN_FRONTEND=noninteractive \
-    RDMA_CORE_HOME=/opt/rdma-core/build
+    RDMA_CORE_HOME=/opt/rdma-core/build \
+    CUDA_HOME=/usr/local/cuda
 
 # python 3.12 site-packages. GPU arches: A100 sm_80 (Ampere) + H100/H200 sm_90 (Hopper) +
 # B200/GB200 sm_100 (Blackwell). ARCH_LIST / NVTE_CUDA_ARCHS drive the TE / flash-attn /
