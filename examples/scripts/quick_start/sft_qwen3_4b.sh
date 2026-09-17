@@ -27,9 +27,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${MOLT_PATH:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
 MODEL_PATH="${MODEL_PATH:-/path/to/models/Qwen3/Qwen3-4B-Instruct-2507}"
 
-SFT_DATASET="${SFT_DATASET:-$REPO_ROOT/.tmp/proRL_text_rl/train}"
-EVAL_DATASET="${EVAL_DATASET:-$REPO_ROOT/.tmp/proRL_text_rl/eval}"
-test -e "$SFT_DATASET" || { echo "SFT_DATASET not found: $SFT_DATASET — prepare proRL_text_rl first."; exit 1; }
+# Text-math SFT data (DeepScaleR train / AIME-2024 eval) — auto-prep if missing.
+DATA_DIR="$REPO_ROOT/.tmp/proRL_text_rl"
+if [ ! -d "$DATA_DIR/train" ]; then
+  echo "[quickstart] preparing text-math data (agentica-org/DeepScaleR-Preview-Dataset) — one-time"
+  python3 "$REPO_ROOT/examples/python/utils/prepare_math.py" --num-proc 8 --out-dir "$DATA_DIR"
+fi
+SFT_DATASET="${SFT_DATASET:-$DATA_DIR/train}"
+EVAL_DATASET="${EVAL_DATASET:-$DATA_DIR/eval}"
 SAVE_ROOT="${SAVE_ROOT:-$REPO_ROOT/outputs/quick_start-sft-qwen3-4b/run}"
 
 GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
