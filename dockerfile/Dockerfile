@@ -13,13 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# molt — the project image: CUDA-13 (native CUDA 13; A100 sm_80, H100/H200 sm_90, B200/GB200 sm_100).
+# molt — the project image: CUDA-13 (native CUDA 13; A100 sm_80, H100/H200 sm_90, B200 sm_100 on
+# x86_64; GB200 sm_100 / GB300 sm_103 on aarch64 Grace hosts — the build platform picks the base
+# stage and the GPU architecture lists below).
 #
 # Base: OFFICIAL Docker Hub pytorch/pytorch:2.13.0-cuda13.0-cudnn9-devel
 #   (torch 2.13.0 + CUDA 13.0 + cuDNN 9.20, python 3.12, Ubuntu 24.04).
 #   Chosen because torch 2.13.0+cu130 matches vLLM 0.27–0.29's hard torch==2.13.0 pin — NO torch
 #   swap. The whole source stack (TE / flash-attn / mamba / DeepEP) is compiled against this
 #   torch, so the base torch version and vLLM must stay in lockstep.
+#   It has no arm64 manifest, so aarch64 starts from nvidia/cuda (same Ubuntu 24.04 / CUDA 13.0)
+#   and pip-installs the identical cu130 torch trio from download.pytorch.org (aarch64 wheels).
 #
 # Runs BOTH SFT and RL (vLLM) for omni3 (Nemotron-H Mamba2+MoE) and qwen3.6 (Qwen3.5-MoE).
 # System stack baked in: TE + flash-attn + DeepEP + mamba + fla + vLLM.
@@ -30,10 +34,27 @@
 # checkout transparently OVERRIDES the baked copy when present — both coexist, no conflict.
 #
 # Build (when docker is available):  docker build -f dockerfile/Dockerfile -t molt:cu13 .
+# On an arm64 host the same command builds the Grace-Blackwell image (docker, buildx and podman
+# all set TARGETARCH from the build platform; --platform linux/arm64 cross-builds under emulation).
 # (The bring-up was done via enroot on the cluster; see .tmp/cu13_build_steps.txt for the
 #  enroot-on-lustre import quirks, which are moot for a real docker build.)
+# No default: buildah resolves stage dependencies with the default but substitutes FROM with the
+# platform value, so `=amd64` makes an arm64 podman build pull a non-existent "base-arm64" image.
+ARG TARGETARCH
 ARG BASE_IMAGE=pytorch/pytorch:2.13.0-cuda13.0-cudnn9-devel
-FROM ${BASE_IMAGE}
+ARG BASE_IMAGE_ARM64=nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04
+FROM ${BASE_IMAGE} AS base-amd64
+
+FROM ${BASE_IMAGE_ARM64} AS base-arm64
+# Ubuntu's python 3.12 lands in the same /usr/local/lib/python3.12/dist-packages layout as the
+# pytorch base. Debian's pip has no RECORD, so a current pip is layered over it, not upgraded.
+ENV PIP_BREAK_SYSTEM_PACKAGES=1 PIP_ROOT_USER_ACTION=ignore PIP_NO_CACHE_DIR=1
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-dev python3-pip python-is-python3 && \
+    rm -rf /var/lib/apt/lists/* && \
+    python -m pip install --upgrade --ignore-installed pip setuptools wheel && \
+    python -m pip install torch==2.13.0 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu130
+
+FROM base-${TARGETARCH}
 
 # Ubuntu 24.04 system python is PEP-668 "externally-managed" -> allow pip into it.
 ENV PIP_BREAK_SYSTEM_PACKAGES=1 \
@@ -48,6 +69,8 @@ ENV PIP_BREAK_SYSTEM_PACKAGES=1 \
 # DeepEP is Hopper+ ONLY: its kernels use Hopper wgmma/TMA + IBGDA and do NOT compile for
 # sm_80, so it builds against the narrower DEEPEP_ARCH_LIST. A100 therefore runs the
 # TE/flash-attn/mamba SFT + medium-inference path, not DeepEP expert-parallel.
+# GB300 (sm_103) runs the same lists: sm_100 SASS is binary-compatible within the major, and TE
+# compiles sm_100a + sm_103a itself from "100" (a generic 103 target trips its static asserts).
 ARG SITE=/usr/local/lib/python3.12/dist-packages
 ARG ARCH_LIST="8.0 9.0 10.0"
 ARG NVTE_CUDA_ARCHS="80;90;100"
