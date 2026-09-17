@@ -16,6 +16,7 @@
 # Adapted from OpenRLHF (https://github.com/OpenRLHF/OpenRLHF),
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
+import copy
 import os
 from contextlib import ExitStack
 
@@ -94,12 +95,15 @@ class SFTTrainer:
             self._wandb = wandb
             if not wandb.api.api_key:
                 wandb.login(key=strategy.args.logger.wandb.key)
+            # The run config is uploaded and visible to everyone who can see the project: keep the key out.
+            config = copy.deepcopy(strategy.args)
+            config.logger.wandb.key = None
             wandb.init(
                 entity=strategy.args.logger.wandb.org,
                 project=strategy.args.logger.wandb.project,
                 group=strategy.args.logger.wandb.group,
                 name=strategy.args.logger.wandb.run_name,
-                config=strategy.args.__dict__,
+                config=config.__dict__,
                 reinit=True,
             )
 

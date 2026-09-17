@@ -26,3 +26,25 @@ def test_wandb_eval_metrics_use_global_step(monkeypatch):
 
     wandb.define_metric.assert_any_call("eval/global_step")
     wandb.define_metric.assert_any_call("eval/*", step_metric="eval/global_step", step_sync=True)
+
+
+def test_wandb_run_config_omits_api_key(monkeypatch):
+    wandb = SimpleNamespace(
+        api=SimpleNamespace(api_key=None),
+        login=Mock(),
+        init=Mock(),
+        define_metric=Mock(),
+        Table=Mock(return_value=SimpleNamespace(columns=[], data=[])),
+    )
+    monkeypatch.setitem(__import__("sys").modules, "wandb", wandb)
+    args = SimpleNamespace(
+        logger=SimpleNamespace(
+            wandb=SimpleNamespace(key="secret-key", org=None, project="test-project", group=None, run_name="test")
+        )
+    )
+
+    WandbLogger(args)
+
+    wandb.login.assert_called_once_with(key="secret-key")
+    assert "secret-key" not in repr(wandb.init.call_args.kwargs["config"])
+    assert args.logger.wandb.key == "secret-key"  # the caller's args are left intact
