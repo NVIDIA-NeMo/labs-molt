@@ -20,6 +20,7 @@ from typing import Optional, Union
 
 import torch
 import torch.nn as nn
+import torch.utils.checkpoint
 from torch.distributed.tensor import DTensor
 
 
@@ -115,18 +116,21 @@ def log_probs_from_logits(logits: torch.Tensor, labels: torch.Tensor, temperatur
     # [B*S, V] fp32 spike that OOMs at long sequences with large vocab models
     # like Qwen3.6 (152K vocab) when callers pass bf16 logits. Empirically a
     # 1024 chunk OOMs on 80GB H100 once optimizer+activations are loaded.
-    n_rows = flat_logits.shape[0]
-    out = torch.empty(n_rows, device=logits.device, dtype=torch.float32)
-    chunk_size = 256
-    for s_idx in range(0, n_rows, chunk_size):
-        end_idx = min(s_idx + chunk_size, n_rows)
-        chunk = flat_logits[s_idx:end_idx].float()
+    # Each chunk is recomputed in backward: autograd would otherwise keep every
+    # fp32 chunk alive until backward (8 GiB per rank at 8k tokens x 248k vocab).
+    def chunk_log_probs(chunk_logits, chunk_labels):
+        chunk = chunk_logits.float()
         if temperature != 1.0:
             chunk = chunk / temperature
-        gathered = chunk.gather(dim=-1, index=flat_labels[s_idx:end_idx].unsqueeze(-1)).squeeze(-1)
-        lse = torch.logsumexp(chunk, dim=-1)
-        out[s_idx:end_idx] = gathered - lse
-    return out.view(*batch_dim)
+        return chunk.gather(dim=-1, index=chunk_labels.unsqueeze(-1)).squeeze(-1) - torch.logsumexp(chunk, dim=-1)
+
+    chunk_size = 256
+    out = []
+    for start in range(0, flat_logits.shape[0], chunk_size):
+        chunk_logits = flat_logits[start : start + chunk_size]
+        chunk_labels = flat_labels[start : start + chunk_size]
+        out.append(torch.utils.checkpoint.checkpoint(chunk_log_probs, chunk_logits, chunk_labels, use_reentrant=False))
+    return torch.cat(out).view(*batch_dim)
 
 
 def masked_mean(tensor: torch.Tensor, mask: Optional[torch.Tensor], dim: int = None) -> torch.Tensor:
