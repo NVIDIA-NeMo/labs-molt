@@ -99,6 +99,7 @@ def test_generate_samples_returns_batch_as_rollouts_finish_and_keeps_pool_satura
     generator.args = SimpleNamespace(
         rollout=SimpleNamespace(batch_size=3, n_samples_per_prompt=1, vllm_generate_batch_size=5),
         algo=SimpleNamespace(dynamic_filtering_enable=False),
+        train=SimpleNamespace(partial_rollout_enable=True),
         ckpt=SimpleNamespace(warm_resume_rollouts=False),
         actor=SimpleNamespace(num_nodes=1, num_gpus_per_node=1),
         fsdp=SimpleNamespace(cp_size=1, tp_size=1),
@@ -191,6 +192,7 @@ def test_generate_samples_pool_persists_across_calls(monkeypatch):
     generator.args = SimpleNamespace(
         rollout=SimpleNamespace(batch_size=3, n_samples_per_prompt=1, vllm_generate_batch_size=5),
         algo=SimpleNamespace(dynamic_filtering_enable=False),
+        train=SimpleNamespace(partial_rollout_enable=True),
         ckpt=SimpleNamespace(warm_resume_rollouts=False),
         actor=SimpleNamespace(num_nodes=1, num_gpus_per_node=1),
         fsdp=SimpleNamespace(cp_size=1, tp_size=1),
@@ -326,9 +328,10 @@ def test_generate_samples_drops_filtered_groups_and_refills_their_slots(monkeypa
 
     samples, rollout_metrics, prompts_dispatched, _ = generator.generate_samples()
 
-    # p1 is dropped; p2 (refilled into p1's freed slot) completes the batch.
+    # p1 is dropped; p2 (refilled into p1's freed slot) completes the batch. Without partial rollout
+    # only the dropped group's replacement goes out, so the pool is empty when the batch ships.
     assert [sample.group_ids[0] for sample in samples] == ["p0", "p2"]
-    assert prompts_dispatched == 4  # p0,p1 up front; p2,p3 refilled one per completion
+    assert prompts_dispatched == 3  # p0,p1 up front; p2 replaces the dropped p1
     assert rollout_metrics["dynamic_filtering_pass_rate"] == 2 / 3 * 100
     # The filtered group is tallied by reason for observability.
     assert rollout_metrics["rollout/dropped/dynamic_filter"] == 1.0
@@ -519,3 +522,21 @@ def test_dispatch_spreads_each_groups_rollouts_over_runners_and_rejoins_them(mon
     # ...and all of a prompt's rollouts share one group_id that differs across prompts.
     group_ids = {prompt: {gid for p, _, gid in calls if p == prompt} for prompt in ("p0", "p1")}
     assert len(group_ids["p0"]) == 1 and len(group_ids["p1"]) == 1 and group_ids["p0"] != group_ids["p1"]
+
+
+def test_without_partial_rollout_the_pool_holds_one_batch_and_drains(monkeypatch):
+    """partial_rollout_enable off (the default): the pool never holds more rollouts than the batch still
+    needs, so nothing is in flight when the trainer refits vLLM between batches."""
+    generator = object.__new__(SamplesGenerator)
+    generator.args = SimpleNamespace(
+        rollout=SimpleNamespace(batch_size=3, n_samples_per_prompt=1, vllm_generate_batch_size=5),
+        algo=SimpleNamespace(dynamic_filtering_enable=False),
+    )
+    generator.prompts_dataloader = _prompt_loader(10)
+    _wire_fake_vllm(generator, monkeypatch, _sample)
+
+    samples, _, prompts_dispatched, _ = generator.generate_samples()
+
+    assert [sample.group_ids[0] for sample in samples] == ["p0", "p1", "p2"]
+    assert prompts_dispatched == 3  # capacity 5, but only the batch's 3 prompts go out
+    assert generator._inflight_rollouts == []  # pool drained: the refit sees no in-flight rollout
