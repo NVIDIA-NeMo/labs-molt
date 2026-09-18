@@ -51,6 +51,7 @@ def test_step_terminates_on_answer_even_with_co_emitted_tool_call(monkeypatch):
     assert result.terminated is True
     assert result.reward.item() == 1.0
     assert env.tool_call_count == 0  # did NOT run a tool after the answer was committed
+    assert result.observation.startswith("<|im_end|>\n<|im_start|>user")
 
 
 def test_step_continues_on_tool_call_without_answer(monkeypatch):
@@ -66,3 +67,20 @@ def test_step_continues_on_tool_call_without_answer(monkeypatch):
 
     assert result.terminated is False
     assert env.tool_call_count == 1
+    assert result.observation.startswith("<|im_end|>\n<|im_start|>user")
+
+
+def test_step_reuses_generated_turn_end_for_feedback(monkeypatch):
+    env = geo3k.GeoEnv()
+    monkeypatch.setattr(geo3k, "_extract_tool_call", lambda text: None)
+    monkeypatch.setattr(geo3k, "_grade_answer", lambda text, label: (1.0, "5"))
+    final = asyncio.run(env.step({"action_text": "<answer>5</answer><|im_end|>", "label": {"ground_truth": "5"}}))
+
+    env = geo3k.GeoEnv()
+    monkeypatch.setattr(
+        geo3k, "_extract_tool_call", lambda text: {"name": "python_executor", "arguments": {"code": "print(1)"}}
+    )
+    tool = asyncio.run(env.step({"action_text": "<tool_call>x</tool_call><|im_end|>", "label": {"ground_truth": "5"}}))
+
+    assert final.observation.startswith("\n<|im_start|>user")
+    assert tool.observation.startswith("\n<|im_start|>user")

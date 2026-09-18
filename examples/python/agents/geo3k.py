@@ -133,21 +133,18 @@ def _grade_answer(text: str, label) -> tuple[float, str]:
 
 
 # Qwen3.5/3.6 chat-template wrapping: tool responses live inside
-# <|im_start|>user<tool_response>...</tool_response><|im_end|>. The leading
-# <|im_end|> CLOSES the model's assistant turn: vLLM excludes the stop token from
-# the generated ids (no include_stop_str_in_output), so the action carries no
-# trailing <|im_end|>; supplying it here matches the chat-template boundary exactly
-# (...</tool_call><|im_end|>\n<|im_start|>user\n<tool_response>...) — chat_geo3k parity.
-def _tool_observation(content: str) -> str:
+# <|im_start|>user<tool_response>...</tool_response><|im_end|>. ``close`` ends
+# the assistant turn only when its generated token ids did not already do so.
+def _tool_observation(close: str, content: str) -> str:
     return (
-        "<|im_end|>\n<|im_start|>user\n"
+        f"{close}\n<|im_start|>user\n"
         f"<tool_response>\n{content}\n</tool_response><|im_end|>\n"
         "<|im_start|>assistant\n<think>\n"
     )
 
 
-def _final_observation(status: str) -> str:
-    return f"<|im_end|>\n<|im_start|>user\n{status}<|im_end|>\n"
+def _final_observation(close: str, status: str) -> str:
+    return f"{close}\n<|im_start|>user\n{status}<|im_end|>\n"
 
 
 class GeoEnv(Env):
@@ -173,6 +170,9 @@ class GeoEnv(Env):
         self.turn += 1
         self.assistant_history.append(action)
         is_last_turn = self.turn >= _MAX_TURNS
+        # vLLM keeps a matched stop token in token_ids even when excluding it from
+        # text. Add the marker only when the generated turn does not already carry it.
+        close = "" if action.endswith("<|im_end|>") else "<|im_end|>"
 
         tool_call = _extract_tool_call(action)
 
@@ -186,7 +186,7 @@ class GeoEnv(Env):
             status = "Correct." if reward.item() >= 1.0 else f"Done. Final answer: {parsed or 'none'}"
             return Result(
                 reward=reward,
-                observation=_final_observation(status),
+                observation=_final_observation(close, status),
                 terminated=True,
                 info=self._info(reward),
             )
@@ -202,7 +202,7 @@ class GeoEnv(Env):
         )
 
         reward, _ = self._final_reward(label) if is_last_turn else (torch.tensor(0.0), "")
-        feedback = _final_observation(obs_text) if is_last_turn else _tool_observation(obs_text)
+        feedback = _final_observation(close, obs_text) if is_last_turn else _tool_observation(close, obs_text)
         return Result(
             reward=reward,
             observation=feedback,
