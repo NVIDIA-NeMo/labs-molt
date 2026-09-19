@@ -18,6 +18,7 @@
 
 import inspect
 import os
+import sys
 from contextlib import nullcontext
 from importlib.util import find_spec
 from pathlib import Path
@@ -71,7 +72,14 @@ def _has_hf_flash_attn_2() -> bool:
         return find_spec("flash_attn") is not None
 
 
-_HF_ATTN_IMPLEMENTATIONS = {"eager", "sdpa", "flash_attention_2", "flash_attention_3", "te"}
+_HF_ATTN_IMPLEMENTATIONS = {
+    "eager",
+    "sdpa",
+    "flash_attention_2",
+    "flash_attention_3",
+    "flash_attention_4",
+    "te",
+}
 # "tilelang" drives AutoModel's DSA (DeepSeek-style sparse attention) TileLang
 # kernels — the indexer + sparse MLA path for glm_moe_dsa / deepseek_v3.2.
 _CUSTOM_ATTN_IMPLEMENTATIONS = {"te", "sdpa", "flex", "tilelang"}
@@ -84,6 +92,322 @@ def _validate_attn_implementation(attn_implementation: str) -> None:
         raise ValueError(f"Unsupported attention implementation {attn_implementation!r}; choose one of: {choices}")
     if attn_implementation == "te" and find_spec("transformer_engine") is None:
         raise ValueError("--fsdp.attn_implementation te requires transformer-engine to be installed.")
+
+
+class _VllmBatchInvariantLinear(torch.autograd.Function):
+    """Use vLLM's BI forward kernel without losing the linear gradient path."""
+
+    @staticmethod
+    def forward(
+        ctx: torch.autograd.function.FunctionCtx,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        bias: torch.Tensor | None,
+    ) -> torch.Tensor:
+        ctx.has_bias = bias is not None
+        ctx.save_for_backward(x, weight, *(bias,) if bias is not None else ())
+        if os.environ.get("MOLT_AUTOMODEL_USE_CUBLAS_LINEAR") == "1":
+            return torch.nn.functional.linear(x, weight, bias)
+        from vllm.model_executor.determinism.batch_invariant import linear_batch_invariant
+
+        return linear_batch_invariant(x, weight, bias)
+
+    @staticmethod
+    def backward(
+        ctx: torch.autograd.function.FunctionCtx, grad_output: torch.Tensor
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        saved = ctx.saved_tensors
+        x, weight = saved[:2]
+        bias = saved[2] if ctx.has_bias else None
+        flat_grad = grad_output.reshape(-1, grad_output.shape[-1])
+        flat_x = x.reshape(-1, x.shape[-1])
+        grad_x = flat_grad.matmul(weight).reshape_as(x)
+        grad_weight = flat_grad.t().matmul(flat_x)
+        grad_bias = flat_grad.sum(0) if bias is not None else None
+        return (
+            grad_x if x.requires_grad else None,
+            grad_weight if weight.requires_grad else None,
+            grad_bias if bias is not None and bias.requires_grad else None,
+        )
+
+
+def _enable_qwen_fused_qkv_projection(model: nn.Module) -> None:
+    """Make Qwen AutoModel's three QKV projections use vLLM's BI linear path."""
+    def make_forwards(
+        q_proj: nn.Linear, k_proj: nn.Linear, v_proj: nn.Linear
+    ) -> tuple:
+        pending: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+
+        def q_forward(hidden_states: torch.Tensor) -> torch.Tensor:
+            if pending:
+                raise RuntimeError("Nested Qwen fused-QKV projection is unsupported.")
+            weight = torch.cat((q_proj.weight, k_proj.weight, v_proj.weight), dim=0)
+            bias = None
+            if q_proj.bias is not None:
+                if k_proj.bias is None or v_proj.bias is None:
+                    raise RuntimeError("Qwen QKV bias configuration must be uniform.")
+                bias = torch.cat((q_proj.bias, k_proj.bias, v_proj.bias), dim=0)
+            qkv = _VllmBatchInvariantLinear.apply(hidden_states, weight, bias)
+            q, k, v = qkv.split(
+                (q_proj.out_features, k_proj.out_features, v_proj.out_features), dim=-1
+            )
+            pending.append((q, k, v))
+            return q
+
+        def k_forward(_hidden_states: torch.Tensor) -> torch.Tensor:
+            if not pending:
+                raise RuntimeError("Qwen fused-QKV K projection called before Q projection.")
+            return pending[-1][1]
+
+        def v_forward(_hidden_states: torch.Tensor) -> torch.Tensor:
+            if not pending:
+                raise RuntimeError("Qwen fused-QKV V projection called before Q projection.")
+            return pending.pop()[2]
+
+        return q_forward, k_forward, v_forward
+
+    patched = 0
+    for module in model.modules():
+        if not all(hasattr(module, name) for name in ("q_proj", "k_proj", "v_proj")):
+            continue
+        q_proj = module.q_proj
+        k_proj = module.k_proj
+        v_proj = module.v_proj
+        if not all(isinstance(proj, nn.Linear) for proj in (q_proj, k_proj, v_proj)):
+            continue
+
+        q_forward, k_forward, v_forward = make_forwards(q_proj, k_proj, v_proj)
+        q_proj.forward = q_forward
+        k_proj.forward = k_forward
+        v_proj.forward = v_forward
+        patched += 1
+
+    if patched == 0:
+        raise ValueError("MOLT_AUTOMODEL_FUSE_QKV=1 found no Qwen-style attention modules.")
+    print(f"[Alignment] enabled fused deterministic QKV projection in {patched} layers.")
+
+
+def _enable_qwen_vllm_rope(model: nn.Module) -> None:
+    """Run AutoModel Qwen RoPE through vLLM's differentiable CUDA operator."""
+    import importlib
+
+    from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
+
+    attention_modules: dict[object, int] = {}
+    for module in model.modules():
+        if not all(hasattr(module, name) for name in ("q_proj", "k_proj", "v_proj", "head_dim")):
+            continue
+        source = importlib.import_module(type(module).__module__)
+        if not hasattr(source, "apply_rotary_pos_emb"):
+            continue
+        attention_modules[source] = attention_modules.get(source, 0) + 1
+
+    patched = 0
+    for source, count in attention_modules.items():
+        def apply_rotary(q, k, cos, sin):
+            batch_size, num_heads, seq_len, head_dim = q.shape
+            rotary_dim = cos.shape[-1]
+            if rotary_dim != head_dim:
+                raise ValueError(f"Qwen vLLM RoPE expects full rotation, got {rotary_dim=} {head_dim=}.")
+            cos = cos[..., : rotary_dim // 2].reshape(-1, rotary_dim // 2)
+            sin = sin[..., : rotary_dim // 2].reshape(-1, rotary_dim // 2)
+            q_flat = q.transpose(1, 2).reshape(1, -1, num_heads, head_dim)
+            k_flat = k.transpose(1, 2).reshape(1, -1, k.shape[1], head_dim)
+            q_flat = apply_rotary_emb(q_flat, cos, sin)
+            k_flat = apply_rotary_emb(k_flat, cos, sin)
+            return (
+                q_flat.reshape(batch_size, seq_len, num_heads, head_dim).transpose(1, 2),
+                k_flat.reshape(batch_size, seq_len, k.shape[1], head_dim).transpose(1, 2),
+            )
+
+        source.apply_rotary_pos_emb = apply_rotary
+        patched += count
+
+    if patched == 0:
+        raise ValueError("MOLT_AUTOMODEL_USE_VLLM_ROPE=1 found no Qwen-style attention modules.")
+    print(f"[Alignment] enabled vLLM CUDA RoPE in {patched} AutoModel Qwen layers.")
+
+
+class _VllmFA2Forward(torch.autograd.Function):
+    """Keep vLLM FA2 rounding in forward and use flash-attn for its VJP."""
+
+    @staticmethod
+    def forward(ctx, q, k, v, cu_seqlens, max_seqlen, scale):
+        from vllm.vllm_flash_attn import flash_attn_varlen_func
+
+        ctx.save_for_backward(q, k, v, cu_seqlens)
+        ctx.max_seqlen, ctx.scale = max_seqlen, scale
+        return flash_attn_varlen_func(
+            q,
+            k,
+            v,
+            max_seqlen,
+            cu_seqlens,
+            max_seqlen,
+            cu_seqlens,
+            softmax_scale=scale,
+            causal=True,
+            fa_version=2,
+            num_splits=1,
+        )
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        from flash_attn import flash_attn_varlen_func
+
+        with torch.enable_grad():
+            tensors = tuple(
+                x.detach().requires_grad_(need)
+                for x, need in zip(ctx.saved_tensors[:3], ctx.needs_input_grad[:3], strict=True)
+            )
+            active = tuple(x for x in tensors if x.requires_grad)
+            output = flash_attn_varlen_func(
+                *tensors,
+                ctx.saved_tensors[3],
+                ctx.saved_tensors[3],
+                ctx.max_seqlen,
+                ctx.max_seqlen,
+                softmax_scale=ctx.scale,
+                causal=True,
+            )
+            grads = iter(torch.autograd.grad(output, active, grad_output))
+        return (
+            *(next(grads) if x.requires_grad else None for x in tensors),
+            None,
+            None,
+            None,
+        )
+
+
+def _enable_qwen_vllm_fa2(model: nn.Module) -> None:
+    """Use vLLM's FA2 forward for the dense Qwen training actor."""
+    from flash_attn.bert_padding import pad_input, unpad_input
+    from transformers.modeling_flash_attention_utils import _upad_input
+    from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
+
+    def attention(
+        module,
+        query,
+        key,
+        value,
+        attention_mask,
+        dropout=0.0,
+        scaling=None,
+        sliding_window=None,
+        **kwargs,
+    ):
+        if dropout or sliding_window is not None or kwargs.get("s_aux") is not None:
+            raise ValueError("MOLT vLLM FA2 alignment supports only causal Qwen attention.")
+        q, k, v = (x.transpose(1, 2) for x in (query, key, value))
+        if attention_mask is None:
+            batch, length = q.shape[:2]
+            cu_seqlens = torch.arange(
+                0,
+                (batch + 1) * length,
+                length,
+                device=q.device,
+                dtype=torch.int32,
+            )
+            output = _VllmFA2Forward.apply(
+                q.flatten(0, 1),
+                k.flatten(0, 1),
+                v.flatten(0, 1),
+                cu_seqlens,
+                length,
+                scaling,
+            )
+            return output.view_as(q), None
+        q, k, v, indices, (cu_q, cu_k), (max_q, max_k) = _upad_input(
+            q, k, v, attention_mask, q.shape[1], unpad_input
+        )
+        if max_q != max_k or not torch.equal(cu_q, cu_k):
+            raise ValueError("MOLT vLLM FA2 alignment does not support cached Qwen training attention.")
+        output = _VllmFA2Forward.apply(q, k, v, cu_q, max_q, scaling)
+        return pad_input(output, indices, query.shape[0], query.shape[2]), None
+
+    ALL_ATTENTION_FUNCTIONS.register("molt_vllm_fa2", attention)
+    patched = 0
+    for module in model.modules():
+        if all(hasattr(module, name) for name in ("q_proj", "k_proj", "v_proj", "config")):
+            module.config._attn_implementation_internal = "molt_vllm_fa2"
+            patched += 1
+    if patched == 0:
+        raise ValueError("MOLT_AUTOMODEL_USE_VLLM_FA2=1 found no Qwen attention modules.")
+    print(f"[Alignment] enabled vLLM FA2 forward in {patched} AutoModel Qwen modules.")
+
+
+class _VllmBatchInvariantRMSNorm(torch.autograd.Function):
+    """Use vLLM's fixed-reduction forward with AutoModel's RMSNorm backward."""
+
+    @staticmethod
+    def forward(
+        ctx: torch.autograd.function.FunctionCtx,
+        x: torch.Tensor,
+        weight: torch.Tensor,
+        eps: float,
+    ) -> torch.Tensor:
+        from vllm.model_executor.determinism.batch_invariant import (
+            rms_norm_batch_invariant,
+        )
+
+        ctx.save_for_backward(x, weight)
+        ctx.eps = eps
+        return rms_norm_batch_invariant(x, weight, eps)
+
+    @staticmethod
+    def backward(
+        ctx: torch.autograd.function.FunctionCtx, grad_output: torch.Tensor
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, None]:
+        x, weight = ctx.saved_tensors
+        x_f32 = x.float()
+        weight_f32 = weight.float()
+        grad_f32 = grad_output.float()
+        inv_rms = torch.rsqrt((x_f32 * x_f32).mean(-1, keepdim=True) + ctx.eps)
+        normalized = x_f32 * inv_rms
+        grad_weight = (grad_f32 * normalized).sum_to_size(weight.shape)
+        weighted_grad = grad_f32 * weight_f32
+        grad_x = inv_rms * (
+            weighted_grad
+            - normalized * (weighted_grad * normalized).mean(-1, keepdim=True)
+        )
+        return (
+            grad_x.to(x.dtype) if x.requires_grad else None,
+            grad_weight.to(weight.dtype) if weight.requires_grad else None,
+            None,
+        )
+
+
+def _enable_qwen_vllm_rms_norm(model: nn.Module) -> None:
+    """Align Qwen AutoModel RMSNorm forward arithmetic with vLLM BI."""
+    from nemo_automodel.components.models.common.utils import Float32RMSNorm
+
+    patched = 0
+    for module in model.modules():
+        if not isinstance(module, Float32RMSNorm):
+            continue
+
+        def forward(x: torch.Tensor, module: Float32RMSNorm = module) -> torch.Tensor:
+            return _VllmBatchInvariantRMSNorm.apply(x, module.weight, module.eps)
+
+        module.forward = forward
+        patched += 1
+
+    if patched == 0:
+        raise ValueError("MOLT_AUTOMODEL_USE_VLLM_BI_RMSNORM=1 found no Float32RMSNorm modules.")
+    print(f"[Alignment] enabled vLLM BI RMSNorm forward in {patched} AutoModel Qwen modules.")
+
+
+def _enable_qwen_vllm_lm_head(model: nn.Module) -> None:
+    """Run the AutoModel Qwen output projection through vLLM's BI linear path."""
+    lm_head = getattr(model, "lm_head", None)
+    if not isinstance(lm_head, nn.Linear):
+        raise ValueError("MOLT_AUTOMODEL_USE_VLLM_BI_LM_HEAD=1 requires an nn.Linear lm_head.")
+
+    def forward(x: torch.Tensor) -> torch.Tensor:
+        return _VllmBatchInvariantLinear.apply(x, lm_head.weight, lm_head.bias)
+
+    lm_head.forward = forward
+    print("[Alignment] enabled vLLM BI LM-head projection in AutoModel Qwen.")
 
 
 def _resolve_custom_backend_attn(attn_implementation: str, packing_samples: bool) -> str:
@@ -125,7 +449,7 @@ def _will_use_hf_model(pretrain_or_model, default: bool = True) -> bool:
         from transformers import AutoConfig
 
         cfg = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True)
-        return get_is_hf_model(cfg, force_hf=False)
+        return get_is_hf_model(cfg, force_hf=os.environ.get("MOLT_FORCE_HF_MODEL") == "1")
     except Exception:
         return default
 
@@ -409,10 +733,27 @@ class BaseModel(nn.Module):
             # rollout-vs-train logprobs diverge and vllm_kl climbs. Matches slime/verl.
             # Override: MOLT_GATE_PRECISION.
             backend_cfg["gate_precision"] = os.environ.get("MOLT_GATE_PRECISION", "float32")
-            attn_for_from_pretrained = "sdpa"
+            if os.environ.get("MOLT_AUTOMODEL_USE_VLLM_FA4") == "1":
+                if attn_implementation != "flash_attention_4":
+                    raise ValueError("MOLT_AUTOMODEL_USE_VLLM_FA4=1 requires flash_attention_4.")
+                from vllm.vllm_flash_attn import cute as vllm_fa4
+                from transformers.modeling_flash_attention_utils import (
+                    FLASH_ATTENTION_COMPATIBILITY_MATRIX,
+                )
+
+                sys.modules["flash_attn.cute"] = vllm_fa4
+                FLASH_ATTENTION_COMPATIBILITY_MATRIX[4]["general_availability_check"] = (
+                    torch.cuda.is_available
+                )
+                attn_for_from_pretrained = attn_implementation
+            else:
+                attn_for_from_pretrained = "sdpa"
             backend_kwarg = {"backend": BackendConfig(**backend_cfg)}
             if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-                print(f"[Attn] AutoModel custom backend={backend_attn}; config attn_implementation=sdpa.")
+                print(
+                    f"[Attn] AutoModel custom backend={backend_attn}; "
+                    f"config attn_implementation={attn_for_from_pretrained}."
+                )
 
         # AutoModel bundles device_mesh/moe_mesh/distributed_config/moe_config/AC into
         # a single DistributedSetup; wrap our pre-built meshes via MeshContext.from_meshes.
@@ -445,6 +786,16 @@ class BaseModel(nn.Module):
             **backend_kwarg,
         )
         self.model = move_model_to_cpu_for_offload(self.model, distributed_config)
+        if os.environ.get("MOLT_AUTOMODEL_FUSE_QKV") == "1":
+            _enable_qwen_fused_qkv_projection(self.model)
+        if os.environ.get("MOLT_AUTOMODEL_USE_VLLM_ROPE") == "1":
+            _enable_qwen_vllm_rope(self.model)
+        if os.environ.get("MOLT_AUTOMODEL_USE_VLLM_FA2") == "1":
+            _enable_qwen_vllm_fa2(self.model)
+        if os.environ.get("MOLT_AUTOMODEL_USE_VLLM_BI_RMSNORM") == "1":
+            _enable_qwen_vllm_rms_norm(self.model)
+        if os.environ.get("MOLT_AUTOMODEL_USE_VLLM_BI_LM_HEAD") == "1":
+            _enable_qwen_vllm_lm_head(self.model)
         # from_pretrained may downgrade to HF even when custom was requested;
         # re-derive from the loaded class so the forward picks the right pack style.
         self._packing_style = "automodel" if is_automodel_custom_model(self.model) else "hf"

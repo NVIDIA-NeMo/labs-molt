@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import copy
 import os
 import statistics
 import time
@@ -606,11 +607,14 @@ class GenerateSamplesActor:
         vllm_lock,
         rollout_queue,
         rollout_slots,
+        vllm_engines=None,
         router_url=None,
         **generate_kwargs,
     ):
-        # No vllm_engines here: generation runs through the vllm-router via the runner
-        # actors below; only the TrainingActor touches the engines (pause/refit/resume).
+        # Generation goes through the vllm-router via the runner actors below. The
+        # engine handles are normally used only by TrainingActor; the trace-only
+        # path passes them through so its hook can be armed immediately before the
+        # first real router request, rather than during model initialization.
         self.args = strategy.args
 
         tokenizer = get_tokenizer(pretrain, None, "left", use_fast=not strategy.args.data.disable_fast_tokenizer)
@@ -645,6 +649,7 @@ class GenerateSamplesActor:
             eval_dataloader=self.eval_dataloader,
             tokenizer=tokenizer,
             agent_runners=agent_runners,
+            vllm_engines=vllm_engines,
         )
 
         self.vllm_lock = vllm_lock
@@ -771,6 +776,20 @@ class GenerateSamplesActor:
                             self.samples_generator.generate_samples(**self.generate_kwargs)
                         )
                         generation_time = time.time() - t0
+                        action_tokens = sum(
+                            int(sample.response_length.sum().item())
+                            for sample in rollout_samples or []
+                            if sample.response_length is not None
+                        )
+                        logger.info(
+                            "[rollout_perf] step=%d samples=%d action_tokens=%d "
+                            "generation_s=%.6f action_tokens_per_s=%.3f",
+                            global_step,
+                            len(rollout_samples or []),
+                            action_tokens,
+                            generation_time,
+                            action_tokens / generation_time if generation_time else 0.0,
+                        )
                         total_consumed_prompts += prompts_consumed
                     finally:
                         if not self._partial_rollout:
@@ -778,7 +797,8 @@ class GenerateSamplesActor:
                     if self.args.train.rollout_dump_dir and rollout_samples:
                         os.makedirs(self.args.train.rollout_dump_dir, exist_ok=True)
                         dump_path = os.path.join(self.args.train.rollout_dump_dir, f"rollout_step{global_step}.pt")
-                        torch.save(rollout_samples, dump_path)
+                        dump_samples = [copy.copy(sample).reload() for sample in rollout_samples]
+                        torch.save(dump_samples, dump_path)
                         logger.info(f"[rollout_dump] wrote {len(rollout_samples)} samples to {dump_path}")
 
                 if rollout_samples:
@@ -987,6 +1007,7 @@ class RLTrainer:
             vllm_lock=vllm_lock,
             rollout_queue=self.rollout_queue,
             rollout_slots=self.rollout_slots,
+            vllm_engines=vllm_engines,
             router_url=router_url,
             **generate_kwargs,
         )

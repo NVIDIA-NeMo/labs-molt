@@ -18,6 +18,7 @@
 
 import argparse
 import copy
+import json
 import os
 
 from molt.trainer.algorithm.experience import get_model_parallel_size
@@ -105,6 +106,9 @@ def train(args):
             enable_chunked_prefill=args.vllm.enable_chunked_prefill,
             max_num_batched_tokens=args.vllm.max_num_batched_tokens,
             async_scheduling=args.vllm.async_scheduling,
+            compilation_config=vars(args.vllm.compilation_config)
+            if args.vllm.compilation_config
+            else None,
             decode_context_parallel_size=args.vllm.decode_context_parallel_size,
             dtype=args.vllm.dtype,
             block_size=args.vllm.block_size,
@@ -739,6 +743,12 @@ if __name__ == "__main__":
         action=argparse.BooleanOptionalAction,
         default=None,
         help="vLLM async scheduling (default: vLLM auto — True for mp/uniproc executors with no spec-decode).",
+    )
+    parser.add_argument(
+        "--vllm.compilation_config",
+        type=json.loads,
+        default=None,
+        help="JSON object forwarded to vLLM CompilationConfig.",
     )
     parser.add_argument(
         "--vllm.decode_context_parallel_size",

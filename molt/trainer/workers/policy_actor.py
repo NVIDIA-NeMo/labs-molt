@@ -421,19 +421,35 @@ class PolicyTrainer:
         # needed to diagnose rollout-vs-actor logprob misalignment (e.g. a one-token
         # shift shows up as actor_logp[i] ~ vllm_logp[i+1]).
         dump_path = os.environ.get("MOLT_DUMP_ROLLOUT_LOGPROBS")
-        if dump_path and rollout_log_probs is not None and not getattr(self, "_rollout_logprob_dumped", False):
+        dump_at_optimizer_step = os.environ.get("MOLT_DUMP_ROLLOUT_LOGPROBS_EVERY_OPTIMIZER_STEP") == "1"
+        should_dump = (
+            is_optimizer_step if dump_at_optimizer_step else not getattr(self, "_rollout_logprob_dumped", False)
+        )
+        if dump_path and rollout_log_probs is not None and should_dump:
             self._rollout_logprob_dumped = True
+            valid = action_mask.bool()
+            rollout_valid = rollout_log_probs[valid]
+            actor_valid = action_log_probs.detach()[valid]
+            delta = (rollout_valid.float() - actor_valid.float()).abs()
+            logger.info(
+                "MOLT_DUMP_ROLLOUT_LOGPROBS: rank=%s tokens=%s exact=%s max_abs=%g",
+                torch.distributed.get_rank(),
+                delta.numel(),
+                torch.equal(rollout_valid, actor_valid),
+                delta.max().item() if delta.numel() else 0.0,
+            )
             if torch.distributed.get_rank() == 0:
+                response_token_ids = sequences[0, -action_mask.shape[1] :]
                 with open(dump_path, "w") as f:
                     f.write("pos\ttoken_id\tvllm_logp\tactor_logp\tmask\n")
                     rows = zip(
-                        sequences[0, 1:].tolist(),
+                        response_token_ids.tolist(),
                         rollout_log_probs[0].float().tolist(),
                         action_log_probs[0].detach().float().tolist(),
                         action_mask[0].long().tolist(),
                     )
                     for j, (t, v, a, m) in enumerate(rows):
-                        f.write(f"{j}\t{t}\t{v:.6f}\t{a:.6f}\t{m}\n")
+                        f.write(f"{j}\t{t}\t{v:.9g}\t{a:.9g}\t{m}\n")
                 logger.info(f"MOLT_DUMP_ROLLOUT_LOGPROBS: wrote token-level logprob dump to {dump_path}")
 
         # Stage 3: compute policy loss and metric-only policy diagnostics.
@@ -752,6 +768,190 @@ class PolicyTrainer:
 
 @ray.remote(num_gpus=1)
 class PolicyModelActor(BaseModelActor):
+    def _arm_alignment_trace(self, trace_dir: str):
+        """Save one actor forward's sequence-start hidden states for parity debugging."""
+        model = self.actor.model
+        backbone = getattr(model, "model", model)
+        layers = list(getattr(backbone, "layers", ()))
+        if not layers:
+            raise RuntimeError("alignment trace requires a decoder model with model.layers")
+        trace_layer = int(os.environ.get("MOLT_ALIGNMENT_TRACE_LAYER", "0"))
+        trace_offset = int(os.environ.get("MOLT_ALIGNMENT_TRACE_TOKEN_OFFSET", "0"))
+        prefix_length = max(
+            64,
+            trace_offset + 1,
+            int(os.environ.get("MOLT_ALIGNMENT_TRACE_PREFIX_LENGTH", "0")),
+        )
+        trace_logits = os.environ.get("MOLT_ALIGNMENT_TRACE_LOGITS") == "1"
+        full_prefix_stages = {
+            name
+            for name in os.environ.get(
+                "MOLT_ALIGNMENT_TRACE_FULL_PREFIX_STAGES", ""
+            ).split(",")
+            if name
+        }
+        if not 0 <= trace_layer < len(layers):
+            raise ValueError(f"invalid MOLT_ALIGNMENT_TRACE_LAYER={trace_layer}")
+        if trace_offset < 0:
+            raise ValueError(f"invalid MOLT_ALIGNMENT_TRACE_TOKEN_OFFSET={trace_offset}")
+
+        os.makedirs(trace_dir, exist_ok=True)
+        state = {"input_ids": None, "layers": {}, "stages": {}, "handles": []}
+
+        def finalize_trace():
+            if state.get("saved") or state["input_ids"] is None:
+                return
+            input_ids = state["input_ids"]
+            prefixes = [
+                input_ids[batch, pos : pos + prefix_length].detach().cpu()
+                for batch, pos in state["prefix_starts"].tolist()
+            ]
+            torch.save(
+                {"prefixes": prefixes, "layers": state["layers"], "stages": state["stages"]},
+                os.path.join(trace_dir, f"actor-rank{torch.distributed.get_rank()}.pt"),
+            )
+            state["saved"] = True
+            for handle in state["handles"]:
+                handle.remove()
+            state["handles"].clear()
+            traced_layer.self_attn.forward = state["original_attention_forward"]
+            state["rope_module"].apply_rotary_pos_emb = state["original_rope"]
+
+        def capture_value(name, value):
+            if state["input_ids"] is None:
+                return
+            if isinstance(value, tuple):
+                value = value[0]
+            if not isinstance(value, torch.Tensor) or value.ndim != 3:
+                return
+            if name in full_prefix_stages:
+                prefixes = [
+                    value[batch, pos : pos + prefix_length]
+                    for batch, pos in state["prefix_starts"].tolist()
+                ]
+                state["stages"][name] = torch.stack(prefixes).detach().cpu()
+            else:
+                starts = state["starts"]
+                state["stages"][name] = value[starts[:, 0], starts[:, 1]].detach().cpu()
+
+        def capture_attention_value(name, value):
+            if state["input_ids"] is None or not isinstance(value, torch.Tensor) or value.ndim != 4:
+                return
+            if name in full_prefix_stages:
+                prefixes = [
+                    value[batch, :, pos : pos + prefix_length, :].transpose(0, 1).flatten(1)
+                    for batch, pos in state["prefix_starts"].tolist()
+                ]
+                state["stages"][name] = torch.stack(prefixes).detach().cpu()
+            else:
+                starts = state["starts"]
+                state["stages"][name] = (
+                    value[starts[:, 0], :, starts[:, 1], :].flatten(1).detach().cpu()
+                )
+
+        def capture_inputs(_, args, kwargs):
+            if state["input_ids"] is not None:
+                return
+            input_ids = kwargs.get("input_ids")
+            position_ids = kwargs.get("position_ids")
+            if input_ids is None or position_ids is None or input_ids.ndim != 2:
+                return
+            prefix_starts = position_ids.eq(0).nonzero(as_tuple=False)
+            starts = prefix_starts.clone()
+            starts[:, 1] += trace_offset
+            valid = starts[:, 1] < input_ids.shape[1]
+            starts = starts[valid]
+            prefix_starts = prefix_starts[valid]
+            if not len(starts):
+                return
+            state["input_ids"] = input_ids.detach()
+            state["starts"] = starts
+            state["prefix_starts"] = prefix_starts
+
+        def capture_layer(index):
+            def hook(_, __, output):
+                if state["input_ids"] is None or output.ndim != 3:
+                    return
+                starts = state["starts"]
+                state["layers"][index] = output[starts[:, 0], starts[:, 1]].detach().cpu()
+                if index != len(layers) - 1 or trace_logits:
+                    return
+                finalize_trace()
+
+            return hook
+
+        state["handles"].append(backbone.register_forward_pre_hook(capture_inputs, with_kwargs=True))
+        state["handles"].extend(layer.register_forward_hook(capture_layer(i)) for i, layer in enumerate(layers))
+        traced_layer = layers[trace_layer]
+        import importlib
+
+        rope_module = importlib.import_module(type(traced_layer.self_attn).__module__)
+        state["rope_module"] = rope_module
+        state["original_rope"] = rope_module.apply_rotary_pos_emb
+        state["original_attention_forward"] = traced_layer.self_attn.forward
+
+        def trace_rope(*args, **kwargs):
+            output = state["original_rope"](*args, **kwargs)
+            if state.get("in_traced_attention"):
+                capture_attention_value("q_post_rope", output[0])
+                capture_attention_value("k_post_rope", output[1])
+            return output
+
+        def traced_attention_forward(*args, **kwargs):
+            state["in_traced_attention"] = True
+            try:
+                position_embeddings = kwargs.get("position_embeddings")
+                if position_embeddings is not None:
+                    capture_value("rope_cos", position_embeddings[0])
+                    capture_value("rope_sin", position_embeddings[1])
+                return state["original_attention_forward"](*args, **kwargs)
+            finally:
+                state["in_traced_attention"] = False
+
+        rope_module.apply_rotary_pos_emb = trace_rope
+        traced_layer.self_attn.forward = traced_attention_forward
+        state["handles"].append(
+            traced_layer.register_forward_pre_hook(lambda _, args: capture_value("input", args[0]))
+        )
+        state["handles"].append(
+            traced_layer.input_layernorm.register_forward_pre_hook(
+                lambda _, args: capture_value("pre_norm1", args[0])
+            )
+        )
+        for name, module in (
+            ("norm1", traced_layer.input_layernorm),
+            ("attn", traced_layer.self_attn),
+            ("norm2", traced_layer.post_attention_layernorm),
+            ("mlp", traced_layer.mlp),
+        ):
+            state["handles"].append(module.register_forward_hook(lambda _, __, output, name=name: capture_value(name, output)))
+        for name, module in (
+            ("q_raw", traced_layer.self_attn.q_proj),
+            ("k_raw", traced_layer.self_attn.k_proj),
+            ("v_raw", traced_layer.self_attn.v_proj),
+            ("gate_raw", traced_layer.mlp.gate_proj),
+            ("up_raw", traced_layer.mlp.up_proj),
+        ):
+            state["handles"].append(module.register_forward_hook(lambda _, __, output, name=name: capture_value(name, output)))
+        state["handles"].append(
+            traced_layer.self_attn.o_proj.register_forward_pre_hook(
+                lambda _, args: capture_value("attn_pre_o_proj", args[0])
+            )
+        )
+        if trace_logits:
+            def capture_final_norm(_, __, output):
+                capture_value("final_norm", output)
+                finalize_trace()
+
+            state["handles"].append(backbone.norm.register_forward_hook(capture_final_norm))
+        logger.info(
+            "[alignment_trace] armed actor rank=%s layer=%s offset=%s path=%s",
+            torch.distributed.get_rank(),
+            trace_layer,
+            trace_offset,
+            trace_dir,
+        )
+
     def init_model_from_pretrained(self, strategy: FsdpStrategy, pretrain, max_steps=None, vllm_engines=None):
         args = strategy.args
         self.save_hf_ckpt = args.ckpt.save_hf
@@ -843,6 +1043,9 @@ class PolicyModelActor(BaseModelActor):
             tokenizer=self.tokenizer,
             vllm_engines=self.vllm_engines,
         )
+        trace_dir = os.environ.get("MOLT_ALIGNMENT_TRACE_DIR")
+        if trace_dir:
+            self._arm_alignment_trace(trace_dir)
 
     def fit(self, kl_ctl: float = 0, train: bool = True):
         """Train actor model with the replay buffer.
