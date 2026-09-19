@@ -110,7 +110,9 @@ class RolloutRayActor:
             worker_num_gpus=kwargs.pop("worker_num_gpus", _vllm_worker_num_gpus(backend, num_gpus)),
         )
         self._configure_vllm_env(kwargs.pop("full_determinism", False))
+        from molt.trainer.vllm.bi_compat import install_rollout_perf_overrides
 
+        install_rollout_perf_overrides()
         self.kwargs = kwargs
 
         engine_args = vllm.AsyncEngineArgs(*args, **_filter_vllm_engine_kwargs(self.kwargs))
@@ -300,6 +302,7 @@ def create_vllm_engines(
     enable_chunked_prefill: Optional[bool] = None,
     max_num_batched_tokens: Optional[int] = None,
     async_scheduling: Optional[bool] = None,
+    compilation_config: Optional[dict] = None,
     decode_context_parallel_size: int = 1,
     dtype: str = "bfloat16",
     block_size: Optional[int] = None,
@@ -450,6 +453,8 @@ def create_vllm_engines(
             actor_kwargs["max_num_batched_tokens"] = max_num_batched_tokens
         if async_scheduling is not None:
             actor_kwargs["async_scheduling"] = async_scheduling
+        if compilation_config is not None:
+            actor_kwargs["compilation_config"] = compilation_config
 
         if mm_encoder_attn_backend:
             actor_kwargs["mm_encoder_attn_backend"] = mm_encoder_attn_backend
