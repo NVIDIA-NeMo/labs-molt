@@ -98,6 +98,8 @@ class _VllmBatchInvariantLinear(torch.autograd.Function):
     ) -> torch.Tensor:
         ctx.has_bias = bias is not None
         ctx.save_for_backward(x, weight, *(bias,) if bias is not None else ())
+        if os.environ.get("MOLT_AUTOMODEL_USE_CUBLAS_LINEAR") == "1":
+            return torch.nn.functional.linear(x, weight, bias)
         from vllm.model_executor.determinism.batch_invariant import linear_batch_invariant
 
         return linear_batch_invariant(x, weight, bias)

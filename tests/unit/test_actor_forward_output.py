@@ -101,6 +101,30 @@ def test_fused_projections_preserve_parameters_and_gradients(monkeypatch, names)
             torch.testing.assert_close(p.grad, q.grad)
 
 
+def test_bi_linear_can_match_the_cublas_rollout_path(monkeypatch):
+    """The opt-in actor path must use the same dense linear operation as rollout."""
+    from molt.models.base import _VllmBatchInvariantLinear
+
+    def unexpected_bi_linear(*args):
+        raise AssertionError("the BI Triton linear path must be bypassed")
+
+    monkeypatch.setenv("MOLT_AUTOMODEL_USE_CUBLAS_LINEAR", "1")
+    monkeypatch.setitem(
+        sys.modules,
+        "vllm.model_executor.determinism.batch_invariant",
+        SimpleNamespace(linear_batch_invariant=unexpected_bi_linear),
+    )
+    x = torch.randn(2, 4, requires_grad=True)
+    weight = torch.randn(3, 4, requires_grad=True)
+    bias = torch.randn(3, requires_grad=True)
+    output = _VllmBatchInvariantLinear.apply(x, weight, bias)
+    torch.testing.assert_close(output, torch.nn.functional.linear(x, weight, bias))
+    output.sum().backward()
+    assert x.grad is not None
+    assert weight.grad is not None
+    assert bias.grad is not None
+
+
 @pytest.mark.parametrize("with_residual", [False, True])
 def test_aligned_rmsnorm_preserves_inputs_and_residual_gradient(monkeypatch, with_residual):
     """The fused branch mutates its copies and propagates gradients through both outputs."""

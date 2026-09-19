@@ -94,7 +94,53 @@ def _install_qwen2_first_layer_inline_patch():
     GPUModelRunner._molt_first_layer_inline_patch = True
 
 
+def _install_vllm_cuda_rope_patch():
+    """Use vLLM's native RoPE kernel for full-dimension static rotation."""
+    import os
+
+    if (
+        os.environ.get("MOLT_USE_VLLM_CUDA_ROPE") != "1"
+        and os.environ.get("MOLT_ALIGNMENT_VLLM_CUDA_ROPE") != "1"
+    ):
+        return
+
+    from vllm import _custom_ops as ops
+    from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
+
+    if getattr(RotaryEmbedding, "_molt_cuda_static_rope", False):
+        return
+    original_forward_static = RotaryEmbedding.forward_static
+
+    def forward_static(
+        positions, query, key, head_size, rotary_dim, cos_sin_cache, is_neox_style
+    ):
+        if rotary_dim != head_size:
+            return original_forward_static(
+                positions,
+                query,
+                key,
+                head_size,
+                rotary_dim,
+                cos_sin_cache,
+                is_neox_style,
+            )
+        ops.rotary_embedding(
+            positions.flatten(),
+            query,
+            key,
+            head_size,
+            cos_sin_cache,
+            is_neox_style,
+        )
+        return query, key
+
+    RotaryEmbedding.forward_static = staticmethod(forward_static)
+    RotaryEmbedding._molt_cuda_static_rope = True
+    print("[Alignment] enabled vLLM CUDA static RoPE.")
+
+
 _install_qwen2_first_layer_inline_patch()
+_install_vllm_cuda_rope_patch()
 
 
 class WorkerWrap:
