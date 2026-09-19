@@ -194,7 +194,31 @@ def test_seq_mask_tis_drops_overflowed_importance_weight_without_nan():
     )
 
     torch.testing.assert_close(loss, torch.tensor(0.0))
-    torch.testing.assert_close(is_filter_ratio, torch.tensor(1.0))
+    torch.testing.assert_close(is_filter_ratio, torch.tensor([1.0]))  # one flag per sequence
+
+
+def test_seq_gating_reports_one_filter_flag_per_sequence():
+    # seq/geo gating filters whole sequences, so the metric carries a flag per sequence rather
+    # than a scalar: the actor weights a 1-D metric by samples, while a scalar would be weighted
+    # by action tokens and let the long kept sequence outvote the short dropped one.
+    loss_fn = PolicyLoss(
+        is_correction_threshold=[0.5, 2.0],
+        is_correction_level="seq",
+        is_correction_mode="mask",
+    )
+    action_mask = torch.tensor([[1, 1, 1], [1, 0, 0]], dtype=torch.bool)  # 3 action tokens, then 1
+
+    *_, is_filter_ratio = loss_fn(
+        torch.zeros(2, 3),
+        torch.zeros(2, 3),
+        torch.ones(2, 3),
+        action_mask=action_mask,
+        # seq ratio = exp(sum(old - rollout)) over action tokens: 1 (kept), then 10 (out of band)
+        rollout_log_probs=torch.tensor([[0.0, 0.0, 0.0], [-math.log(10.0), 0.0, 0.0]]),
+    )
+
+    torch.testing.assert_close(is_filter_ratio, torch.tensor([0.0, 1.0]))
+    torch.testing.assert_close(is_filter_ratio.mean(), torch.tensor(0.5))  # per-sequence fraction
 
 
 def test_policy_loss_sanitizes_nonfinite_vllm_kl_metric():
@@ -442,16 +466,16 @@ def test_binary_kl_trust_region_masks_tokens_and_sequences():
     )
     loss, _, _, _, _, filt = seq(logp, logp, adv, action_mask=mask, rollout_log_probs=mu)
     torch.testing.assert_close(loss, torch.tensor(0.0))
-    torch.testing.assert_close(filt, torch.tensor(1.0))
+    torch.testing.assert_close(filt, torch.tensor([1.0]))  # seq/geo report one flag per sequence
     # Two-sided: pi << mu on-sample is dropped just the same.
     _, _, _, _, _, filt = seq(mu, mu, adv, action_mask=mask, rollout_log_probs=logp)
-    torch.testing.assert_close(filt, torch.tensor(1.0))
+    torch.testing.assert_close(filt, torch.tensor([1.0]))
     # A tiny mismatch (pi=0.5 vs mu=0.505, binary KL ~5e-5) stays inside delta=3e-3.
     close = torch.full((1, 2), math.log(0.5))
     _, _, _, _, _, filt = seq(
         close, close, adv, action_mask=mask, rollout_log_probs=torch.full((1, 2), math.log(0.505))
     )
-    torch.testing.assert_close(filt, torch.tensor(0.0))
+    torch.testing.assert_close(filt, torch.tensor([0.0]))
 
 
 def test_tv_trust_region_masks_by_sampled_token_probability_gap():
