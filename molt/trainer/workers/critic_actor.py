@@ -161,7 +161,9 @@ class CriticTrainer:
                     local_seq_count += float(seqlens.numel())
                     local_token_sum += float(seqlens.sum())
                     is_optimizer_step = idx == len(window) - 1
-                    value_loss, clip_frac, grad_norm = self.training_step(exp, batch_num_tokens, is_optimizer_step)
+                    value_loss, clip_frac, grad_norm = self.training_step(
+                        exp, batch_num_tokens, len(window), is_optimizer_step
+                    )
                     n_tok = float(exp.action_mask.sum().item())
                     loss_sum += value_loss * n_tok
                     clip_sum += clip_frac * n_tok
@@ -192,7 +194,7 @@ class CriticTrainer:
         )
         return status
 
-    def training_step(self, experience: Experience, batch_num_tokens, is_optimizer_step: bool):
+    def training_step(self, experience: Experience, batch_num_tokens, num_microbatches: int, is_optimizer_step: bool):
         self.critic.train()
 
         multimodal_inputs = {}
@@ -223,6 +225,7 @@ class CriticTrainer:
                 name="critic",
                 accumulate=not self.args.train.dynamic_batch_enable,
                 scale_loss_by_accumulation=False,
+                num_microbatches=num_microbatches,
                 sync_gradients=(is_optimizer_step if self._defer_grad_sync else True),
             )
         finally:
