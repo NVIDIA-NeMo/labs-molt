@@ -110,6 +110,9 @@ class RolloutRayActor:
             worker_num_gpus=kwargs.pop("worker_num_gpus", _vllm_worker_num_gpus(backend, num_gpus)),
         )
         self._configure_vllm_env(kwargs.pop("full_determinism", False))
+        from molt.trainer.vllm.bi_compat import install_rollout_perf_overrides
+
+        install_rollout_perf_overrides()
         self.kwargs = kwargs
 
         engine_args = vllm.AsyncEngineArgs(*args, **_filter_vllm_engine_kwargs(self.kwargs))

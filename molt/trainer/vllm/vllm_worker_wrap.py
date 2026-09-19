@@ -16,6 +16,9 @@
 # Adapted from OpenRLHF (https://github.com/OpenRLHF/OpenRLHF),
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
+from molt.trainer.vllm.bi_compat import install_rollout_perf_overrides
+
+
 def _inline_qwen2_first_layer(model):
     """Inline Qwen2's first decoder layer while preserving its normal outputs."""
     import types
@@ -140,6 +143,7 @@ def _install_vllm_cuda_rope_patch():
 
 _install_qwen2_first_layer_inline_patch()
 _install_vllm_cuda_rope_patch()
+install_rollout_perf_overrides()
 
 
 class WorkerWrap:
