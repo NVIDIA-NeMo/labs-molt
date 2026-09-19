@@ -21,7 +21,11 @@ def _enable_automodel_residual_norm(model):
     """Match AutoModel's add-then-RMSNorm residual convention for Qwen."""
     import os
 
-    if os.environ.get("MOLT_VLLM_MATCH_AUTOMODEL_RESIDUAL_NORM") != "1":
+    match_automodel_residual = (
+        os.environ.get("MOLT_VLLM_MATCH_AUTOMODEL_RESIDUAL_NORM") == "1"
+    )
+    trace_enabled = os.environ.get("MOLT_ALIGNMENT_CUDAGRAPH_TRACE") == "1"
+    if not match_automodel_residual and not trace_enabled:
         return
     backbone = getattr(model, "model", model)
     layers = list(getattr(backbone, "layers", ()))
@@ -32,10 +36,11 @@ def _enable_automodel_residual_norm(model):
 
     trace = None
     trace_stages = None
+    trace_mlp = None
     copy_trace = None
     trace_layer_index = 0
     trace_token_index = 0
-    if os.environ.get("MOLT_ALIGNMENT_CUDAGRAPH_TRACE") == "1":
+    if trace_enabled:
         import torch
 
         trace_layer_index = int(
@@ -56,6 +61,11 @@ def _enable_automodel_residual_norm(model):
         trace_stages = torch.zeros(
             (7, backbone.config.hidden_size), dtype=trace.dtype, device=trace.device
         )
+        trace_mlp = torch.zeros(
+            (2, 2 * backbone.config.intermediate_size),
+            dtype=trace.dtype,
+            device=trace.device,
+        )
         trace_embedding = torch.zeros(
             2, trace.shape[1], dtype=trace.dtype, device=trace.device
         )
@@ -73,6 +83,7 @@ def _enable_automodel_residual_norm(model):
 
         backbone._molt_alignment_cudagraph_trace = trace
         backbone._molt_alignment_cudagraph_trace_stages = trace_stages
+        backbone._molt_alignment_cudagraph_trace_mlp = trace_mlp
         backbone._molt_alignment_cudagraph_trace_embedding = trace_embedding
         backbone._molt_alignment_cudagraph_trace_metadata = trace_metadata
         backbone._molt_alignment_cudagraph_trace_pending = trace_pending
@@ -87,7 +98,7 @@ def _enable_automodel_residual_norm(model):
                 copy_trace(trace_embedding[0], hidden_states[trace_token_index])
                 copy_trace(
                     trace_embedding[1],
-                    backbone.embed_tokens.weight[input_ids[trace_token_index]],
+                    hidden_states[trace_token_index],
                 )
             return hidden_states
 
@@ -114,11 +125,20 @@ def _enable_automodel_residual_norm(model):
                 and hidden_states.shape[0] > trace_token_index
             ):
                 copy_trace(trace_stages[0], hidden_states[trace_token_index])
-            if residual is None:
-                residual = hidden_states
+            if match_automodel_residual:
+                if residual is None:
+                    residual = hidden_states
+                else:
+                    residual = hidden_states + residual
+                hidden_states = layer.input_layernorm(residual)
             else:
-                residual = hidden_states + residual
-            hidden_states = layer.input_layernorm(residual)
+                if residual is None:
+                    residual = hidden_states
+                    hidden_states = layer.input_layernorm(hidden_states)
+                else:
+                    hidden_states, residual = layer.input_layernorm(
+                        hidden_states, residual
+                    )
             if (
                 trace_stages is not None
                 and layer_index == trace_layer_index
@@ -135,21 +155,35 @@ def _enable_automodel_residual_norm(model):
                 and hidden_states.shape[0] > trace_token_index
             ):
                 copy_trace(trace_stages[2], hidden_states[trace_token_index])
-            residual = hidden_states + residual
+            if match_automodel_residual:
+                residual = hidden_states + residual
+                hidden_states = layer.post_attention_layernorm(residual)
+            else:
+                hidden_states, residual = layer.post_attention_layernorm(
+                    hidden_states, residual
+                )
             if (
                 trace_stages is not None
                 and layer_index == trace_layer_index
                 and hidden_states.shape[0] > trace_token_index
             ):
                 copy_trace(trace_stages[3], residual[trace_token_index])
-            hidden_states = layer.post_attention_layernorm(residual)
             if (
                 trace_stages is not None
                 and layer_index == trace_layer_index
                 and hidden_states.shape[0] > trace_token_index
             ):
                 copy_trace(trace_stages[4], hidden_states[trace_token_index])
-            hidden_states = layer.mlp(hidden_states)
+            if trace_mlp is not None and layer_index == trace_layer_index:
+                gate_up, _ = layer.mlp.gate_up_proj(hidden_states)
+                if hidden_states.shape[0] > trace_token_index:
+                    copy_trace(trace_mlp[0], gate_up[trace_token_index])
+                activated = layer.mlp.act_fn(gate_up)
+                if hidden_states.shape[0] > trace_token_index:
+                    copy_trace(trace_mlp[1, : activated.shape[-1]], activated[trace_token_index])
+                hidden_states, _ = layer.mlp.down_proj(activated)
+            else:
+                hidden_states = layer.mlp(hidden_states)
             if (
                 trace_stages is not None
                 and layer_index == trace_layer_index
@@ -157,16 +191,12 @@ def _enable_automodel_residual_norm(model):
             ):
                 copy_trace(trace_stages[5], hidden_states[trace_token_index])
             if trace is not None and hidden_states.shape[0] > trace_token_index:
-                copy_trace(
-                    trace[layer_index],
-                    hidden_states[trace_token_index] + residual[trace_token_index],
-                )
+                trace_value = hidden_states[trace_token_index]
+                if match_automodel_residual:
+                    trace_value = trace_value + residual[trace_token_index]
+                copy_trace(trace[layer_index], trace_value)
                 if trace_stages is not None and layer_index == trace_layer_index:
-                    copy_trace(
-                        trace_stages[6],
-                        hidden_states[trace_token_index]
-                        + residual[trace_token_index],
-                    )
+                    copy_trace(trace_stages[6], trace_value)
                 if layer_index == len(layers) - 1:
                     trace_pending.zero_()
             return hidden_states, residual
@@ -186,25 +216,31 @@ def _enable_automodel_residual_norm(model):
     def final_norm(hidden_states, residual=None):
         if residual is None:
             return original_final_norm(hidden_states)
-        residual = hidden_states + residual
-        return original_final_norm(residual), residual
+        if match_automodel_residual:
+            residual = hidden_states + residual
+            return original_final_norm(residual), residual
+        return original_final_norm(hidden_states, residual)
 
     backbone.norm.forward = final_norm
     backbone._molt_automodel_residual_norm = True
-    print(
-        f"[Alignment] enabled AutoModel residual-norm convention in {len(layers)} vLLM layers.",
-        flush=True,
-    )
+    if match_automodel_residual:
+        print(
+            f"[Alignment] enabled AutoModel residual-norm convention in {len(layers)} vLLM layers.",
+            flush=True,
+        )
 
 
 def _install_precompile_residual_norm_patch():
-    """Apply the opt-in residual convention before vLLM's first model trace."""
+    """Apply opt-in residual matching or graph-safe tracing before compilation."""
     import os
 
-    if os.environ.get("MOLT_VLLM_PRECOMPILE_RESIDUAL_NORM") != "1":
+    if (
+        os.environ.get("MOLT_VLLM_PRECOMPILE_RESIDUAL_NORM") != "1"
+        and os.environ.get("MOLT_ALIGNMENT_CUDAGRAPH_TRACE") != "1"
+    ):
         return
 
-    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
     if getattr(GPUModelRunner, "_molt_precompile_residual_norm", False):
         return
@@ -254,6 +290,86 @@ def _install_class_residual_norm_patch():
 _install_class_residual_norm_patch()
 
 
+def _inline_qwen2_first_layer(model):
+    """Inline Qwen2's first decoder layer while preserving its normal outputs."""
+    import types
+    from itertools import islice
+
+    from vllm.distributed import get_pp_group
+    from vllm.sequence import IntermediateTensors
+
+    backbone = getattr(model, "model", None)
+    if type(backbone).__name__ != "Qwen2Model":
+        raise RuntimeError("first-layer inlining requires vLLM Qwen2Model")
+    if getattr(backbone, "_molt_first_layer_inlined", False):
+        return
+
+    def forward(self, input_ids, positions, intermediate_tensors=None, inputs_embeds=None):
+        if get_pp_group().is_first_rank:
+            hidden_states = (
+                inputs_embeds
+                if inputs_embeds is not None
+                else self.embed_input_ids(input_ids)
+            )
+            residual = None
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
+
+        for idx, layer in enumerate(islice(self.layers, self.start_layer, self.end_layer)):
+            if idx:
+                hidden_states, residual = layer(positions, hidden_states, residual)
+                continue
+            if residual is None:
+                residual = hidden_states
+                hidden_states = layer.input_layernorm(hidden_states)
+            else:
+                hidden_states, residual = layer.input_layernorm(hidden_states, residual)
+            hidden_states = layer.self_attn(
+                positions=positions, hidden_states=hidden_states
+            )
+            hidden_states, residual = layer.post_attention_layernorm(
+                hidden_states, residual
+            )
+            hidden_states = layer.mlp(hidden_states)
+
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors(
+                {"hidden_states": hidden_states, "residual": residual}
+            )
+        hidden_states, _ = self.norm(hidden_states, residual)
+        return hidden_states
+
+    backbone.forward = types.MethodType(forward, backbone)
+    backbone._molt_first_layer_inlined = True
+
+
+def _install_qwen2_first_layer_inline_patch():
+    """Install the optional Qwen2 call-boundary alignment before compilation."""
+    import os
+
+    if os.environ.get("MOLT_VLLM_INLINE_QWEN_FIRST_LAYER") != "1":
+        return
+
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    if getattr(GPUModelRunner, "_molt_first_layer_inline_patch", False):
+        return
+    load_model = GPUModelRunner.load_model
+
+    def patched_load_model(self, *args, **kwargs):
+        result = load_model(self, *args, **kwargs)
+        _inline_qwen2_first_layer(self.model)
+        return result
+
+    GPUModelRunner.load_model = patched_load_model
+    GPUModelRunner._molt_first_layer_inline_patch = True
+
+
+_install_qwen2_first_layer_inline_patch()
+
+
 class WorkerWrap:
     def _enable_automodel_residual_norm(self):
         _enable_automodel_residual_norm(self.model_runner.model)
@@ -274,6 +390,7 @@ class WorkerWrap:
             {
                 "layers": trace.detach().cpu(),
                 "stages": backbone._molt_alignment_cudagraph_trace_stages.detach().cpu(),
+                "mlp": backbone._molt_alignment_cudagraph_trace_mlp.detach().cpu(),
                 "embedding": backbone._molt_alignment_cudagraph_trace_embedding.detach().cpu(),
                 "metadata": backbone._molt_alignment_cudagraph_trace_metadata.detach().cpu(),
                 "layer_index": backbone._molt_alignment_cudagraph_trace_layer_index,

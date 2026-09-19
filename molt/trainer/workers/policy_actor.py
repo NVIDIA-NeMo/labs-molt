@@ -790,6 +790,13 @@ class PolicyModelActor(BaseModelActor):
             ).split(",")
             if name
         }
+        full_prefix_layers = {
+            int(index)
+            for index in os.environ.get(
+                "MOLT_ALIGNMENT_TRACE_FULL_PREFIX_LAYERS", ""
+            ).split(",")
+            if index
+        }
         if not 0 <= trace_layer < len(layers):
             raise ValueError(f"invalid MOLT_ALIGNMENT_TRACE_LAYER={trace_layer}")
         if trace_offset < 0:
@@ -806,8 +813,40 @@ class PolicyModelActor(BaseModelActor):
                 input_ids[batch, pos : pos + prefix_length].detach().cpu()
                 for batch, pos in state["prefix_starts"].tolist()
             ]
+
+            def copy_weight(weight):
+                if hasattr(weight, "full_tensor"):
+                    weight = weight.full_tensor()
+                return weight.detach().cpu()
+
+            snapshot = {
+                "prefixes": prefixes,
+                "layers": state["layers"],
+                "stages": state["stages"],
+                "weights": {
+                    "norm1": copy_weight(traced_layer.input_layernorm.weight),
+                    "norm2": copy_weight(traced_layer.post_attention_layernorm.weight),
+                    "o_proj": copy_weight(traced_layer.self_attn.o_proj.weight),
+                },
+                "eps": {
+                    "norm1": traced_layer.input_layernorm.eps,
+                    "norm2": traced_layer.post_attention_layernorm.eps,
+                },
+            }
+            linear_audit = getattr(
+                traced_layer.self_attn.o_proj, "_molt_linear_audit", None
+            )
+            if linear_audit is not None:
+                snapshot["o_proj_linear_audit"] = linear_audit
+            if "linear_audit_index" in state:
+                snapshot["o_proj_linear_audit_index"] = state["linear_audit_index"]
+            native_cache = getattr(model, "_molt_native_rope_cache", None)
+            if native_cache is not None:
+                snapshot["native_rope_cache"] = native_cache.index_select(
+                    0, state["starts"][:, 1]
+                ).detach().cpu()
             torch.save(
-                {"prefixes": prefixes, "layers": state["layers"], "stages": state["stages"]},
+                snapshot,
                 os.path.join(trace_dir, f"actor-rank{torch.distributed.get_rank()}.pt"),
             )
             state["saved"] = True
@@ -872,8 +911,17 @@ class PolicyModelActor(BaseModelActor):
             def hook(_, __, output):
                 if state["input_ids"] is None or output.ndim != 3:
                     return
-                starts = state["starts"]
-                state["layers"][index] = output[starts[:, 0], starts[:, 1]].detach().cpu()
+                if index in full_prefix_layers:
+                    prefixes = [
+                        output[batch, pos : pos + prefix_length]
+                        for batch, pos in state["prefix_starts"].tolist()
+                    ]
+                    state["layers"][index] = torch.stack(prefixes).detach().cpu()
+                else:
+                    starts = state["starts"]
+                    state["layers"][index] = output[
+                        starts[:, 0], starts[:, 1]
+                    ].detach().cpu()
                 if index != len(layers) - 1 or trace_logits:
                     return
                 finalize_trace()
@@ -918,6 +966,11 @@ class PolicyModelActor(BaseModelActor):
                 lambda _, args: capture_value("pre_norm1", args[0])
             )
         )
+        state["handles"].append(
+            traced_layer.post_attention_layernorm.register_forward_pre_hook(
+                lambda _, args: capture_value("pre_norm2", args[0])
+            )
+        )
         for name, module in (
             ("norm1", traced_layer.input_layernorm),
             ("attn", traced_layer.self_attn),
@@ -933,11 +986,85 @@ class PolicyModelActor(BaseModelActor):
             ("up_raw", traced_layer.mlp.up_proj),
         ):
             state["handles"].append(module.register_forward_hook(lambda _, __, output, name=name: capture_value(name, output)))
+        if os.environ.get("MOLT_ALIGNMENT_TRACE_SWIGLU") == "1":
+            def capture_gate_up(name, output):
+                if state["input_ids"] is None or not isinstance(output, torch.Tensor):
+                    return
+                starts = state["starts"]
+                state[name] = output[starts[:, 0], starts[:, 1]].detach()
+
+            def capture_swiglu(_, __, ___):
+                gate = state.pop("_trace_gate", None)
+                up = state.pop("_trace_up", None)
+                if gate is None or up is None:
+                    return
+                gate_up = torch.cat((gate, up), dim=-1)
+                value = torch.empty(
+                    gate_up.shape[:-1] + (gate_up.shape[-1] // 2,),
+                    dtype=gate_up.dtype,
+                    device=gate_up.device,
+                )
+                torch.ops._C.silu_and_mul(value, gate_up)
+                state["stages"]["swiglu_cuda"] = value.cpu()
+
+            state["handles"].append(
+                traced_layer.mlp.gate_proj.register_forward_hook(
+                    lambda _, __, output: capture_gate_up("_trace_gate", output)
+                )
+            )
+            state["handles"].append(
+                traced_layer.mlp.up_proj.register_forward_hook(
+                    lambda _, __, output: capture_gate_up("_trace_up", output)
+                )
+            )
+            state["handles"].append(traced_layer.mlp.register_forward_hook(capture_swiglu))
         state["handles"].append(
             traced_layer.self_attn.o_proj.register_forward_pre_hook(
                 lambda _, args: capture_value("attn_pre_o_proj", args[0])
             )
         )
+        if os.environ.get("MOLT_ALIGNMENT_LINEAR_AUDIT") == "1":
+            def capture_single_row_bi_gemm(module, args, _output):
+                if state["input_ids"] is None:
+                    return
+                from vllm.model_executor.determinism.batch_invariant import (
+                    linear_batch_invariant,
+                )
+
+                value = args[0]
+                all_rows = os.environ.get("MOLT_ALIGNMENT_LINEAR_AUDIT_ALL_ROWS") == "1"
+                if all_rows:
+                    rows = value.reshape(-1, value.shape[-1])
+                    index = None
+                else:
+                    index = int(
+                        os.environ.get(
+                            "MOLT_ALIGNMENT_LINEAR_AUDIT_INDEX",
+                            state["starts"][0, 1].item(),
+                        )
+                    )
+                    if not 0 <= index < value.shape[1]:
+                        return
+                    rows = value[:, index]
+                with torch.no_grad():
+                    output = torch.cat(
+                        [
+                            linear_batch_invariant(
+                                row.unsqueeze(0), module.weight.detach()
+                            )
+                            for row in rows
+                        ]
+                    )
+                state["stages"]["attn_o_proj_single_row"] = (
+                    output.reshape_as(value) if all_rows else output
+                ).detach().cpu()
+                state["linear_audit_index"] = index
+
+            state["handles"].append(
+                traced_layer.self_attn.o_proj.register_forward_hook(
+                    capture_single_row_bi_gemm
+                )
+            )
         if trace_logits:
             def capture_final_norm(_, __, output):
                 capture_value("final_norm", output)
@@ -1043,7 +1170,10 @@ class PolicyModelActor(BaseModelActor):
             tokenizer=self.tokenizer,
             vllm_engines=self.vllm_engines,
         )
-        trace_dir = os.environ.get("MOLT_ALIGNMENT_TRACE_DIR")
+        trace_dir = os.environ.get(
+            "MOLT_ACTOR_ALIGNMENT_TRACE_DIR",
+            os.environ.get("MOLT_ALIGNMENT_TRACE_DIR"),
+        )
         if trace_dir:
             self._arm_alignment_trace(trace_dir)
 

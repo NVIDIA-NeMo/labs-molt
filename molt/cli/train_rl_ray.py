@@ -41,12 +41,21 @@ def _ray_runtime_env_vars():
         "TORCH_COMPILE_DISABLE",
         "PYTORCH_CUDA_ALLOC_CONF",
         "VLLM_WORKER_MULTIPROC_METHOD",
+        "VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY",
+        "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY",
         "WANDB_API_KEY",
         "WANDB_ENTITY",
         "WANDB_MODE",
     ):
         if os.environ.get(name):
             env_vars[name] = os.environ[name]
+    env_vars.update(
+        {
+            name: value
+            for name, value in os.environ.items()
+            if name.startswith("MOLT_ALIGNMENT_")
+        }
+    )
     return env_vars
 
 
