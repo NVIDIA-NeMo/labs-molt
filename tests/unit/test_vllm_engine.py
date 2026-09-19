@@ -16,7 +16,7 @@
 import inspect
 import sys
 from dataclasses import dataclass
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 
 def _install_vllm_test_stub():
@@ -53,6 +53,15 @@ except Exception:
     _install_vllm_test_stub()
 
 import molt.trainer.vllm.vllm_engine as vllm_engine  # noqa: E402
+from molt.trainer.vllm.bi_compat import _NoBatchInvariantEnv  # noqa: E402
+
+
+def test_rollout_perf_override_keeps_unrelated_vllm_environment_settings():
+    source = SimpleNamespace(VLLM_BATCH_INVARIANT=True, VLLM_FOO="bar")
+    envs = _NoBatchInvariantEnv(source)
+
+    assert not envs.VLLM_BATCH_INVARIANT
+    assert envs.VLLM_FOO == "bar"
 
 
 def test_vllm_ray_executor_uses_worker_gpu_even_when_actor_is_cpu_only():
