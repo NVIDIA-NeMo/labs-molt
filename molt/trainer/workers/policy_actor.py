@@ -421,35 +421,19 @@ class PolicyTrainer:
         # needed to diagnose rollout-vs-actor logprob misalignment (e.g. a one-token
         # shift shows up as actor_logp[i] ~ vllm_logp[i+1]).
         dump_path = os.environ.get("MOLT_DUMP_ROLLOUT_LOGPROBS")
-        dump_at_optimizer_step = os.environ.get("MOLT_DUMP_ROLLOUT_LOGPROBS_EVERY_OPTIMIZER_STEP") == "1"
-        should_dump = (
-            is_optimizer_step if dump_at_optimizer_step else not getattr(self, "_rollout_logprob_dumped", False)
-        )
-        if dump_path and rollout_log_probs is not None and should_dump:
+        if dump_path and rollout_log_probs is not None and not getattr(self, "_rollout_logprob_dumped", False):
             self._rollout_logprob_dumped = True
-            valid = action_mask.bool()
-            rollout_valid = rollout_log_probs[valid]
-            actor_valid = action_log_probs.detach()[valid]
-            delta = (rollout_valid.float() - actor_valid.float()).abs()
-            logger.info(
-                "MOLT_DUMP_ROLLOUT_LOGPROBS: rank=%s tokens=%s exact=%s max_abs=%g",
-                torch.distributed.get_rank(),
-                delta.numel(),
-                torch.equal(rollout_valid, actor_valid),
-                delta.max().item() if delta.numel() else 0.0,
-            )
             if torch.distributed.get_rank() == 0:
-                response_token_ids = sequences[0, -action_mask.shape[1] :]
                 with open(dump_path, "w") as f:
                     f.write("pos\ttoken_id\tvllm_logp\tactor_logp\tmask\n")
                     rows = zip(
-                        response_token_ids.tolist(),
+                        sequences[0, 1:].tolist(),
                         rollout_log_probs[0].float().tolist(),
                         action_log_probs[0].detach().float().tolist(),
                         action_mask[0].long().tolist(),
                     )
                     for j, (t, v, a, m) in enumerate(rows):
-                        f.write(f"{j}\t{t}\t{v:.9g}\t{a:.9g}\t{m}\n")
+                        f.write(f"{j}\t{t}\t{v:.6f}\t{a:.6f}\t{m}\n")
                 logger.info(f"MOLT_DUMP_ROLLOUT_LOGPROBS: wrote token-level logprob dump to {dump_path}")
 
         # Stage 3: compute policy loss and metric-only policy diagnostics.
