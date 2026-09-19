@@ -18,7 +18,6 @@
 
 import inspect
 import os
-import sys
 from contextlib import nullcontext
 from importlib.util import find_spec
 from pathlib import Path
@@ -72,14 +71,7 @@ def _has_hf_flash_attn_2() -> bool:
         return find_spec("flash_attn") is not None
 
 
-_HF_ATTN_IMPLEMENTATIONS = {
-    "eager",
-    "sdpa",
-    "flash_attention_2",
-    "flash_attention_3",
-    "flash_attention_4",
-    "te",
-}
+_HF_ATTN_IMPLEMENTATIONS = {"eager", "sdpa", "flash_attention_2", "flash_attention_3", "te"}
 # "tilelang" drives AutoModel's DSA (DeepSeek-style sparse attention) TileLang
 # kernels — the indexer + sparse MLA path for glm_moe_dsa / deepseek_v3.2.
 _CUSTOM_ATTN_IMPLEMENTATIONS = {"te", "sdpa", "flex", "tilelang"}
@@ -106,8 +98,6 @@ class _VllmBatchInvariantLinear(torch.autograd.Function):
     ) -> torch.Tensor:
         ctx.has_bias = bias is not None
         ctx.save_for_backward(x, weight, *(bias,) if bias is not None else ())
-        if os.environ.get("MOLT_AUTOMODEL_USE_CUBLAS_LINEAR") == "1":
-            return torch.nn.functional.linear(x, weight, bias)
         from vllm.model_executor.determinism.batch_invariant import linear_batch_invariant
 
         return linear_batch_invariant(x, weight, bias)
@@ -131,121 +121,45 @@ class _VllmBatchInvariantLinear(torch.autograd.Function):
         )
 
 
-def _enable_qwen_fused_qkv_projection(model: nn.Module) -> None:
-    """Make Qwen AutoModel's three QKV projections use vLLM's BI linear path."""
-    def make_forwards(
-        q_proj: nn.Linear, k_proj: nn.Linear, v_proj: nn.Linear
-    ) -> tuple:
-        pending: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
+def _enable_qwen_fused_projections(model: nn.Module, names: tuple[str, ...]) -> None:
+    """Pack QKV or gate/up without changing parameter names or gradient ownership."""
+    def make_forwards(projections):
+        pending = []
 
-        def q_forward(hidden_states: torch.Tensor) -> torch.Tensor:
+        def first(hidden_states):
             if pending:
-                raise RuntimeError("Nested Qwen fused-QKV projection is unsupported.")
-            weight = torch.cat((q_proj.weight, k_proj.weight, v_proj.weight), dim=0)
-            bias = None
-            if q_proj.bias is not None:
-                if k_proj.bias is None or v_proj.bias is None:
-                    raise RuntimeError("Qwen QKV bias configuration must be uniform.")
-                bias = torch.cat((q_proj.bias, k_proj.bias, v_proj.bias), dim=0)
-            qkv = _VllmBatchInvariantLinear.apply(hidden_states, weight, bias)
-            q, k, v = qkv.split(
-                (q_proj.out_features, k_proj.out_features, v_proj.out_features), dim=-1
-            )
-            pending.append((q, k, v))
-            return q
+                raise RuntimeError("Nested fused projection is unsupported.")
+            weight = torch.cat([p.weight for p in projections], dim=0)
+            biases = [p.bias for p in projections]
+            if any(b is not None for b in biases) and any(b is None for b in biases):
+                raise ValueError("Fused projection biases must be uniform.")
+            bias = torch.cat(biases) if biases[0] is not None else None
+            output = _VllmBatchInvariantLinear.apply(hidden_states, weight, bias)
+            pending.extend(output.split([p.out_features for p in projections], dim=-1))
+            return pending.pop(0)
 
-        def k_forward(_hidden_states: torch.Tensor) -> torch.Tensor:
+        def remaining(_hidden_states):
             if not pending:
-                raise RuntimeError("Qwen fused-QKV K projection called before Q projection.")
-            return pending[-1][1]
+                raise RuntimeError("Fused projections must run in their declared order.")
+            return pending.pop(0)
 
-        def v_forward(_hidden_states: torch.Tensor) -> torch.Tensor:
-            if not pending:
-                raise RuntimeError("Qwen fused-QKV V projection called before Q projection.")
-            return pending.pop()[2]
-
-        return q_forward, k_forward, v_forward
+        return [first] + [remaining] * (len(projections) - 1)
 
     patched = 0
     for module in model.modules():
-        if not all(hasattr(module, name) for name in ("q_proj", "k_proj", "v_proj")):
+        projections = [getattr(module, name, None) for name in names]
+        if not all(isinstance(p, nn.Linear) for p in projections):
             continue
-        q_proj = module.q_proj
-        k_proj = module.k_proj
-        v_proj = module.v_proj
-        if not all(isinstance(proj, nn.Linear) for proj in (q_proj, k_proj, v_proj)):
-            continue
-
-        q_forward, k_forward, v_forward = make_forwards(q_proj, k_proj, v_proj)
-        q_proj.forward = q_forward
-        k_proj.forward = k_forward
-        v_proj.forward = v_forward
+        for projection, forward in zip(projections, make_forwards(projections), strict=True):
+            projection.forward = forward
         patched += 1
-
-    if patched == 0:
-        raise ValueError("MOLT_AUTOMODEL_FUSE_QKV=1 found no Qwen-style attention modules.")
-    print(f"[Alignment] enabled fused deterministic QKV projection in {patched} layers.")
-
-
-def _enable_qwen_fused_gate_up_projection(model: nn.Module) -> None:
-    """Make Qwen AutoModel's gate/up projections use vLLM's packed linear."""
-
-    def make_forwards(
-        gate_proj: nn.Linear, up_proj: nn.Linear
-    ) -> tuple:
-        pending: list[tuple[torch.Tensor, torch.Tensor]] = []
-
-        def gate_forward(hidden_states: torch.Tensor) -> torch.Tensor:
-            if pending:
-                raise RuntimeError("Nested Qwen fused gate/up projection is unsupported.")
-            weight = torch.cat((gate_proj.weight, up_proj.weight), dim=0)
-            bias = None
-            if gate_proj.bias is not None:
-                if up_proj.bias is None:
-                    raise RuntimeError("Qwen gate/up bias configuration must be uniform.")
-                bias = torch.cat((gate_proj.bias, up_proj.bias), dim=0)
-            gate_up = _VllmBatchInvariantLinear.apply(hidden_states, weight, bias)
-            gate, up = gate_up.split(
-                (gate_proj.out_features, up_proj.out_features), dim=-1
-            )
-            pending.append((gate, up))
-            return gate
-
-        def up_forward(_hidden_states: torch.Tensor) -> torch.Tensor:
-            if not pending:
-                raise RuntimeError("Qwen fused up projection called before gate projection.")
-            return pending.pop()[1]
-
-        return gate_forward, up_forward
-
-    patched = 0
-    for module in model.modules():
-        if not all(hasattr(module, name) for name in ("gate_proj", "up_proj")):
-            continue
-        gate_proj = module.gate_proj
-        up_proj = module.up_proj
-        if not all(isinstance(proj, nn.Linear) for proj in (gate_proj, up_proj)):
-            continue
-        gate_proj.forward, up_proj.forward = make_forwards(gate_proj, up_proj)
-        patched += 1
-
-    if patched == 0:
-        raise ValueError("MOLT_AUTOMODEL_FUSE_GATE_UP=1 found no Qwen-style MLP modules.")
-    print(f"[Alignment] enabled fused deterministic gate/up projection in {patched} layers.")
+    if not patched:
+        raise ValueError(f"No Qwen modules with projections {names}.")
+    print(f"[Alignment] enabled fused {names} in {patched} Qwen layers.")
 
 
 def _enable_qwen_batch_invariant_output_projections(model: nn.Module) -> None:
     """Route Qwen attention and MLP output projections through BI linear."""
-
-    def tensor_metadata(value: torch.Tensor) -> dict[str, object]:
-        return {
-            "type": f"{type(value).__module__}.{type(value).__qualname__}",
-            "shape": tuple(value.shape),
-            "stride": tuple(value.stride()),
-            "dtype": str(value.dtype),
-            "contiguous": value.is_contiguous(),
-            "has_to_local": hasattr(value, "to_local"),
-        }
 
     def patch_linear(projection: nn.Linear) -> None:
         def forward(
@@ -254,12 +168,7 @@ def _enable_qwen_batch_invariant_output_projections(model: nn.Module) -> None:
             output = _VllmBatchInvariantLinear.apply(
                 hidden_states, projection.weight, projection.bias
             )
-            if os.environ.get("MOLT_ALIGNMENT_LINEAR_AUDIT") == "1":
-                projection._molt_linear_audit = {
-                    "input": tensor_metadata(hidden_states),
-                    "weight": tensor_metadata(projection.weight),
-                    "output": tensor_metadata(output),
-                }
+
             return output
 
         projection.forward = forward
@@ -277,70 +186,6 @@ def _enable_qwen_batch_invariant_output_projections(model: nn.Module) -> None:
             "MOLT_AUTOMODEL_BI_OUTPUT_PROJECTIONS=1 found no Qwen output projections."
         )
     print(f"[Alignment] enabled BI output projections in {patched} Qwen modules.")
-
-
-class _VllmNativeRotaryForward(torch.autograd.Function):
-    """Use vLLM's native RoPE forward and the exact inverse for its VJP."""
-
-    @staticmethod
-    def forward(
-        ctx: torch.autograd.function.FunctionCtx,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        cos_sin_cache: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        from vllm import _custom_ops as ops
-
-        batch, q_heads, seq_len, head_dim = q.shape
-        if k.shape[0] != batch or k.shape[2:] != (seq_len, head_dim):
-            raise ValueError("Qwen Q/K shapes must have identical batch, sequence, and head dimensions.")
-        if batch != 1:
-            raise ValueError("vLLM native RoPE alignment currently requires an unpadded microbatch.")
-        positions = torch.arange(seq_len, device=q.device, dtype=torch.long).repeat(batch)
-        cos_sin_cache = cos_sin_cache.to(device=q.device, dtype=q.dtype)
-        selected_cache = cos_sin_cache.index_select(0, positions).view(batch, seq_len, -1)
-        cos, sin = selected_cache.chunk(2, dim=-1)
-        q_flat = q.transpose(1, 2).reshape(batch * seq_len, q_heads * head_dim).contiguous()
-        k_flat = k.transpose(1, 2).reshape(batch * seq_len, k.shape[1] * head_dim).contiguous()
-        if os.environ.get("MOLT_AUTOMODEL_VLLM_ROPE_PER_TOKEN") == "1":
-            for index in range(q_flat.shape[0]):
-                ops.rotary_embedding(
-                    positions[index : index + 1],
-                    q_flat[index : index + 1],
-                    k_flat[index : index + 1],
-                    head_dim,
-                    cos_sin_cache,
-                    True,
-                )
-        else:
-            ops.rotary_embedding(
-                positions, q_flat, k_flat, head_dim, cos_sin_cache, True
-            )
-        ctx.save_for_backward(cos, sin)
-        ctx.head_dim = head_dim
-        return (
-            q_flat.view(batch, seq_len, q_heads, head_dim).transpose(1, 2),
-            k_flat.view(batch, seq_len, k.shape[1], head_dim).transpose(1, 2),
-        )
-
-    @staticmethod
-    def backward(
-        ctx: torch.autograd.function.FunctionCtx,
-        grad_q: torch.Tensor,
-        grad_k: torch.Tensor,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None, None]:
-        cos, sin = ctx.saved_tensors
-        cos = torch.cat((cos, cos), dim=-1).unsqueeze(1)
-        sin = torch.cat((sin, sin), dim=-1).unsqueeze(1)
-
-        def inverse_rotate(grad: torch.Tensor) -> torch.Tensor:
-            rotated = torch.cat(
-                (-grad[..., ctx.head_dim // 2 :], grad[..., : ctx.head_dim // 2]),
-                dim=-1,
-            )
-            return grad * cos - rotated * sin
-
-        return inverse_rotate(grad_q), inverse_rotate(grad_k), None, None
 
 
 def _vllm_static_rotary(
@@ -372,15 +217,9 @@ def _vllm_static_rotary(
 
 
 def _enable_qwen_vllm_rope(model: nn.Module) -> None:
-    """Run AutoModel Qwen RoPE through vLLM's CUDA implementation."""
+    """Match the static RoPE used by vLLM in batch-invariant mode."""
     import importlib
 
-    from vllm.vllm_flash_attn.layers.rotary import apply_rotary_emb
-
-    use_native_rope = os.environ.get("MOLT_AUTOMODEL_USE_VLLM_NATIVE_ROPE") == "1"
-    use_static_rope = os.environ.get("MOLT_AUTOMODEL_USE_VLLM_STATIC_ROPE") == "1"
-    if use_native_rope and use_static_rope:
-        raise ValueError("Choose only one of native or static vLLM RoPE alignment.")
     native_caches: dict[tuple[int, torch.device, torch.dtype], torch.Tensor] = {}
 
     def get_native_cache(head_dim: int, q: torch.Tensor) -> torch.Tensor:
@@ -425,29 +264,15 @@ def _enable_qwen_vllm_rope(model: nn.Module) -> None:
             rotary_dim = cos.shape[-1]
             if rotary_dim != head_dim:
                 raise ValueError(f"Qwen vLLM RoPE expects full rotation, got {rotary_dim=} {head_dim=}.")
-            if use_static_rope:
-                return _vllm_static_rotary(q, k, get_native_cache(head_dim, q))
-            if use_native_rope:
-                return _VllmNativeRotaryForward.apply(q, k, get_native_cache(head_dim, q))
-            cos = cos[..., : rotary_dim // 2].reshape(-1, rotary_dim // 2)
-            sin = sin[..., : rotary_dim // 2].reshape(-1, rotary_dim // 2)
-            q_flat = q.transpose(1, 2).reshape(1, -1, num_heads, head_dim)
-            k_flat = k.transpose(1, 2).reshape(1, -1, k.shape[1], head_dim)
-            q_flat = apply_rotary_emb(q_flat, cos, sin)
-            k_flat = apply_rotary_emb(k_flat, cos, sin)
-            return (
-                q_flat.reshape(batch_size, seq_len, num_heads, head_dim).transpose(1, 2),
-                k_flat.reshape(batch_size, seq_len, k.shape[1], head_dim).transpose(1, 2),
-            )
+            return _vllm_static_rotary(q, k, get_native_cache(head_dim, q))
 
         source.apply_rotary_pos_emb = apply_rotary
         patched += count
 
     if patched == 0:
         raise ValueError("MOLT_AUTOMODEL_USE_VLLM_ROPE=1 found no Qwen-style attention modules.")
-    implementation = "static" if use_static_rope else "native" if use_native_rope else "flash-attn"
     print(
-        f"[Alignment] enabled vLLM {implementation} CUDA RoPE in {patched} AutoModel Qwen layers."
+        f"[Alignment] enabled vLLM static RoPE in {patched} AutoModel Qwen layers."
     )
 
 
@@ -560,95 +385,47 @@ def _enable_qwen_vllm_fa2(model: nn.Module) -> None:
 
 
 class _VllmBatchInvariantRMSNorm(torch.autograd.Function):
-    """Use vLLM's fixed-reduction forward with AutoModel's RMSNorm backward."""
+    """Match vLLM's norm forward, with an optional fused residual update."""
 
     @staticmethod
-    def forward(
-        ctx: torch.autograd.function.FunctionCtx,
-        x: torch.Tensor,
-        weight: torch.Tensor,
-        eps: float,
-    ) -> torch.Tensor:
-        from vllm.model_executor.determinism.batch_invariant import (
-            rms_norm_batch_invariant,
-        )
+    def forward(ctx, x, weight, eps, residual=None):
+        from vllm.model_executor.determinism.batch_invariant import rms_norm_batch_invariant
 
-        ctx.save_for_backward(x, weight)
+        ctx.has_residual = residual is not None
+        if ctx.has_residual:
+            output, normalized_input = rms_norm_batch_invariant(
+                x.clone(), weight, eps, residual.clone()
+            )
+        else:
+            output = rms_norm_batch_invariant(x, weight, eps)
+            normalized_input = x
+        ctx.save_for_backward(normalized_input, weight)
         ctx.eps = eps
-        return rms_norm_batch_invariant(x, weight, eps)
+        return (output, normalized_input) if ctx.has_residual else output
 
     @staticmethod
-    def backward(
-        ctx: torch.autograd.function.FunctionCtx, grad_output: torch.Tensor
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None, None]:
+    def backward(ctx, grad_output, grad_residual_out=None):
         x, weight = ctx.saved_tensors
         x_f32 = x.float()
-        weight_f32 = weight.float()
         grad_f32 = grad_output.float()
         inv_rms = torch.rsqrt((x_f32 * x_f32).mean(-1, keepdim=True) + ctx.eps)
         normalized = x_f32 * inv_rms
         grad_weight = (grad_f32 * normalized).sum_to_size(weight.shape)
-        weighted_grad = grad_f32 * weight_f32
+        weighted_grad = grad_f32 * weight.float()
         grad_x = inv_rms * (
-            weighted_grad
-            - normalized * (weighted_grad * normalized).mean(-1, keepdim=True)
-        )
-        return (
-            grad_x.to(x.dtype) if x.requires_grad else None,
-            grad_weight.to(weight.dtype) if weight.requires_grad else None,
-            None,
-        )
-
-
-class _VllmBatchInvariantFusedAddRMSNorm(torch.autograd.Function):
-    """Use vLLM's fused residual update without changing the actor VJP."""
-
-    @staticmethod
-    def forward(
-        ctx: torch.autograd.function.FunctionCtx,
-        x: torch.Tensor,
-        residual: torch.Tensor,
-        weight: torch.Tensor,
-        eps: float,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        from vllm import _custom_ops as ops
-
-        output = x.clone()
-        residual_out = residual.clone()
-        ops.fused_add_rms_norm(output, residual_out, weight, eps)
-        ctx.save_for_backward(residual_out, weight)
-        ctx.eps = eps
-        return output, residual_out
-
-    @staticmethod
-    def backward(
-        ctx: torch.autograd.function.FunctionCtx,
-        grad_output: torch.Tensor,
-        grad_residual_out: torch.Tensor,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, None]:
-        residual, weight = ctx.saved_tensors
-        residual_f32 = residual.float()
-        weight_f32 = weight.float()
-        grad_f32 = grad_output.float()
-        inv_rms = torch.rsqrt(
-            (residual_f32 * residual_f32).mean(-1, keepdim=True) + ctx.eps
-        )
-        normalized = residual_f32 * inv_rms
-        grad_weight = (grad_f32 * normalized).sum_to_size(weight.shape)
-        weighted_grad = grad_f32 * weight_f32
-        grad_residual = inv_rms * (
-            weighted_grad
-            - normalized * (weighted_grad * normalized).mean(-1, keepdim=True)
+            weighted_grad - normalized * (weighted_grad * normalized).mean(-1, keepdim=True)
         )
         if grad_residual_out is not None:
-            grad_residual = grad_residual + grad_residual_out.float()
-        grad_residual = grad_residual.to(residual.dtype)
-        return (
-            grad_residual if ctx.needs_input_grad[0] else None,
-            grad_residual if ctx.needs_input_grad[1] else None,
-            grad_weight.to(weight.dtype) if ctx.needs_input_grad[2] else None,
+            grad_x = grad_x + grad_residual_out.float()
+        grad_x = grad_x.to(x.dtype)
+        grads = (
+            grad_x if ctx.needs_input_grad[0] else None,
+            grad_weight.to(weight.dtype) if ctx.needs_input_grad[1] else None,
             None,
         )
+        if len(ctx.needs_input_grad) == 4:
+            grads += (grad_x if ctx.needs_input_grad[3] else None,)
+        return grads
 
 
 def _enable_qwen_vllm_rms_norm(model: nn.Module) -> None:
@@ -662,13 +439,6 @@ def _enable_qwen_vllm_rms_norm(model: nn.Module) -> None:
 
         def forward(x: torch.Tensor, module: Float32RMSNorm = module) -> torch.Tensor:
             weight = module.weight
-            if (
-                os.environ.get("MOLT_AUTOMODEL_RMSNORM_LOCAL_WEIGHT") == "1"
-                and hasattr(weight, "to_local")
-            ):
-                weight = weight.to_local()
-            if os.environ.get("MOLT_AUTOMODEL_RMSNORM_WEIGHT_INPUT_DTYPE") == "1":
-                weight = weight.to(dtype=x.dtype)
             return _VllmBatchInvariantRMSNorm.apply(x, weight, module.eps)
 
         module.forward = forward
@@ -699,8 +469,8 @@ def _enable_qwen_vllm_fused_residual_norm(model: nn.Module) -> None:
         residual = getattr(backbone, "_molt_vllm_residual", None)
         if residual is None:
             return original_final_norm(hidden_states)
-        output, _ = _VllmBatchInvariantFusedAddRMSNorm.apply(
-            hidden_states, residual, backbone.norm.weight, backbone.norm.eps
+        output, _ = _VllmBatchInvariantRMSNorm.apply(
+            hidden_states, backbone.norm.weight, backbone.norm.eps, residual
         )
         return output
 
@@ -720,11 +490,11 @@ def _enable_qwen_vllm_fused_residual_norm(model: nn.Module) -> None:
                 residual = hidden_states
                 hidden_states = layer.input_layernorm(hidden_states)
             else:
-                hidden_states, residual = _VllmBatchInvariantFusedAddRMSNorm.apply(
+                hidden_states, residual = _VllmBatchInvariantRMSNorm.apply(
                     hidden_states,
-                    residual,
                     layer.input_layernorm.weight,
                     layer.input_layernorm.eps,
+                    residual,
                 )
             hidden_states, _ = layer.self_attn(
                 hidden_states=hidden_states,
@@ -736,11 +506,11 @@ def _enable_qwen_vllm_fused_residual_norm(model: nn.Module) -> None:
                 position_embeddings=position_embeddings,
                 **kwargs,
             )
-            hidden_states, residual = _VllmBatchInvariantFusedAddRMSNorm.apply(
+            hidden_states, residual = _VllmBatchInvariantRMSNorm.apply(
                 hidden_states,
-                residual,
                 layer.post_attention_layernorm.weight,
                 layer.post_attention_layernorm.eps,
+                residual,
             )
             backbone._molt_vllm_residual = residual
             return layer.mlp(hidden_states)
@@ -807,7 +577,7 @@ def _will_use_hf_model(pretrain_or_model, default: bool = True) -> bool:
         from transformers import AutoConfig
 
         cfg = AutoConfig.from_pretrained(pretrain_or_model, trust_remote_code=True)
-        return get_is_hf_model(cfg, force_hf=os.environ.get("MOLT_FORCE_HF_MODEL") == "1")
+        return get_is_hf_model(cfg, force_hf=False)
     except Exception:
         return default
 
@@ -1091,27 +861,10 @@ class BaseModel(nn.Module):
             # rollout-vs-train logprobs diverge and vllm_kl climbs. Matches slime/verl.
             # Override: MOLT_GATE_PRECISION.
             backend_cfg["gate_precision"] = os.environ.get("MOLT_GATE_PRECISION", "float32")
-            if os.environ.get("MOLT_AUTOMODEL_USE_VLLM_FA4") == "1":
-                if attn_implementation != "flash_attention_4":
-                    raise ValueError("MOLT_AUTOMODEL_USE_VLLM_FA4=1 requires flash_attention_4.")
-                from vllm.vllm_flash_attn import cute as vllm_fa4
-                from transformers.modeling_flash_attention_utils import (
-                    FLASH_ATTENTION_COMPATIBILITY_MATRIX,
-                )
-
-                sys.modules["flash_attn.cute"] = vllm_fa4
-                FLASH_ATTENTION_COMPATIBILITY_MATRIX[4]["general_availability_check"] = (
-                    torch.cuda.is_available
-                )
-                attn_for_from_pretrained = attn_implementation
-            else:
-                attn_for_from_pretrained = "sdpa"
+            attn_for_from_pretrained = "sdpa"
             backend_kwarg = {"backend": BackendConfig(**backend_cfg)}
             if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
-                print(
-                    f"[Attn] AutoModel custom backend={backend_attn}; "
-                    f"config attn_implementation={attn_for_from_pretrained}."
-                )
+                print(f"[Attn] AutoModel custom backend={backend_attn}; config attn_implementation=sdpa.")
 
         # AutoModel bundles device_mesh/moe_mesh/distributed_config/moe_config/AC into
         # a single DistributedSetup; wrap our pre-built meshes via MeshContext.from_meshes.
@@ -1145,9 +898,9 @@ class BaseModel(nn.Module):
         )
         self.model = move_model_to_cpu_for_offload(self.model, distributed_config)
         if os.environ.get("MOLT_AUTOMODEL_FUSE_QKV") == "1":
-            _enable_qwen_fused_qkv_projection(self.model)
+            _enable_qwen_fused_projections(self.model, ("q_proj", "k_proj", "v_proj"))
         if os.environ.get("MOLT_AUTOMODEL_FUSE_GATE_UP") == "1":
-            _enable_qwen_fused_gate_up_projection(self.model)
+            _enable_qwen_fused_projections(self.model, ("gate_proj", "up_proj"))
         if os.environ.get("MOLT_AUTOMODEL_BI_OUTPUT_PROJECTIONS") == "1":
             _enable_qwen_batch_invariant_output_projections(self.model)
         if os.environ.get("MOLT_AUTOMODEL_USE_VLLM_ROPE") == "1":

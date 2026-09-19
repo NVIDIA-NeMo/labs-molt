@@ -214,17 +214,6 @@ class RolloutRayActor:
             args=(master_address, master_port, rank_offset, world_size, group_name, backend),
         )
 
-    async def arm_alignment_trace(self, trace_dir):
-        return await self.llm.collective_rpc("arm_alignment_trace", args=(trace_dir,))
-
-    async def reset_cudagraph_alignment_trace(self):
-        return await self.llm.collective_rpc("reset_cudagraph_alignment_trace")
-
-    async def dump_cudagraph_alignment_trace(self, path):
-        return await self.llm.collective_rpc(
-            "dump_cudagraph_alignment_trace", args=(path,)
-        )
-
     async def update_weights_packed(self, metas):
         """Receive a single packed broadcast carrying many weights.
 

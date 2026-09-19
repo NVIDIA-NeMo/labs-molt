@@ -607,14 +607,10 @@ class GenerateSamplesActor:
         vllm_lock,
         rollout_queue,
         rollout_slots,
-        vllm_engines=None,
         router_url=None,
         **generate_kwargs,
     ):
-        # Generation goes through the vllm-router via the runner actors below. The
-        # engine handles are normally used only by TrainingActor; the trace-only
-        # path passes them through so its hook can be armed immediately before the
-        # first real router request, rather than during model initialization.
+        # Generation runs through the vllm-router; TrainingActor owns engine handles.
         self.args = strategy.args
 
         tokenizer = get_tokenizer(pretrain, None, "left", use_fast=not strategy.args.data.disable_fast_tokenizer)
@@ -649,7 +645,6 @@ class GenerateSamplesActor:
             eval_dataloader=self.eval_dataloader,
             tokenizer=tokenizer,
             agent_runners=agent_runners,
-            vllm_engines=vllm_engines,
         )
 
         self.vllm_lock = vllm_lock
@@ -1007,7 +1002,6 @@ class RLTrainer:
             vllm_lock=vllm_lock,
             rollout_queue=self.rollout_queue,
             rollout_slots=self.rollout_slots,
-            vllm_engines=vllm_engines,
             router_url=router_url,
             **generate_kwargs,
         )

@@ -104,7 +104,6 @@ class SamplesGenerator:
         eval_dataloader,
         tokenizer,
         agent_runners,
-        vllm_engines=None,
     ):
         self.strategy = strategy
         self.args = strategy.args
@@ -114,8 +113,6 @@ class SamplesGenerator:
         # across them (self._rr) — no pool wrapper, just a list + an index.
         self.agent_runners = agent_runners
         self._rr = 0
-        self._alignment_trace_engines = vllm_engines
-        self._alignment_trace_armed = False
 
         self.prompts_dataloader = prompts_dataloader
         self.eval_dataloader = eval_dataloader
@@ -275,19 +272,6 @@ class SamplesGenerator:
                     groups_accepted += 1
                     progress.update(1)
         progress.close()
-
-        trace_dir = os.environ.get("MOLT_ALIGNMENT_CUDAGRAPH_TRACE_DIR")
-        if trace_dir and not getattr(self, "_cudagraph_trace_dumped", False):
-            os.makedirs(trace_dir, exist_ok=True)
-            ray.get(
-                [
-                    engine.dump_cudagraph_alignment_trace.remote(
-                        os.path.join(trace_dir, f"vllm-engine{index}.pt")
-                    )
-                    for index, engine in enumerate(self._alignment_trace_engines)
-                ]
-            )
-            self._cudagraph_trace_dumped = True
 
         # Observability: per-reason drop counts + (when filtering) the pass rate.
         rollout_metrics = {f"rollout/dropped/{reason}": float(n) for reason, n in drop_counts.items()}
@@ -480,7 +464,6 @@ class SamplesGenerator:
         as before. Per-rollout (not per-group) dispatch: a runner's event loop is shared by all its
         in-flight rollouts (grading, image processing and blocking tool calls run in-process), so
         a group's N rollouts land on N runners instead of one."""
-        self._arm_alignment_trace_before_rollout()
         sampling_params = SamplingParams(
             temperature=generate_kwargs.get("temperature", 1.0),
             top_p=generate_kwargs.get("top_p", 1.0),
@@ -511,29 +494,6 @@ class SamplesGenerator:
                 )
             refs.append(_gather_group.remote(*parts))
         return refs
-
-    def _arm_alignment_trace_before_rollout(self) -> None:
-        """Arm the opt-in vLLM trace immediately before the first real request."""
-        trace_dir = os.environ.get("MOLT_ALIGNMENT_TRACE_DIR")
-        cudagraph_trace_dir = os.environ.get("MOLT_ALIGNMENT_CUDAGRAPH_TRACE_DIR")
-        if getattr(self, "_alignment_trace_armed", False) or not getattr(
-            self, "_alignment_trace_engines", []
-        ):
-            return
-        if cudagraph_trace_dir:
-            ray.get(
-                [engine.reset_cudagraph_alignment_trace.remote()
-                 for engine in self._alignment_trace_engines]
-            )
-        elif trace_dir:
-            ray.get(
-                [engine.arm_alignment_trace.remote(trace_dir)
-                 for engine in self._alignment_trace_engines]
-            )
-        else:
-            return
-        self._alignment_trace_armed = True
-        logger.info("[alignment_trace] armed vLLM engines before first rollout dispatch")
 
     @staticmethod
     def _process_response_into_experience(
