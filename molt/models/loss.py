@@ -423,13 +423,13 @@ class PolicyLoss(nn.Module):
                 raise ValueError(f"unknown is_correction_mode {self.is_correction_mode}")
 
             loss = coef * loss
-            # Filter fraction reported at the unit's own granularity: per (masked)
-            # token for token-level, per sequence for seq/geo (the latter matches the
-            # original seq-mask-tis: unit_filtered.mean() == 1 - seq_mask.mean()).
+            # Filter fraction at the unit's own granularity: a masked-token mean for token-level,
+            # one flag PER SEQUENCE for seq/geo. The flags stay 1-D because the actor weights a 1-D
+            # metric by samples and a scalar by action tokens, which would skew a sequence fraction.
             if self.is_correction_level == "token":
                 is_filter_ratio = masked_mean(unit_filtered.float(), action_mask, dim=None)
             else:
-                is_filter_ratio = unit_filtered.float().mean()
+                is_filter_ratio = unit_filtered.float().flatten()
 
             vllm_logprob_diff = torch.nan_to_num(
                 rollout_log_probs.float() - old_log_probs.float(),
