@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Template-agnostic assistant-reply detection for the SFT loss mask.
+"""SFT dataset: assistant-reply detection for the loss mask, and VLM truncation.
 
 `discover_reply_markers` must locate the assistant reply span from the chat template
 alone, with nothing hard-coded per model. These fakes mirror the structure of the real
@@ -21,11 +21,18 @@ templates molt serves (verified against the actual tokenizers): ChatML with a la
 only <think> scaffold (Qwen3.6), ChatML with <think> on every turn (Nemotron omni3),
 role-specific openers (Kimi), no reply terminator (GLM), alternation-enforced turns +
 <end_of_turn> (Gemma), and fullwidth sentinels + eos (DeepSeek).
+
+The second half covers the VLM path: which token ids the truncation guard treats as
+image placeholders, and what that means for `--data.max_len`.
 """
+
+from types import SimpleNamespace
 
 import pytest
 
 from molt.datasets.sft_dataset import SFTDataset, discover_reply_markers
+from molt.utils import vlm_utils
+from molt.utils.vlm_utils import media_token_ids
 
 
 class _FakeTok:
@@ -203,3 +210,114 @@ def test_train_on_last_turn_only_keeps_final_reply():
     is_reply = [False] + [shifted[t] == 1.0 for t in range(len(ids) - 1)]
     supervised = tok.decode([ids[t] for t in range(len(ids)) if is_reply[t]])
     assert "last" in supervised and "first" not in supervised
+
+
+# The truncation guard in _tokenize must never cut into an image's placeholder run,
+# so the media-id set must exclude unk and pad ids that can also occur in ordinary text.
+
+
+class _MediaTok(_FakeTok):
+    """Vocabulary with `<image>` but no `<video>`, so `<video>` resolves to unk."""
+
+    SPECIALS = ("<image>",) + _FakeTok.SPECIALS
+    UNK_ID, IMAGE_ID, PAD_ID = 0, 18, 1
+    TEXT_ID_BASE = 1000  # ordinary text sits well clear of the special ids above
+
+    def __init__(self):
+        super().__init__(_chatml("none"))
+        self.unk_token_id, self.pad_token_id, self.eos_token_id = self.UNK_ID, self.PAD_ID, 2
+        self.chat_template = None
+        self._tok2id = {"<unk>": self.UNK_ID, "<image>": self.IMAGE_ID}
+        self._id2tok = {i: t for t, i in self._tok2id.items()}
+        self._next = self.TEXT_ID_BASE
+
+    def _id(self, tok):
+        if tok not in self._tok2id:
+            self._tok2id[tok], self._id2tok[self._next] = self._next, tok
+            self._next += 1
+        return self._tok2id[tok]
+
+    def convert_tokens_to_ids(self, tok):  # never mints a new id, unlike _id
+        return self._tok2id.get(tok, self.unk_token_id)
+
+
+class _OmniProcessor:
+    """An image-only AutoProcessor: both ids are set, but from the tokenizer's vocab."""
+
+    def __init__(self):
+        self.tokenizer = _MediaTok()
+        self.image_processor = object()  # how SFTDataset detects a VLM processor
+        self.image_token, self.video_token = "<image>", "<video>"
+        self.image_token_id = self.tokenizer.convert_tokens_to_ids(self.image_token)
+        self.video_token_id = self.tokenizer.convert_tokens_to_ids(self.video_token)
+        self.unk_token_id, self.pad_token_id = _MediaTok.UNK_ID, _MediaTok.PAD_ID
+        self.chat_template = None
+
+
+class _Rows:
+    """Stand-in for the Arrow dataset SFTDataset maps then filters."""
+
+    def __init__(self, rows):
+        self._rows = rows
+        self.column_names = ["input", "output", "images"]
+
+    def map(self, fn, remove_columns=None, num_proc=None):
+        return _Rows([fn(r) for r in self._rows])
+
+    def filter(self, pred):
+        return _Rows([r for r in self._rows if pred(r)])
+
+    def __len__(self):
+        return len(self._rows)
+
+    def __getitem__(self, idx):
+        return self._rows[idx]
+
+
+MAX_LEN = 8
+
+
+def _vlm_dataset():
+    processor = _OmniProcessor()
+    strategy = SimpleNamespace(
+        args=SimpleNamespace(
+            data=SimpleNamespace(input_key="input", output_key="output", tokenizer_chat_template=None)
+        )
+    )
+    rows = _Rows([{"input": "<image>\nq", "output": "a", "images": ["img.png"]}])
+    return processor, SFTDataset(rows, processor, MAX_LEN, strategy, image_key="images")
+
+
+def test_media_token_ids_come_from_the_shared_resolver():
+    processor, ds = _vlm_dataset()
+    # The premise: this processor reports its video token as the unk id.
+    assert processor.video_token_id == processor.unk_token_id
+    assert ds.media_token_ids == media_token_ids(processor) == {_MediaTok.IMAGE_ID}
+
+
+def test_truncation_honors_max_len_when_the_video_token_is_unk(monkeypatch):
+    # One image placeholder up front, ordinary <unk> text past max_length.
+    token_ids = [_MediaTok.IMAGE_ID] + list(range(1000, 1034)) + [_MediaTok.UNK_ID] + list(range(1034, 1038))
+    _, ds = _vlm_dataset()
+    monkeypatch.setattr(
+        vlm_utils,
+        "process_prompt_with_images",
+        lambda processor, text, images: (token_ids, {"pixel_values": None}, ["img"]),
+    )
+    kept, _ = ds._tokenize("rendered", ["img.png"])
+    assert len(kept) == MAX_LEN
+
+
+def test_truncation_still_never_splits_a_trailing_image_run(monkeypatch):
+    # An image run straddling max_length is kept whole: cutting it would desync
+    # pixel_values from the vit embeds.
+    run_start = MAX_LEN - 2
+    token_ids = list(range(1000, 1000 + run_start)) + [_MediaTok.IMAGE_ID] * 5 + list(range(2000, 2004))
+    _, ds = _vlm_dataset()
+    monkeypatch.setattr(
+        vlm_utils,
+        "process_prompt_with_images",
+        lambda processor, text, images: (token_ids, {"pixel_values": None}, ["img"]),
+    )
+    kept, _ = ds._tokenize("rendered", ["img.png"])
+    assert len(kept) == run_start + 5

@@ -25,7 +25,7 @@ from torch.utils.data import Dataset
 
 from molt.utils.logging_utils import init_logger
 from molt.utils.utils import zero_pad_sequences
-from molt.utils.vlm_utils import should_expand_image_placeholder, split_image_placeholder
+from molt.utils.vlm_utils import media_token_ids, should_expand_image_placeholder, split_image_placeholder
 
 logger = init_logger(__name__)
 
@@ -146,33 +146,16 @@ class SFTDataset(Dataset):
         # Image/video placeholder token ids. Truncation must never cut into an
         # image's placeholder run: pixel_values / image_grid_thw count every image
         # in full, so dropping placeholder tokens desyncs them and the model
-        # forward crashes with a vit-embed shape mismatch. Collected from the
-        # processor (same attrs as vlm_utils.estimate_vllm_input_expansion_delta).
-        self.media_token_ids = set()
-        unk_id = getattr(self.text_tokenizer, "unk_token_id", None)
-        if self.processor is not None:
-            for obj in (self.processor, self.text_tokenizer):
-                for attr in ("image_token_id", "video_token_id", "img_context_token_id"):
-                    tid = getattr(obj, attr, None)
-                    if tid is not None:
-                        self.media_token_ids.add(int(tid))
-                # Fallback: some models (e.g. Nemotron-Omni) keep the placeholder
-                # id on the model config and expose only the token *string* on the
-                # processor. Resolve the string to an id so truncation still
-                # protects the run — mirrors the processor's own convert_tokens_to_ids.
-                for attr in ("image_token", "video_token"):
-                    tokstr = getattr(obj, attr, None)
-                    if tokstr:
-                        tid = self.text_tokenizer.convert_tokens_to_ids(tokstr)
-                        if tid is not None and tid != unk_id:
-                            self.media_token_ids.add(int(tid))
+        # forward crashes with a vit-embed shape mismatch. Shared with the RL
+        # rollout guard so the two never disagree for the same checkpoint.
+        self.media_token_ids = media_token_ids(self.processor) if self.processor is not None else set()
         # A VLM run with no resolvable placeholder id would let truncation cut into
         # the image's placeholder tokens and silently desync pixel_values from the
         # vit embeds (a shape mismatch the model forward tolerates by slicing).
         if self.image_key and self.processor is not None and not self.media_token_ids:
             raise ValueError(
                 "VLM SFT: no image/video placeholder token id resolvable from the processor "
-                "or tokenizer (checked *_token_id attrs and image_token/video_token strings); "
+                "or tokenizer (checked image/video *_token_id attributes); "
                 "truncation cannot protect image placeholders."
             )
         self.pad_token_id = self.text_tokenizer.pad_token_id
