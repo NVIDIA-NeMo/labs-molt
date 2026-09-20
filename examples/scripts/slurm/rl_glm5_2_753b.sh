@@ -136,7 +136,7 @@ if [ "$CHAIN_DEPTH" -lt "$CHAIN_MAX" ]; then
     ${SLURM_JOB_RESERVATION:+--reservation="$SLURM_JOB_RESERVATION"} \
     --nodes="$SLURM_JOB_NUM_NODES" \
     --comment="$SBATCH_COMMENT" \
-    "$REPO_ROOT/examples/scripts/slurm/rl_glm5_2.sh")
+    "$REPO_ROOT/examples/scripts/slurm/rl_glm5_2_753b.sh")
   echo "[chain] depth=$NEXT_DEPTH/$CHAIN_MAX next_jobid=$next_jobid"
 fi
 
