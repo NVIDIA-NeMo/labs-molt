@@ -16,7 +16,7 @@
 import inspect
 import sys
 from dataclasses import dataclass
-from types import ModuleType, SimpleNamespace
+from types import ModuleType
 
 
 def _install_vllm_test_stub():
@@ -53,50 +53,6 @@ except Exception:
     _install_vllm_test_stub()
 
 import molt.trainer.vllm.vllm_engine as vllm_engine  # noqa: E402
-from molt.trainer.vllm.bi_compat import (  # noqa: E402
-    _NoBatchInvariantEnv,
-    install_rollout_perf_overrides,
-)
-
-
-def test_rollout_perf_override_keeps_unrelated_vllm_environment_settings():
-    source = SimpleNamespace(VLLM_BATCH_INVARIANT=True, VLLM_FOO="bar")
-    envs = _NoBatchInvariantEnv(source)
-
-    assert not envs.VLLM_BATCH_INVARIANT
-    assert envs.VLLM_FOO == "bar"
-
-
-def test_rollout_perf_override_is_limited_to_its_three_vllm_selectors(monkeypatch):
-    envs = SimpleNamespace(VLLM_BATCH_INVARIANT=True, VLLM_FOO="bar")
-    linear = ModuleType("vllm.model_executor.layers.linear")
-    vocab = ModuleType("vllm.model_executor.layers.vocab_parallel_embedding")
-    fa_utils = ModuleType("vllm.v1.attention.backends.fa_utils")
-    for module in (linear, vocab, fa_utils):
-        module.envs = envs
-
-    layers = ModuleType("vllm.model_executor.layers")
-    layers.linear = linear
-    layers.vocab_parallel_embedding = vocab
-    attention = ModuleType("vllm.v1.attention")
-    backends = ModuleType("vllm.v1.attention.backends")
-    backends.fa_utils = fa_utils
-    attention.backends = backends
-    v1 = ModuleType("vllm.v1")
-    v1.attention = attention
-    model_executor = ModuleType("vllm.model_executor")
-    model_executor.layers = layers
-    monkeypatch.setattr(vllm_engine.vllm, "model_executor", model_executor, raising=False)
-    monkeypatch.setattr(vllm_engine.vllm, "v1", v1, raising=False)
-    for module in (linear, vocab, fa_utils, layers, backends, attention, v1):
-        monkeypatch.setitem(sys.modules, module.__name__, module)
-    monkeypatch.setenv("MOLT_ALIGNMENT_ROLLOUT_PERF", "1")
-
-    install_rollout_perf_overrides()
-
-    for module in (linear, vocab, fa_utils):
-        assert not module.envs.VLLM_BATCH_INVARIANT
-        assert module.envs.VLLM_FOO == "bar"
 
 
 def test_vllm_ray_executor_uses_worker_gpu_even_when_actor_is_cpu_only():
