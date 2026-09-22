@@ -16,6 +16,131 @@
 # Adapted from OpenRLHF (https://github.com/OpenRLHF/OpenRLHF),
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
+def _inline_qwen2_first_layer(model):
+    """Inline Qwen2's first decoder layer while preserving its normal outputs."""
+    import types
+    from itertools import islice
+
+    from vllm.distributed import get_pp_group
+    from vllm.sequence import IntermediateTensors
+
+    backbone = getattr(model, "model", None)
+    if type(backbone).__name__ != "Qwen2Model":
+        raise RuntimeError("first-layer inlining requires vLLM Qwen2Model")
+    if getattr(backbone, "_molt_first_layer_inlined", False):
+        return
+
+    def forward(self, input_ids, positions, intermediate_tensors=None, inputs_embeds=None):
+        if get_pp_group().is_first_rank:
+            hidden_states = (
+                inputs_embeds
+                if inputs_embeds is not None
+                else self.embed_input_ids(input_ids)
+            )
+            residual = None
+        else:
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            residual = intermediate_tensors["residual"]
+
+        for idx, layer in enumerate(islice(self.layers, self.start_layer, self.end_layer)):
+            if idx:
+                hidden_states, residual = layer(positions, hidden_states, residual)
+                continue
+            if residual is None:
+                residual = hidden_states
+                hidden_states = layer.input_layernorm(hidden_states)
+            else:
+                hidden_states, residual = layer.input_layernorm(hidden_states, residual)
+            hidden_states = layer.self_attn(
+                positions=positions, hidden_states=hidden_states
+            )
+            hidden_states, residual = layer.post_attention_layernorm(
+                hidden_states, residual
+            )
+            hidden_states = layer.mlp(hidden_states)
+
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors(
+                {"hidden_states": hidden_states, "residual": residual}
+            )
+        hidden_states, _ = self.norm(hidden_states, residual)
+        return hidden_states
+
+    backbone.forward = types.MethodType(forward, backbone)
+    backbone._molt_first_layer_inlined = True
+
+
+def _install_qwen2_first_layer_inline_patch():
+    """Install the optional Qwen2 call-boundary alignment before compilation."""
+    import os
+
+    if os.environ.get("MOLT_VLLM_INLINE_QWEN_FIRST_LAYER") != "1":
+        return
+
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    if getattr(GPUModelRunner, "_molt_first_layer_inline_patch", False):
+        return
+    load_model = GPUModelRunner.load_model
+
+    def patched_load_model(self, *args, **kwargs):
+        result = load_model(self, *args, **kwargs)
+        _inline_qwen2_first_layer(self.model)
+        return result
+
+    GPUModelRunner.load_model = patched_load_model
+    GPUModelRunner._molt_first_layer_inline_patch = True
+
+
+def _install_vllm_cuda_rope_patch():
+    """Use vLLM's native RoPE kernel for full-dimension static rotation."""
+    import os
+
+    if (
+        os.environ.get("MOLT_USE_VLLM_CUDA_ROPE") != "1"
+        and os.environ.get("MOLT_ALIGNMENT_VLLM_CUDA_ROPE") != "1"
+    ):
+        return
+
+    from vllm import _custom_ops as ops
+    from vllm.model_executor.layers.rotary_embedding.base import RotaryEmbedding
+
+    if getattr(RotaryEmbedding, "_molt_cuda_static_rope", False):
+        return
+    original_forward_static = RotaryEmbedding.forward_static
+
+    def forward_static(
+        positions, query, key, head_size, rotary_dim, cos_sin_cache, is_neox_style
+    ):
+        if rotary_dim != head_size:
+            return original_forward_static(
+                positions,
+                query,
+                key,
+                head_size,
+                rotary_dim,
+                cos_sin_cache,
+                is_neox_style,
+            )
+        ops.rotary_embedding(
+            positions.flatten(),
+            query,
+            key,
+            head_size,
+            cos_sin_cache,
+            is_neox_style,
+        )
+        return query, key
+
+    RotaryEmbedding.forward_static = staticmethod(forward_static)
+    RotaryEmbedding._molt_cuda_static_rope = True
+    print("[Alignment] enabled vLLM CUDA static RoPE.")
+
+
+_install_qwen2_first_layer_inline_patch()
+_install_vllm_cuda_rope_patch()
+
 
 class WorkerWrap:
     def init_process_group(self, master_address, master_port, rank_offset, world_size, group_name, backend="nccl"):

@@ -18,6 +18,7 @@
 
 import argparse
 import copy
+import json
 import os
 
 from molt.trainer.algorithm.experience import get_model_parallel_size
@@ -40,12 +41,21 @@ def _ray_runtime_env_vars():
         "TORCH_COMPILE_DISABLE",
         "PYTORCH_CUDA_ALLOC_CONF",
         "VLLM_WORKER_MULTIPROC_METHOD",
+        "VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY",
+        "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY",
         "WANDB_API_KEY",
         "WANDB_ENTITY",
         "WANDB_MODE",
     ):
         if os.environ.get(name):
             env_vars[name] = os.environ[name]
+    env_vars.update(
+        {
+            name: value
+            for name, value in os.environ.items()
+            if name.startswith("MOLT_ALIGNMENT_")
+        }
+    )
     return env_vars
 
 
@@ -105,6 +115,9 @@ def train(args):
             enable_chunked_prefill=args.vllm.enable_chunked_prefill,
             max_num_batched_tokens=args.vllm.max_num_batched_tokens,
             async_scheduling=args.vllm.async_scheduling,
+            compilation_config=vars(args.vllm.compilation_config)
+            if args.vllm.compilation_config
+            else None,
             decode_context_parallel_size=args.vllm.decode_context_parallel_size,
             dtype=args.vllm.dtype,
             block_size=args.vllm.block_size,
@@ -739,6 +752,12 @@ if __name__ == "__main__":
         action=argparse.BooleanOptionalAction,
         default=None,
         help="vLLM async scheduling (default: vLLM auto — True for mp/uniproc executors with no spec-decode).",
+    )
+    parser.add_argument(
+        "--vllm.compilation_config",
+        type=json.loads,
+        default=None,
+        help="JSON object forwarded to vLLM CompilationConfig.",
     )
     parser.add_argument(
         "--vllm.decode_context_parallel_size",
