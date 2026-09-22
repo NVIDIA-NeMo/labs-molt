@@ -4,7 +4,7 @@
 
 **An agentic-first RL framework for research.**
 
-Ray · vLLM · NVIDIA AutoModel — the smallest PyTorch/HuggingFace-native stack for
+Ray · vLLM · NVIDIA AutoModel — the smallest PyTorch / HuggingFace-native stack for
 1T-class fully-async, multimodal, multi-turn agentic RL.
 
 <br/>
@@ -36,7 +36,7 @@ Ray · vLLM · NVIDIA AutoModel — the smallest PyTorch/HuggingFace-native stac
 
 </div>
 
-Molt is **agentic-first** and **PyTorch/HuggingFace-native**. The agent is the program;
+Molt is **agentic-first** and **PyTorch / HuggingFace-native**. The agent is the program;
 the trainer is a single actor; reward is any Python you write inside an `Env`
 or `ChatAgent` — graders, multi-turn tools, VLM environments, LLM-as-judge.
 Three components carry the rest — **Ray** for placement and async queues,
