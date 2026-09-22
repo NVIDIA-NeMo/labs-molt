@@ -135,7 +135,7 @@ RL on vLLM. Read every line that touches your gradients, in plain PyTorch.
 | Agent interface | `--train.agent_path` with `Env` or `ChatAgent` subclass + an `AgentRunner` |
 | Reward source | `Result(reward=...)` returned from `Env.step` or `ChatAgent.run` |
 | Modalities | Text and VLM prompts, including image payloads |
-| Chat templates | Assistant spans (SFT loss mask + multi-turn rollout stitching) are derived from the model's own chat template — no hard-coded markers. Verified on ChatML (Qwen3.x, Nemotron omni3), Kimi-K2.6, GLM, Gemma and DeepSeek |
+| Chat templates | Assistant spans (SFT loss mask + multi-turn rollout stitching) are derived from the model's own chat template — no hard-coded markers. Verified on ChatML (Qwen3.x, Nemotron-Omni), Kimi-K2.6, GLM, Gemma, and DeepSeek |
 
 ### Algorithms
 
@@ -169,7 +169,7 @@ per-token importance ratio `pi_train / pi_rollout`, gated by two knobs:
 - `--algo.advantage.is_correction_mode {mask, clip, trunc}` — treatment of a unit
   outside the band. `mask` drops it (zero gradient); `clip` clamps its weight into
   the band; `trunc` clamps only the upper tail.
-- `--algo.advantage.is_correction_threshold [LOW] HIGH` — the `[low, high]` band on the
+- `--algo.advantage.is_correction_threshold [LOW] HIGH` — the `[LOW, HIGH]` band on the
   ratio (recipes use a tight `0.99 1.01`); a single value is an upper bound only.
 
 The named schemes and their prior art:
@@ -210,7 +210,7 @@ NVIDIA AutoModel — built for A100 / H100 / H200 / B200·GB200, so it runs SFT 
 with no local dependency wrangling. Pull the prebuilt image from Docker Hub:
 
 ```bash
-docker pull hijkzzz/molt:latest   # or a pinned release: hijkzzz/molt:0.1.7
+docker pull hijkzzz/molt:latest   # or a pinned release: hijkzzz/molt:0.1.10
 ```
 
 ...or build it yourself from the Dockerfile (e.g. to change the CUDA / vLLM / AutoModel pins):
@@ -343,7 +343,7 @@ class AgentRunner(ChatAgentRunner):
 
 The same server speaks the Anthropic wire too — point `AsyncAnthropic` at
 `ctx.session_url` (the session root *without* `/v1`; the SDK appends
-`/v1/messages` itself), everything else is identical:
+`/v1/messages` itself); everything else is identical:
 
 ```python
 from anthropic import AsyncAnthropic
@@ -377,7 +377,7 @@ The server detects this automatically: when an incoming request rewrites the
 prefix instead of extending it, it **seals the current segment and starts a fresh
 token-exact segment** from the re-templated conversation. One
 rollout therefore emits several segment trajectories — they share the rollout's
-reward and `rollout_id`, so group baselines (GRPO/RLOO/…) dedup them to *one
+reward and `rollout_id`, so group baselines (GRPO/RLOO/…) deduplicate them to *one
 reward per rollout* while each segment still contributes its own generated tokens
 to the policy gradient (the same step-sample contract multi-turn agents use). No
 agent-side change is needed — it works on both wires, including external harnesses
@@ -439,10 +439,10 @@ Or point `PROMPT_DATASET` / `EVAL_DATASET` at your own data.
 Slurm usage:
 
 ```bash
-# 1) SFT smoke on interactive 2 nodes
+# 1) SFT smoke on 2 interactive nodes
 sbatch examples/scripts/slurm/sft_qwen3_6_35b.sh
 
-# 2) RL smoke on interactive 2 nodes (auto-preps geo3k on first run)
+# 2) RL smoke on 2 interactive nodes (auto-preps geo3k on first run)
 sbatch examples/scripts/slurm/rl_qwen3_6_35b.sh
 
 # 3) Scale RL to 4 nodes for convergence
@@ -456,9 +456,9 @@ Qwen3.6 RL script. The model emits a `<tool_call>` invoking
 `python_executor(code=...)`; the env runs the snippet in a sandboxed
 subprocess and feeds the captured stdout back as a `<tool_response>` turn.
 The loop runs up to `MAX_AGENT_TURNS` (agent default 5; the shipped Qwen3.6
-recipe raises it to 10); the final `<answer>ANSWER</answer>` (or
-`\boxed{ANSWER}` for legacy distributions) is graded against the ground truth
-and becomes the reward.
+recipes set 4 for the quick start and 10 on Slurm); the final
+`<answer>ANSWER</answer>` (or `\boxed{ANSWER}` for legacy distributions) is
+graded against the ground truth and becomes the reward.
 
 ### OpenAI- / Anthropic-compatible server agent
 
@@ -466,19 +466,19 @@ For agents that already speak OpenAI Chat Completions or the Anthropic Messages
 API, subclass `ChatAgent` (see `examples/python/agents/chat_minimal.py`). The
 auto-launched server exposes both `/v1/chat/completions` and `/v1/messages`
 against the rolling vLLM engines, so any external loop (browser automation, eval
-harness, OSWorld …) can drive the policy through a stock OpenAI or Anthropic SDK
+harness, OSWorld, …) can drive the policy through a stock OpenAI or Anthropic SDK
 — both wires decode to the same token-exact trajectory capture.
 
 ### On-policy distillation
 
-Distill a student onto a frozen teacher on the student's *own* on-policy
+Distill a student toward a frozen teacher on the student's *own* on-policy
 samples. A single switch —
 `--algo.advantage.estimator on_policy_distill` — turns the reference model into
 the teacher and makes the per-token **reverse KL** to it the entire training
 signal: the advantage becomes `-kl_coef · (log π_student − log π_teacher)` with
 no scalar reward, no group baseline, and no whitening, so the policy loss is the
-policy-gradient estimator of the reverse-KL gradient that pulls the student onto
-the teacher.
+policy-gradient estimator of the reverse-KL gradient that pulls the student
+toward the teacher.
 
 ```bash
 python3 -m molt.cli.train_rl_ray \
@@ -509,8 +509,8 @@ matches the teacher; task accuracy is not the objective, so eval is off.
 To distill a **multi-turn tool-use distribution** (matching how the student is
 actually deployed), point `--train.agent_path` at the task's real agent (e.g.
 `chat_geo3k.py`) — its reward is simply ignored by the estimator.
-`examples/scripts/slurm/rl_distill_omni3_30b.sh` is a ready VLM example off the omni3
-EP8 / CP8 / TE / DeepEP recipe.
+`examples/scripts/slurm/rl_distill_omni3_30b.sh` is a ready-made VLM example
+built on the omni3 EP8 / CP8 / TE / DeepEP recipe.
 
 ## 🎛️ Scaling Knobs
 
@@ -532,7 +532,7 @@ Molt targets AutoModel custom models with FSDP2:
 
 Context parallelism is delegated to AutoModel's `ContextParallelSharder`, so each
 model gets the sharding its attention backend needs — round-robin for hybrid
-SSM / linear-attention models (Nemotron Omni, Qwen3.5-MoE), flat THD streams for
+SSM / linear-attention models (Nemotron-Omni, Qwen3.5-MoE), flat THD streams for
 sparse-attention models (GLM-5.2 DSA). VLM vision towers and routing replay shard
 with the sequence, so `--fsdp.cp_size` composes with `--data.image_key` and
 `--train.routing_replay`. Sample packing (`--fsdp.packing_samples`) is text-only
@@ -593,7 +593,7 @@ expert ids it chose, and the training forward replays that exact selection.
   replayed; the router logits are still recomputed from the live weights, so the
   gradient keeps flowing into the router (it keeps learning).
 - **Full-sequence, absolute-position aligned**: routing is laid down by token
-  position; positions the engine returns no routing for keep their natural selection.
+  position; any position the engine returns no routing for keeps its natural selection.
 - Needs AutoModel `RouterReplay` (`nemo_automodel.components.moe.router_replay`,
   PR #2797). Incompatible with `--train.partial_rollout_enable` (vLLM frees routing
   on preemption).
