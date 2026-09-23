@@ -277,6 +277,7 @@ Common RL switches:
 | Compare samples per prompt | `--rollout.n_samples_per_prompt 8` plus `reinforce_baseline`, `rloo`, `grpo`, or `dr_grpo` |
 | Decouple rollout and training | `--train.async_queue_size 2` |
 | Keep rollout alive during sync | `--train.partial_rollout_enable` |
+| Dynamic token-budget batching | `--train.dynamic_batch_enable`; padded FlexAttention runs can add `--train.dynamic_batch_pad_to_multiple 1024` to reduce variable compiled shapes |
 | Filter by agent scores | `--algo.dynamic_filtering_enable --algo.dynamic_filtering_range 0.0 1.0` |
 | Correct async rollout logprobs | `--algo.advantage.is_correction_level geo` (seq-mask-tis; token-level adds `--algo.advantage.is_correction_mode clip/trunc/mask`) |
 | FlashREINFORCE (critic-free, single-rollout) | `--train.force_on_policy --algo.advantage.estimator flash_reinforce --algo.advantage.is_correction_level seq --algo.advantage.is_correction_gating binary_kl --algo.advantage.is_correction_threshold 5e-3 --actor.loss_agg_mode seq-mean-token-mean` — see [the quick start](examples/scripts/quick_start/rl_flash_reinforce_r1d_1p5b.sh) |
