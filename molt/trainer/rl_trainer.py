@@ -246,7 +246,7 @@ def compute_eval_metrics(eval_dataloader, samples_list, n_samples_per_prompt):
         logs["eval_response_length_mean"] = sum(total_lengths) / len(total_lengths)
     if total_truncated:
         logs["eval_truncated_rate"] = sum(total_truncated) / len(total_truncated)
-    logs["eval_num_samples"] = float(len(samples_list))
+    logs["eval_num_samples"] = float(len(seen_episodes))
 
     return logs
 

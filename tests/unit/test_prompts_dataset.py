@@ -167,3 +167,4 @@ def test_eval_metrics_counts_each_episode_once_across_turn_segments():
     metrics = compute_eval_metrics(eval_dataloader, samples, n_samples_per_prompt=2)
     assert metrics["eval_geo3k_pass1"] == 0.5  # episode mean, not turn-weighted
     assert metrics["eval_geo3k_pass2"] == 1.0
+    assert metrics["eval_num_samples"] == 2.0
