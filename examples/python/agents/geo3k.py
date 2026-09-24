@@ -64,7 +64,6 @@ _TOOLS = {_PYTHON_EXECUTOR.schema["function"]["name"]: _PYTHON_EXECUTOR}
 
 _MAX_TURNS = int(os.environ.get("MAX_AGENT_TURNS", "5"))
 _ANSWER_RE = re.compile(r"<answer>\s*(.*?)\s*</answer>", re.DOTALL | re.IGNORECASE)
-_BOXED_RE = re.compile(r"\\boxed\{([^{}]*)\}")
 # Default candidates cover the vLLM rename: <=0.23 ships Qwen3XMLToolParser,
 # >=0.24 replaces it with the Rust-backed Qwen3EngineToolParser (same interface).
 _PARSER_CLS_PATHS = [
@@ -103,6 +102,15 @@ def _extract_tool_call(text: str) -> dict[str, Any] | None:
     return {"name": tc.function.name, "arguments": args}
 
 
+def _final_answer(text: str) -> str:
+    """Return the model's final answer, including boxed expressions with nested braces."""
+    answers = _ANSWER_RE.findall(text)
+    if answers:
+        return answers[-1].strip()
+    boxed = _GRADER._last_braced_command(text, r"\boxed") or _GRADER._last_braced_command(text, r"\fbox")
+    return boxed.strip() if boxed else ""
+
+
 # `label` is the raw dataset reward_model field — typically a dict like
 # {"ground_truth": "3", "style": "rule"}. math_grader.score_response unwraps
 # it via _ground_truth_from_label; pass through verbatim (stringifying would
@@ -114,14 +122,7 @@ def _extract_tool_call(text: str) -> dict[str, Any] | None:
 def _grade_answer(text: str, label) -> tuple[float, str]:
     if not label:
         return 0.0, ""
-    answers = _ANSWER_RE.findall(text)
-    if answers:
-        answer = answers[-1].strip()
-    else:
-        # Balanced \boxed/\fbox extraction — handles nested braces (\boxed{\frac{1}{2}})
-        # that the flat _BOXED_RE truncates to no-match (=0 reward). chat_geo3k parity.
-        boxed = _GRADER._last_braced_command(text, r"\boxed") or _GRADER._last_braced_command(text, r"\fbox")
-        answer = boxed.strip() if boxed else ""
+    answer = _final_answer(text)
     if not answer:
         return 0.0, ""
     try:
@@ -180,7 +181,7 @@ class GeoEnv(Env):
         # even if it co-emits a tool_call, or when it stops calling tools. Grading
         # the committed answer prevents post-answer verification loops that inflate
         # length/turns with no reward gain (a length-hacking failure mode).
-        committed_answer = bool(_ANSWER_RE.search(action) or _BOXED_RE.search(action))
+        committed_answer = bool(_final_answer(action))
         if committed_answer or tool_call is None:
             reward, parsed = self._final_reward(label)
             status = "Correct." if reward.item() >= 1.0 else f"Done. Final answer: {parsed or 'none'}"
