@@ -475,8 +475,9 @@ class BaseRLTrainer:
         """Broadcast actor weights to vLLM engines."""
         ray.get(self.actor_model_group.async_run_method(method_name="broadcast_to_vllm"))
 
-        # NOTE: We keep vLLM in weights-only state after weight sync.
-        # KV cache will be woken up before generation in SamplesGenerator.
+        # Weight sync neither wakes nor warms a KV cache: RLTrainer pauses and clears
+        # vLLM's caches around the broadcast (see RLTrainer.broadcast_to_vllm), so a
+        # request that straddled the update re-prefills under the new weights.
 
     def save_best_checkpoint(self, eval_metrics, global_step, client_states=None):
         """Save checkpoint if eval metric is the best so far.
