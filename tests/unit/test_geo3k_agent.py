@@ -90,6 +90,22 @@ def test_step_continues_on_tool_call_without_answer(monkeypatch):
     assert result.observation.startswith("<|im_end|>\n<|im_start|>user")
 
 
+def test_step_marks_last_tool_call_turn_truncated(monkeypatch):
+    env = geo3k.GeoEnv()
+    monkeypatch.setattr(geo3k, "_MAX_TURNS", 1)
+    monkeypatch.setattr(
+        geo3k, "_extract_tool_call", lambda text: {"name": "python_executor", "arguments": {"code": "print(1)"}}
+    )
+
+    result = asyncio.run(
+        env.step({"action_text": "let me compute <tool_call>x</tool_call>", "label": {"ground_truth": "5"}})
+    )
+
+    assert result.terminated is False
+    assert result.truncated is True
+    assert env.tool_call_count == 1
+
+
 def test_step_reuses_generated_turn_end_for_feedback(monkeypatch):
     env = geo3k.GeoEnv()
     monkeypatch.setattr(geo3k, "_extract_tool_call", lambda text: None)
