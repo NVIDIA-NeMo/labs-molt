@@ -831,6 +831,17 @@ class PolicyModelActor(BaseModelActor):
                     "LoRA patched a tied lm_head: its trained delta cannot reach vLLM. "
                     "Exclude lm_head from the LoRA targets (e.g. --actor.lora_target_modules '*.q_proj' ...)."
                 )
+        if peft_config is not None:
+            # Refit merges linear adapters into their base weight before broadcasting, but
+            # AutoModel's grouped MoE adapters (lora_gate_and_up_*/lora_down_*) have no such
+            # mapping: the base experts would reach vLLM unmerged and the rollout would
+            # silently drift from the trainer. Refuse rather than diverge.
+            for name, module in actor.model.named_modules():
+                if getattr(module, "lora_gate_and_up_A", None) is not None:
+                    raise ValueError(
+                        f"LoRA targets MoE experts ({name}), which the vLLM refit cannot merge. "
+                        "Restrict --actor.lora_target_modules to linear layers (e.g. '*.q_proj' ...)."
+                    )
         if vllm_engines is not None:
             adapter = getattr(actor.model, "state_dict_adapter", None)
             if (
