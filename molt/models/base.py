@@ -461,6 +461,15 @@ class BaseModel(nn.Module):
             **_mtp_off_kwargs(pretrain_or_model),
             **backend_kwarg,
         )
+        # A mistyped --*.lora_target_modules matches nothing, and AutoModel freezes every
+        # base parameter before patching adapters in — so training would silently run with
+        # no trainable weights. Fail instead of burning the run.
+        if peft_config is not None and not any(p.requires_grad for p in self.model.parameters()):
+            raise ValueError(
+                "peft_config matched no modules: every parameter is frozen. Patterns are matched "
+                "against full module names (e.g. '*.q_proj'), so a bare leaf name like 'q_proj' "
+                "matches nothing."
+            )
         self.model = move_model_to_cpu_for_offload(self.model, distributed_config)
         # from_pretrained may downgrade to HF even when custom was requested;
         # re-derive from the loaded class so the forward picks the right pack style.
