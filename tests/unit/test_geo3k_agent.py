@@ -54,6 +54,26 @@ def test_step_terminates_on_answer_even_with_co_emitted_tool_call(monkeypatch):
     assert result.observation.startswith("<|im_end|>\n<|im_start|>user")
 
 
+def test_step_terminates_on_nested_boxed_answer_with_tool_call(monkeypatch):
+    env = geo3k.GeoEnv()
+    monkeypatch.setattr(
+        geo3k, "_extract_tool_call", lambda text: {"name": "python_executor", "arguments": {"code": "print(1)"}}
+    )
+
+    result = asyncio.run(
+        env.step(
+            {
+                "action_text": r"\boxed{\frac{1}{2}} <tool_call>x</tool_call>",
+                "label": {"ground_truth": r"\frac{1}{2}"},
+            }
+        )
+    )
+
+    assert result.terminated is True
+    assert result.reward.item() == 1.0
+    assert env.tool_call_count == 0
+
+
 def test_step_continues_on_tool_call_without_answer(monkeypatch):
     """No committed answer + a tool_call → keep going (mid-trajectory, not terminal)."""
     env = geo3k.GeoEnv()
