@@ -31,6 +31,16 @@ def train(args):
     strategy = get_strategy(args)
     strategy.setup_distributed()
 
+    # LoRA via AutoModel's native PEFT path: injected post-init, pre-FSDP2; base
+    # weights are frozen and the optimizer already filters on requires_grad.
+    peft_config = None
+    if args.model.lora_dim > 0:
+        peft_config = {"dim": args.model.lora_dim, "alpha": args.model.lora_alpha}
+        if args.model.lora_target_modules:
+            peft_config["target_modules"] = list(args.model.lora_target_modules)
+        else:
+            peft_config["match_all_linear"] = True
+
     model = Actor(
         args.model.model_name_or_path,
         attn_implementation=args.fsdp.attn_implementation,
@@ -43,6 +53,7 @@ def train(args):
         packing_samples=args.fsdp.packing_samples,
         freeze_visual_encoder=args.model.freeze_visual_encoder,
         moe_aux_loss_coef=args.model.aux_loss_coef,
+        peft_config=peft_config,
     )
     tokenizer = get_tokenizer(
         args.model.model_name_or_path, model.model, "right", use_fast=not args.data.disable_fast_tokenizer
@@ -183,6 +194,20 @@ if __name__ == "__main__":
         default=False,
         help="VLM only: freeze the vision encoder + projector and train the language backbone only "
         "(AutoModel's finetune recipe defaults to freezing the vision tower). cp_size>1 forces this on.",
+    )
+
+    # LoRA (0 = off, full fine-tune)
+    parser.add_argument("--model.lora_dim", type=int, default=0, help="LoRA rank; 0 disables LoRA.")
+    parser.add_argument("--model.lora_alpha", type=int, default=32, help="LoRA alpha; scale = alpha / dim.")
+    parser.add_argument(
+        "--model.lora_target_modules",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Wildcard patterns matched against FULL module names (AutoModel "
+        "ModuleMatcher), e.g. '*.q_proj' '*.v_proj' — bare leaf names like 'q_proj' "
+        "match nothing. Default: all linear layers (match_all_linear). On MoE models, "
+        "name targets explicitly to keep the router gate out of the patch set.",
     )
 
     # Data
