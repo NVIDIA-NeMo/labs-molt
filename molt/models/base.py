@@ -261,6 +261,7 @@ class BaseModel(nn.Module):
         use_fp32_master_weights: bool = True,
         moe_aux_loss_coef: float = 0.0,
         routing_replay: bool = False,
+        peft_config: dict | None = None,
         **kwargs,
     ) -> None:
         super().__init__()
@@ -285,6 +286,9 @@ class BaseModel(nn.Module):
         self.cp_size = cp_mesh.size() if cp_mesh is not None else 1
 
         if not isinstance(pretrain_or_model, str):
+            if peft_config is not None:
+                # LoRA is injected by from_pretrained; a pre-built model is used as-is.
+                raise ValueError("peft_config requires a checkpoint path, not a pre-instantiated model.")
             self.model = pretrain_or_model
             self.is_vlm = False
             self._packing_style = "automodel" if is_automodel_custom_model(self.model) else "hf"
@@ -345,6 +349,12 @@ class BaseModel(nn.Module):
         # contract (NVIDIA-NeMo/Automodel PR #2379) — load in fp32, let FSDP2's
         # MixedPrecisionPolicy(param_dtype=bf16) do bf16 fwd/bwd. A bf16 master
         # rounds away AdamW updates (~LR < bf16 ULP) at small LR, so the MoE never learns.
+        # LoRA is the exception: AutoModel's PEFT recipes load compute-dtype (bf16)
+        # weights, and fp32 masters + LoRA produced mixed-dtype attention (sdpa got
+        # fp32 q/k against bf16 v). LoRA runs at high LR anyway, where a bf16 master
+        # does not round updates away.
+        if peft_config is not None:
+            use_fp32_master_weights = False
         torch_dtype = compute_dtype if not use_fp32_master_weights else torch.float32
         self.is_vlm = is_vlm_model(pretrain_or_model)
 
@@ -429,6 +439,12 @@ class BaseModel(nn.Module):
             moe_parallel_config=moe_config,
             activation_checkpointing=ac_setting,
         )
+        # AutoModel annotates peft_config as `dict | None` but dereferences
+        # dataclass attributes (peft_config.target_modules), so hand it a PeftConfig.
+        if peft_config is not None:
+            from nemo_automodel.components._peft.lora import PeftConfig
+
+            peft_config = PeftConfig(**peft_config)
         self.model = ModelCls.from_pretrained(
             pretrain_or_model,
             trust_remote_code=True,
@@ -439,6 +455,7 @@ class BaseModel(nn.Module):
             has_packed_sequence=packing_samples,
             force_hf=False,
             freeze_config={"freeze_vision_tower": True} if freeze_visual_encoder else None,
+            peft_config=peft_config,
             # Disable the MTP head via AutoModel's config-override deep-merge (see
             # _mtp_off_kwargs); no-op without MTP.
             **_mtp_off_kwargs(pretrain_or_model),

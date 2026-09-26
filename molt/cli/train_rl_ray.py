@@ -348,6 +348,20 @@ if __name__ == "__main__":
         help="Freeze the MoE router/gate weights so routing is held fixed during training, which "
         "stabilizes MoE training and keeps the vLLM-vs-actor routing identical.",
     )
+
+    # LoRA (0 = off, full fine-tune)
+    parser.add_argument("--actor.lora_dim", type=int, default=0, help="LoRA rank; 0 disables LoRA.")
+    parser.add_argument("--actor.lora_alpha", type=int, default=32, help="LoRA alpha; scale = alpha / dim.")
+    parser.add_argument(
+        "--actor.lora_target_modules",
+        type=str,
+        nargs="+",
+        default=None,
+        help="Wildcard patterns matched against FULL module names (AutoModel "
+        "ModuleMatcher), e.g. '*.q_proj' '*.v_proj' — bare leaf names like 'q_proj' "
+        "match nothing. Default: all linear layers (match_all_linear). On MoE models, "
+        "name targets explicitly to keep the router gate out of the patch set.",
+    )
     parser.add_argument(
         "--ref.model_name_or_path",
         type=str,

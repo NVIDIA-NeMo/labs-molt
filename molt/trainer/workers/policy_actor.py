@@ -603,6 +603,19 @@ class PolicyTrainer:
         ep_size = getattr(self.strategy.args.fsdp, "ep_size", 1) or 1
         model_config = getattr(model, "config", None)
 
+        # LoRA: vLLM serves full weights, so refit broadcasts the adapter merged
+        # into its base weight (W + scale·B@A) and skips the adapter entries.
+        # scale comes from the patched module itself (LinearLoRA.scale = alpha/dim).
+        sd = model.state_dict()
+        lora_merge: dict = {}
+        for mod_name, mod in model.named_modules():
+            if getattr(mod, "lora_A", None) is not None and getattr(mod, "lora_B", None) is not None:
+                lora_merge[f"{mod_name}.weight"] = (
+                    f"{mod_name}.lora_A.weight",
+                    f"{mod_name}.lora_B.weight",
+                    float(mod.scale),
+                )
+
         # Pack many small per-tensor broadcasts into large batched broadcasts.
         # Inspired by vLLM's `vllm.distributed.weight_transfer.packed_tensor`
         # — same idea, simplified (no double-buffer streams) since FSDP
@@ -641,7 +654,9 @@ class PolicyTrainer:
             pending_tensors.clear()
             pending_bytes = 0
 
-        for name, tensor in model.state_dict().items():
+        for name, tensor in sd.items():
+            if lora_merge and (name.endswith(".lora_A.weight") or name.endswith(".lora_B.weight")):
+                continue  # adapters reach vLLM merged into their base weight
             # Refit EVERY state_dict entry (each converted to HF names below). vLLM's
             # load_weights matches by name and ignores what it doesn't have, so the
             # "which weights to accept" decision lives on the vLLM side. We deliberately
@@ -674,6 +689,15 @@ class PolicyTrainer:
 
             # Collective; every rank participates.
             weight, _ = gather_full_param(tensor)
+            merge = lora_merge.get(name)
+            if merge is not None:
+                # Also collectives: every rank must gather A and B in the same
+                # order; only rank 0 keeps the merged result for broadcast.
+                a, _ = gather_full_param(sd[merge[0]])
+                b, _ = gather_full_param(sd[merge[1]])
+                if is_rank0:
+                    weight = weight + merge[2] * (b.float() @ a.float()).to(weight.dtype)
+                del a, b
             if not is_rank0:
                 del weight
                 continue
@@ -769,6 +793,17 @@ class PolicyModelActor(BaseModelActor):
 
         self._setup_distributed(strategy)
 
+        # LoRA on the trainable actor only: reference workers keep the plain
+        # checkpoint, which equals the step-0 policy (lora_B inits to zero), so
+        # KL-to-init semantics need no change.
+        peft_config = None
+        if getattr(args.actor, "lora_dim", 0) > 0:
+            peft_config = {"dim": args.actor.lora_dim, "alpha": getattr(args.actor, "lora_alpha", 32)}
+            if getattr(args.actor, "lora_target_modules", None):
+                peft_config["target_modules"] = list(args.actor.lora_target_modules)
+            else:
+                peft_config["match_all_linear"] = True
+
         actor = Actor(
             pretrain,
             attn_implementation=strategy.args.fsdp.attn_implementation,
@@ -784,7 +819,18 @@ class PolicyModelActor(BaseModelActor):
             freeze_moe_router=getattr(strategy.args.actor, "freeze_moe_router", False),
             moe_aux_loss_coef=args.actor.aux_loss_coef,
             routing_replay=getattr(args.train, "routing_replay", False),
+            peft_config=peft_config,
         )
+        if peft_config is not None and getattr(actor.model.config, "tie_word_embeddings", False):
+            lm_head = getattr(actor.model, "lm_head", None)
+            if lm_head is not None and getattr(lm_head, "lora_A", None) is not None:
+                # Refit skips the tied lm_head (it reaches vLLM via embed_tokens, which
+                # carries no adapter), so a trained lm_head delta would silently never
+                # make it into the rollout policy.
+                logger.warning(
+                    "LoRA patched a tied lm_head: its trained delta cannot reach vLLM. "
+                    "Exclude lm_head from the LoRA targets (e.g. --actor.lora_target_modules '*.q_proj' ...)."
+                )
         if vllm_engines is not None:
             adapter = getattr(actor.model, "state_dict_adapter", None)
             if (
