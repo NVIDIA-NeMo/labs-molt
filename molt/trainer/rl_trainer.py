@@ -476,7 +476,7 @@ class BaseRLTrainer:
         ray.get(self.actor_model_group.async_run_method(method_name="broadcast_to_vllm"))
 
         # Weight sync neither wakes nor warms a KV cache: RLTrainer pauses and clears
-        # vLLM's caches around the broadcast (see RLTrainer.broadcast_to_vllm), so a
+        # vLLM's caches around the broadcast (see TrainingActor.broadcast_to_vllm), so a
         # request that straddled the update re-prefills under the new weights.
 
     def save_best_checkpoint(self, eval_metrics, global_step, client_states=None):
