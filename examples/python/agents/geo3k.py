@@ -207,7 +207,8 @@ class GeoEnv(Env):
         return Result(
             reward=reward,
             observation=feedback,
-            terminated=is_last_turn,
+            terminated=False,
+            truncated=is_last_turn,
             info=self._info(reward),
         )
 
