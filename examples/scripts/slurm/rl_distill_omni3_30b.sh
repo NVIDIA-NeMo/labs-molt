@@ -33,7 +33,7 @@ export MOLT_PATH="$REPO_ROOT"
 
 # On-policy distillation for Nemotron Omni3 (VLM MoE): student <- teacher.
 #
-# Same proven omni3 RL recipe (native AutoModel path, EP8/CP8/te/deepep, geo3k VLM
+# Same proven omni3 RL recipe (native AutoModel path, EP8/CP8/te/hybridep, geo3k VLM
 # multi-turn data), with ONE change: --algo.advantage.estimator on_policy_distill turns
 # the reference model into a frozen teacher and makes the per-token reverse KL to it the
 # entire training signal. k1 / kl.use_loss=off / unit coefficient are all derived — the
@@ -230,7 +230,7 @@ head_ip="$(srun --nodes=1 --ntasks=1 -w "$head_node" hostname --ip-address | awk
 ip_head="$head_ip:$RAY_PORT"
 
 # CUDNN_PATH/LD_LIBRARY_PATH pin TE to the bundled cuDNN 9.17.x (avoids the stale apt
-# cuDNN that breaks the CP fused-attn kernel). MOLT_MOE_DISPATCHER=deepep makes the MoE
+# cuDNN that breaks the CP fused-attn kernel). MOLT_MOE_DISPATCHER=hybridep makes the MoE
 # AC recompute deterministic at long context.
 ray_env="unset VLLM_NUM_ENGINES VLLM_TP_SIZE VLLM_GPU_MEMORY_UTILIZATION VLLM_MM_ENCODER_ATTN_BACKEND VLLM_GDN_PREFILL_BACKEND VLLM_ATTENTION_BACKEND VLLM_ENFORCE_EAGER VLLM_DISTRIBUTED_EXECUTOR_BACKEND VLLM_ENABLE_EXPERT_PARALLEL; cd /molt && export HF_HOME=/root/.cache/huggingface TOKENIZERS_PARALLELISM=true RAY_USAGE_STATS_ENABLED=0 RAY_DISABLE_DOCKER_CPU_WARNING=1 VLLM_WORKER_MULTIPROC_METHOD=spawn VLLM_USE_FLASHINFER_MOE_FP16=0 PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True CUDNN_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/cudnn LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/cudnn/lib:\${LD_LIBRARY_PATH:-} MAX_AGENT_TURNS=${MAX_AGENT_TURNS:-1} LOAD_MODEL_ONLY=${LOAD_MODEL_ONLY:-0} NVTE_FUSED_ATTN=${NVTE_FUSED_ATTN:-1} NVTE_FLASH_ATTN=${NVTE_FLASH_ATTN:-0} MOLT_MOE_RESHARD_AFTER_FWD=${MOLT_MOE_RESHARD_AFTER_FWD:-1} MOLT_DEFER_GRAD_SYNC=${MOLT_DEFER_GRAD_SYNC:-1} MOLT_MOE_DISPATCHER=${MOLT_MOE_DISPATCHER:-hybridep}${EXTRA_PYTHONPATH_EXPORT}"
 

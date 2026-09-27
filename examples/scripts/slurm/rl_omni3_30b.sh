@@ -51,7 +51,7 @@ export GRAD_CHECKPOINT="${GRAD_CHECKPOINT-full}"   # all blocks activation-check
 export FSDP_ATTN_IMPLEMENTATION="${FSDP_ATTN_IMPLEMENTATION:-te}"
 
 # --- Sequence / batch shape -------------------------------------------------
-# The deepep MoE dispatcher (actor.py default) makes expert routing/recompute
+# The HybridEP MoE dispatcher used by default here makes expert routing/recompute
 # deterministic, so activation checkpointing is safe at long context; the legacy
 # torch dispatcher drifts the recompute and raises CheckpointError. Memory tiers
 # on one 8-GPU actor node: CP=1 fits ~16K, 32K needs CP8.

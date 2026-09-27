@@ -26,13 +26,13 @@
 #SBATCH --exclusive
 
 # Nemotron Omni3 (NemotronH_Nano_Omni_Reasoning_V3) VLM SFT.
-# Default config = 32K + CP8 + EP8 + deepep + AC: the trainer delegates CP to the
+# Default config = 32K + CP8 + EP8 + hybridep + AC: the trainer delegates CP to the
 # Actor (RL contract); 2 nodes (16 GPUs) → CP8 shards the 32K sequence to 4K/rank,
 # DP=2. Mirrors slurm/rl_omni3_30b.sh:
 #   - Native AutoModel path (NemotronOmniForConditionalGeneration). TE is the
 #     fused-attention backend (flash_attention_2 silently falls to sdpa) and is
 #     required for CP>1.
-#   - Gradient checkpointing ON: the deepep MoE dispatcher makes the recompute
+#   - Gradient checkpointing ON: the HybridEP MoE dispatcher makes the recompute
 #     deterministic under AC (the torch dispatcher raises CheckpointError).
 
 set -euo pipefail
@@ -71,7 +71,7 @@ TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-8}"
 MICRO_BATCH_SIZE="${MICRO_BATCH_SIZE:-1}"
 
 # Omni3 native path: TE native cuDNN-fused attention. Grad-ckpt ON by default —
-# the deepep dispatcher makes the MoE recompute deterministic under AC.
+# the HybridEP dispatcher makes the MoE recompute deterministic under AC.
 FSDP_ATTN_IMPLEMENTATION="${FSDP_ATTN_IMPLEMENTATION:-te}"
 GRAD_CHECKPOINT="${GRAD_CHECKPOINT-full}"
 
@@ -137,7 +137,7 @@ TRAIN_ARGS=(
 )
 
 # Grad-ckpt mode from GRAD_CHECKPOINT (default full; '' disables, 'selective' for
-# per-op AC). Safe under the deepep dispatcher (deterministic MoE recompute).
+# per-op AC). Safe under the HybridEP dispatcher (deterministic MoE recompute).
 TRAIN_ARGS+=(--model.gradient_checkpoint "$GRAD_CHECKPOINT")
 
 if [ "${DISABLE_FINAL_SAVE:-0}" = "1" ]; then

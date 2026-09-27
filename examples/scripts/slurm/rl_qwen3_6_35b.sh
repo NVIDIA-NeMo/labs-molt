@@ -40,8 +40,8 @@ export MOLT_PATH="$REPO_ROOT"
 export MODEL_PATH="${MODEL_PATH:-/path/to/models/Qwen3.6-35B-A3B}"
 export TP_SIZE="${TP_SIZE:-1}"
 export EP_SIZE="${EP_SIZE:-8}"
-# Activation checkpointing ON by default — safe under the deepep MoE dispatcher
-# (the actor.py code default), which makes the expert routing/recompute
+# Activation checkpointing ON by default — safe under the HybridEP MoE dispatcher
+# used by default here, which makes the expert routing/recompute
 # deterministic. The legacy torch dispatcher could drift the recomputed MoE
 # tensors and raise `CheckpointError: Recomputed values ... different metadata`.
 export GRAD_CHECKPOINT="${GRAD_CHECKPOINT-full}"
