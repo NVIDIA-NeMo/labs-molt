@@ -58,6 +58,13 @@ class CheckpointManager:
         # Use AutoModel's Checkpointer: its custom-model save_pretrained mixin
         # requires it (raises "No checkpointer provided" otherwise). Outputs
         # consolidated HF safetensors that vLLM can hot-load.
+        #
+        # A LoRA run exports through AutoModel's is_peft path: with is_peft=False the
+        # frozen base weights plus the separate lora_A/lora_B keys go to disk, and
+        # HF/vLLM ignore those unknown keys — the snapshot would silently evaluate as
+        # the UNTRAINED base model. is_peft=True writes a standard PEFT adapter
+        # directory instead (adapter_model.safetensors + adapter_config.json).
+        peft_config = getattr(model, "peft_config", None)
         model = self.strategy._unwrap_model(model)
         # Declare the export precision on the config and every nested sub-config: loaders (vLLM/HF)
         # build each submodule at its config dtype, so a stale fp32 `dtype` (an fp32 master) left on
@@ -65,8 +72,12 @@ class CheckpointManager:
         from molt.utils.utils import convert_to_torch_dtype
 
         self._set_config_dtype(model.config, convert_to_torch_dtype(self.strategy.param_dtype))
-        ckpt = self._build_checkpointer(output_dir, save_consolidated=True, model=model)
-        ckpt.save_model(model=model, weights_path=output_dir, tokenizer=tokenizer)
+        ckpt = self._build_checkpointer(
+            output_dir, save_consolidated=True, model=model, is_peft=peft_config is not None
+        )
+        ckpt.save_model(
+            model=model, weights_path=output_dir, tokenizer=tokenizer, peft_config=peft_config
+        )
         if dist.is_initialized():
             dist.barrier()
         self._promote_hf_export(output_dir)
@@ -108,7 +119,9 @@ class CheckpointManager:
             shutil.move(src, dst)
         shutil.rmtree(model_dir, ignore_errors=True)
 
-    def _build_checkpointer(self, output_dir: str, save_consolidated: bool, model: nn.Module | None = None):
+    def _build_checkpointer(
+        self, output_dir: str, save_consolidated: bool, model: nn.Module | None = None, is_peft: bool = False
+    ):
         from nemo_automodel.components.checkpoint.checkpointing import Checkpointer, CheckpointingConfig
 
         model_cache_dir, model_repo_id = self._checkpoint_source(model) if model is not None else (None, None)
@@ -121,7 +134,7 @@ class CheckpointManager:
             model_repo_id=model_repo_id,
             save_consolidated=save_consolidated,
             original_model_root_dir=model_cache_dir,
-            is_peft=False,
+            is_peft=is_peft,
         )
         return Checkpointer(
             config=config,

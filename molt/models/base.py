@@ -284,6 +284,7 @@ class BaseModel(nn.Module):
         mesh_dims = getattr(device_mesh, "mesh_dim_names", ()) or ()
         cp_mesh = device_mesh["cp"] if device_mesh is not None and "cp" in mesh_dims else None
         self.cp_size = cp_mesh.size() if cp_mesh is not None else 1
+        self.peft_config = None
 
         if not isinstance(pretrain_or_model, str):
             if peft_config is not None:
@@ -445,6 +446,9 @@ class BaseModel(nn.Module):
             from nemo_automodel.components._peft.lora import PeftConfig
 
             peft_config = PeftConfig(**peft_config)
+        # The HF export saves adapters through AutoModel's is_peft path, which needs this
+        # config to write adapter_config.json; the loaded model does not retain it.
+        self.peft_config = peft_config
         self.model = ModelCls.from_pretrained(
             pretrain_or_model,
             trust_remote_code=True,

@@ -609,6 +609,37 @@ fixed router is acceptable.
 --actor.freeze_moe_router   # off by default; redundant with R3
 ```
 
+### 🧩 LoRA fine-tuning
+
+Both paths take the same three flags (`--model.lora_*` for SFT, `--actor.lora_*` for RL);
+`--*.lora_dim 0` (the default) is plain full fine-tuning:
+
+```bash
+--model.lora_dim 8 --model.lora_alpha 32 \
+--model.lora_target_modules '*.q_proj' '*.k_proj' '*.v_proj' '*.o_proj'
+```
+
+Targets are wildcard matches against **full** module names (AutoModel's `ModuleMatcher`),
+so a bare leaf name like `q_proj` silently matches nothing — omit the flag to patch every
+linear layer instead. LoRA runs on bf16 master weights, so the full-fine-tune default LRs
+are too small for it (SFT `5e-6`, RL `1e-6`): bf16 AdamW rounds those steps away and the
+adapters barely move — molt warns at startup, use a LoRA-scale LR (`1e-4` and up). RL
+trains the adapters only: the reference model keeps the plain checkpoint, which equals the
+step-0 policy.
+
+Constraints:
+- **MoE experts and a tied `lm_head` are refused in RL.** The refit merges `scale·B@A`
+  into the base weight before broadcasting, and neither AutoModel's grouped MoE adapters
+  nor a tied `lm_head` (skipped in favour of `embed_tokens`) has such a mapping — the
+  rollout would silently serve the untrained base.
+- The merge lands on one bf16 weight rounding, so vLLM's weights differ from the
+  trainer's by that bit. Harmless under IS correction; strictly on-policy runs should
+  know the rollout policy is the trained policy only up to bf16 rounding.
+- `--ckpt.save_hf` writes a **PEFT adapter directory** for LoRA runs
+  (`adapter_model.safetensors` + `adapter_config.json`), not merged full weights; load it
+  with `PeftModel.from_pretrained(base, adapter_dir)` or vLLM's `--enable-lora`. The DCP
+  resume checkpoints stay full-weight, so resuming is unchanged.
+
 ## ✅ Validation
 
 Fast local checks:
