@@ -15,7 +15,10 @@
 
 import asyncio
 import importlib.util
+import sys
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 _AGENT_PATH = Path(__file__).resolve().parents[2] / "examples" / "python" / "agents" / "geo3k.py"
 
@@ -28,6 +31,16 @@ def _load_geo3k():
 
 
 geo3k = _load_geo3k()
+
+_CHAT_AGENT_PATH = Path(__file__).resolve().parents[2] / "examples" / "python" / "agents" / "chat_geo3k.py"
+
+
+def _load_chat_geo3k(monkeypatch):
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(AsyncOpenAI=object))
+    spec = importlib.util.spec_from_file_location("chat_geo3k_agent", _CHAT_AGENT_PATH)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 
 def test_step_terminates_on_answer_even_with_co_emitted_tool_call(monkeypatch):
@@ -104,6 +117,31 @@ def test_step_marks_last_tool_call_turn_truncated(monkeypatch):
     assert result.terminated is False
     assert result.truncated is True
     assert env.tool_call_count == 1
+
+
+def test_chat_agent_marks_last_tool_call_turn_truncated(monkeypatch):
+    chat_geo3k = _load_chat_geo3k(monkeypatch)
+    message = SimpleNamespace(content="let me compute <tool_call>x</tool_call>")
+    create = AsyncMock(return_value=SimpleNamespace(choices=[SimpleNamespace(message=message)]))
+    client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    monkeypatch.setattr(chat_geo3k, "AsyncOpenAI", lambda **kwargs: client)
+    monkeypatch.setattr(chat_geo3k, "_MAX_TURNS", 1)
+    monkeypatch.setattr(chat_geo3k, "_extract_tool_call", lambda text: {"name": "python_executor", "arguments": {}})
+    monkeypatch.setattr(chat_geo3k, "_grade_answer", lambda text, label: (0.0, ""))
+    monkeypatch.setattr(chat_geo3k, "_TOOLS", {"python_executor": SimpleNamespace(execute=lambda arguments: "1")})
+    ctx = SimpleNamespace(
+        base_url="http://localhost/v1",
+        api_key="EMPTY",
+        messages=[{"role": "user", "content": "question"}],
+        tools=[],
+        model_name="policy",
+        sampling_params=SimpleNamespace(max_tokens=8, temperature=1.0),
+        label="",
+    )
+
+    result = asyncio.run(chat_geo3k.Geo3kAgent().run(ctx))
+
+    assert result.truncated is True
 
 
 def test_step_reuses_generated_turn_end_for_feedback(monkeypatch):

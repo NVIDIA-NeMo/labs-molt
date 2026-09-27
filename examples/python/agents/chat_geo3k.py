@@ -144,6 +144,7 @@ class Geo3kAgent(ChatAgent):
         assistant_history: list[str] = []
         tool_call_count = 0
         turn = 0
+        truncated = False
 
         for turn in range(1, _MAX_TURNS + 1):
             resp = await client.chat.completions.create(
@@ -176,11 +177,13 @@ class Geo3kAgent(ChatAgent):
                 else f"Tool `{name}` is not supported. Available: {list(_TOOLS)}"
             )
             messages.append({"role": "user", "content": f"<tool_response>\n{obs_text}\n</tool_response>"})
+            truncated = turn == _MAX_TURNS
 
         reward_value, _ = await asyncio.to_thread(_grade_answer, "\n".join(assistant_history), ctx.label)
         reward = torch.tensor(reward_value, dtype=torch.float32)
         return Result(
             reward=reward,
+            truncated=truncated,
             info={
                 "geo3k_tool_call_total": torch.tensor(float(tool_call_count), dtype=torch.float32),
                 "geo3k_correct": reward,

@@ -390,6 +390,7 @@ def stitch_session(state: ChatServerState, session_id: str, result):
     for traj in session.trajectories:
         traj.reward = result.reward
         traj.scores = result.score if result.score is not None else result.reward
+        traj.truncated = traj.truncated or result.truncated
         traj.extra_logs = result.info or {}
         if result.images is not None:
             traj.images = result.images
