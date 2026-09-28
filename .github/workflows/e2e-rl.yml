@@ -1,0 +1,73 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Two-GPU asynchronous RL end-to-end check, on demand from the Actions tab: pick the branch (a PR's
+# branch to test it), the released multi-arch image (hijkzzz/molt) and the 2-GPU runner (default: the
+# arm64 GB200 runner the release image is built on). The checked-out tree is mounted over the image's
+# copy, so the run exercises the selected commit. Recipe: tests/e2e/launch_scripts/Launch_RL_2GPU.sh.
+name: E2E RL (2 GPU)
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: Container image (multi-arch tag; the runner's architecture is pulled)
+        type: string
+        default: hijkzzz/molt:latest
+      runner:
+        description: Runner label with 2 GPUs
+        type: string
+        default: nemo-ci-gcp-gpu-x2
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  pre-flight:
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cicd_preflight.yml@cf5acebace78c7c339bc1f804357a991336f1c4d # v1.8.10
+    with:
+      default_runner_prefix: ${{ vars.DEFAULT_RUNNER_PREFIX }}
+      non_nvidia_runner_prefix: ${{ vars.NON_NVIDIA_RUNNER_PREFIX }}
+      default_test_data_path: ${{ vars.DEFAULT_TEST_DATA_PATH }}
+      non_nvidia_test_data_path: ${{ vars.NON_NVIDIA_TEST_DATA_PATH }}
+      sso_users_filename: ${{ vars.SSO_USERS_FILENAME }}
+    secrets:
+      NVIDIA_MANAGEMENT_ORG_PAT: ${{ secrets.NVIDIA_MANAGEMENT_ORG_PAT }}
+
+  e2e-rl:
+    needs: [pre-flight]
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      # Authenticated pull: the ephemeral runner fetches the image every run, and anonymous Docker Hub
+      # pulls are rate-limited per IP.
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Async RL, Qwen2.5-Math-1.5B, 10 updates
+        uses: ./.github/actions/test-template
+        with:
+          image: ${{ inputs.image }}
+          script: Launch_RL_2GPU
+          script-dir: tests/e2e/launch_scripts
+          timeout: "80"
+          coverage-prefix: e2e
