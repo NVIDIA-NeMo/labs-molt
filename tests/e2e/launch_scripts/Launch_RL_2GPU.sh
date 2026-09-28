@@ -7,12 +7,14 @@
 # Passes when the driver exits 0, update 10 is logged, every weight refit was verified on the engine, the
 # final HF export is written and summarize_metrics.py raises no alert (its table of every metric's first /
 # last / min / max / change lands in metrics_summary.md, which the workflow posts as the job summary).
+# MODEL_ID, MAX_LEN, MAX_NEW_TOKENS and FSDP_OFFLOAD select the model size (see Launch_RL_2GPU_30B.sh).
 set -xeuo pipefail
 cd "$(dirname "$0")/../../.."
 WORK="${E2E_WORK_DIR:-.tmp/e2e_rl_2gpu}"
-MODEL_PATH="${MODEL_PATH:-$WORK/Qwen2.5-Math-1.5B}"
+MODEL_ID="${MODEL_ID:-Qwen/Qwen2.5-Math-1.5B}"
+MODEL_PATH="${MODEL_PATH:-$WORK/${MODEL_ID##*/}}"
 mkdir -p "$WORK"
-[ -f "$MODEL_PATH/config.json" ] || python3 -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen2.5-Math-1.5B', local_dir='$MODEL_PATH')"
+[ -f "$MODEL_PATH/config.json" ] || python3 -c "from huggingface_hub import snapshot_download; snapshot_download('$MODEL_ID', local_dir='$MODEL_PATH')"
 [ -e "$WORK/data/train" ] || python3 examples/python/utils/prepare_dapo.py --max-train 64 --max-eval 8 --out-dir "$WORK/data"
 
 export VLLM_WORKER_MULTIPROC_METHOD=spawn PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MAX_AGENT_TURNS=1
@@ -31,12 +33,12 @@ python3 -u -m molt.cli.train_rl_ray \
   --data.label_key reward_model \
   --data.apply_chat_template \
   --data.max_samples 40 \
-  --data.max_len 4096 \
+  --data.max_len "${MAX_LEN:-4096}" \
   --rollout.batch_size 4 \
   --rollout.vllm_generate_batch_size 8 \
   --rollout.n_samples_per_prompt 4 \
   --rollout.micro_batch_size 1 \
-  --rollout.max_new_tokens 3072 \
+  --rollout.max_new_tokens "${MAX_NEW_TOKENS:-3072}" \
   --rollout.temperature 1.0 \
   --rollout.top_p 1.0 \
   --train.batch_size 16 \
@@ -57,6 +59,7 @@ python3 -u -m molt.cli.train_rl_ray \
   --vllm.sync_backend nccl \
   --vllm.gpu_memory_utilization 0.9 \
   --fsdp.param_dtype bf16 \
+  --fsdp.offload "${FSDP_OFFLOAD:-none}" \
   --fsdp.attn_implementation "${FSDP_ATTN_IMPLEMENTATION:-te}" \
   --fsdp.packing_samples \
   --actor.gradient_checkpoint full \

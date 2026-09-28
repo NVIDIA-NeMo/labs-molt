@@ -23,8 +23,9 @@
 #     approval that lets that exact revision run on a self-hosted GPU runner: read the diff first. The label is
 #     removed as the run starts; a later push to the PR needs a fresh label.
 #   * After every merge to main (push).
-#   * Daily on main (schedule), only when main moved since the last successful run: catches drift in what
-#     the code does not pin -- the `latest` image, the model and dataset on the Hub, the runner.
+#   * Daily on main (schedule), only when main moved since the last successful run, GPU only (no unit suite)
+#     and on the bigger recipe (Launch_RL_2GPU_30B.sh: Qwen3-30B-A3B, 8k context, optimizer offload): catches
+#     drift in what the code does not pin -- the `latest` image, the model and dataset on the Hub, the runner.
 #   A failed push or daily run is reported to the CI Slack channel; nobody watches those.
 # The image: the released one, unless the change under test (the PR's files, or the pushed range) touched the
 # image's inputs -- dockerfile/ and requirements.txt, the only files the Dockerfile reads -- in which case it is
@@ -44,6 +45,11 @@ on:
         description: Runner label with 2 GPUs
         type: string
         default: nemo-ci-gcp-gpu-x2
+      recipe:
+        description: 1p5b (Qwen2.5-Math-1.5B, with the unit suite) or 30b (the daily recipe, GPU only)
+        type: choice
+        options: [1p5b, 30b]
+        default: 1p5b
   pull_request_target:
     types: [labeled]
   push:
@@ -101,6 +107,8 @@ jobs:
           || (github.event_name == 'schedule' && needs.daily-gate.outputs.run == 'true'))
     runs-on: ${{ inputs.runner || 'nemo-ci-gcp-gpu-x2' }}
     timeout-minutes: 120 # a change to the image's inputs rebuilds it first (warm cache ~10 min, cold ~1 h)
+    env:
+      BIG: ${{ github.event_name == 'schedule' || inputs.recipe == '30b' }}
     steps:
       - name: Consume the trigger label
         if: github.event_name == 'pull_request_target'
@@ -165,20 +173,21 @@ jobs:
           # Read-only use of the release build cache for this runner's architecture.
           cache-from: type=registry,ref=hijkzzz/molt-buildcache:${{ runner.arch == 'ARM64' && 'arm64' || 'amd64' }}
       - name: Unit tests, in a CPU-only container alongside the e2e
+        if: env.BIG != 'true'
         run: |
           docker run -d --name unit --shm-size=8g --workdir /opt/labs-molt \
             --volume "${{ github.workspace }}:/opt/labs-molt" "${{ steps.image.outputs.image }}" \
             bash -lc 'pip install -q --target /tmp/pt pytest && PYTHONPATH=/tmp/pt timeout 30m python -m pytest -q -p no:cacheprovider tests/unit'
-      - name: Async RL, Qwen2.5-Math-1.5B, 10 updates
+      - name: Async RL, 10 updates
         uses: ./.github/actions/test-template
         with:
           image: ${{ steps.image.outputs.image }}
-          script: Launch_RL_2GPU
+          script: ${{ env.BIG == 'true' && 'Launch_RL_2GPU_30B' || 'Launch_RL_2GPU' }}
           script-dir: tests/e2e/launch_scripts
-          timeout: "45"
+          timeout: ${{ env.BIG == 'true' && '80' || '45' }}
           coverage-prefix: e2e
       - name: Unit test result
-        if: always()
+        if: always() && env.BIG != 'true'
         run: |
           rc=$(docker wait unit 2>/dev/null || echo 1)
           docker logs unit 2>&1 | tail -30; docker rm -f unit >/dev/null 2>&1 || true
