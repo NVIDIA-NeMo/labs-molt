@@ -20,8 +20,9 @@
 #     THIS file from main with the repository's secrets and checks out the PR's head commit, so the label is the
 #     approval that lets that exact revision run on a self-hosted GPU runner: read the diff first. The label is
 #     removed as the run starts; a later push to the PR needs a fresh label.
-#   * Daily on main (schedule): catches drift in what the code does not pin -- the `latest` image, the model
-#     and dataset on the Hub, the runner -- and reports a failure to the CI Slack channel.
+#   * Daily on main (schedule), only when main moved since the last successful run: catches drift in what
+#     the code does not pin -- the `latest` image, the model and dataset on the Hub, the runner -- and
+#     reports a failure to the CI Slack channel.
 # The checked-out tree is mounted over the image's copy. The result is the job's check on the PR, and every
 # metric's first / last / min / max / change over the run is posted as the job summary (alerts fail the job).
 name: E2E RL (2 GPU)
@@ -63,9 +64,32 @@ jobs:
     secrets:
       NVIDIA_MANAGEMENT_ORG_PAT: ${{ secrets.NVIDIA_MANAGEMENT_ORG_PAT }}
 
+  daily-gate:
+    # A scheduled run is worth it only if main moved since the last run that passed; a failing main
+    # keeps being retried every day until it passes.
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+    steps:
+      - id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          last=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/e2e-rl.yml/runs?branch=main&status=success&per_page=1" \
+            --jq '.workflow_runs[0].head_sha // ""')
+          echo "last passing run: ${last:-none}; main: $GITHUB_SHA"
+          echo "run=$([ "$last" != "$GITHUB_SHA" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+
   e2e-rl:
-    needs: [pre-flight]
-    if: github.event_name != 'pull_request_target' || github.event.label.name == 'e2e-rl-test'
+    needs: [pre-flight, daily-gate]
+    if: |
+      !cancelled() && needs.pre-flight.result == 'success'
+      && (github.event_name == 'workflow_dispatch'
+          || github.event.label.name == 'e2e-rl-test'
+          || (github.event_name == 'schedule' && needs.daily-gate.outputs.run == 'true'))
     runs-on: ${{ inputs.runner || 'nemo-ci-gcp-gpu-x2' }}
     timeout-minutes: 60
     steps:
