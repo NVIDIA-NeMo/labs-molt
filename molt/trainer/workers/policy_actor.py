@@ -366,21 +366,21 @@ class PolicyTrainer:
             assert not window, "actor train window not flushed at epoch end"
 
         if status_list:
-            total_tokens = sum(s["_num_action_tokens"] for s in status_list)
-            total_samples = sum(s["_num_samples"] for s in status_list)
             for k in set().union(*(s.keys() for s in status_list)):
                 if k in ("_num_samples", "_num_action_tokens", "_weights"):
                     continue
+                # Average over the microbatches that report k: grad_norm exists on optimizer-step
+                # microbatches only, and an env info key set on some samples only (e.g. a failure
+                # code) is absent from microbatches without such samples -- zero-filling would bias
+                # both toward 0.
+                present = [s for s in status_list if k in s]
                 if k == "actor_grad_norm":
-                    vals = [s[k] for s in status_list if k in s]
-                    status_mean[k] = sum(vals) / len(vals) if vals else 0.0
+                    status_mean[k] = sum(s[k] for s in present) / len(present)
                 elif k == "actor_lr":
-                    vals = [s[k] for s in status_list if k in s]
-                    status_mean[k] = vals[-1] if vals else 0.0
-                elif status_list[0].get("_weights", {}).get(k) == "token":
-                    status_mean[k] = sum(s.get(k, 0) * s["_num_action_tokens"] for s in status_list) / total_tokens
+                    status_mean[k] = present[-1][k]
                 else:
-                    status_mean[k] = sum(s.get(k, 0) * s["_num_samples"] for s in status_list) / total_samples
+                    n = "_num_action_tokens" if present[0]["_weights"].get(k) == "token" else "_num_samples"
+                    status_mean[k] = sum(s[k] * s[n] for s in present) / sum(s[n] for s in present)
 
         status_mean.update(
             self.strategy.compute_perf_metrics(self._mfu, local_seq_count, local_token_sum, time.time() - perf_t0)
@@ -603,9 +603,13 @@ class PolicyTrainer:
             if isinstance(v, torch.Tensor):
                 metrics[k] = v
                 weights[k] = "token" if v.dim() == 0 else "sample"
-            elif isinstance(v, list) and all(isinstance(item, (int, float, bool, torch.Tensor)) for item in v):
-                metrics[k] = torch.tensor(v, dtype=torch.float)
-                weights[k] = "sample"
+            elif isinstance(v, list):
+                # Numeric on the samples that report the key (None elsewhere, see make_experience_batch):
+                # the metric is the mean over those samples. Text stays out of the metrics.
+                vals = [item for item in v if item is not None]
+                if vals and all(isinstance(item, (int, float, bool, torch.Tensor)) for item in vals):
+                    metrics[k] = torch.tensor(vals, dtype=torch.float)
+                    weights[k] = "sample"
 
         for f in fields(Experience):
             if f.name in {"rewards", "scores"} or not Experience.is_episode_tensor_field(f.name):

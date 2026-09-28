@@ -253,7 +253,8 @@ def make_experience_batch(items: List[Experience]) -> Experience:
         elif isinstance(first, dict):
             # Union of the samples' keys: an env cannot be asked to set every info key on every
             # sample (text feedback usually comes with failures only), so a missing value is None
-            # instead of a KeyError or a silently dropped key.
+            # instead of a KeyError or a silently dropped key. A numeric key with gaps stays a list;
+            # the trainer averages it over the samples that report it.
             kwargs[f.name] = {}
             for key in dict.fromkeys(k for item in items for k in getattr(item, f.name)):
                 vals = [getattr(item, f.name).get(key) for item in items]
