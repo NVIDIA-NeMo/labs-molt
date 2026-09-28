@@ -18,7 +18,7 @@
 # container alongside the e2e, so they add no wall time. Ways in:
 #   * Actions tab -> Run workflow: pick the branch, the multi-arch image (hijkzzz/molt) and the 2-GPU runner
 #     (default: the arm64 GB200 runner the release image is built on).
-#   * On a PR, fork or in-repo alike: a maintainer puts the `e2e-rl` label on it. pull_request_target runs
+#   * On a PR, fork or in-repo alike: a maintainer puts the `cicd` label on it. pull_request_target runs
 #     THIS file from main with the repository's secrets and checks out the PR's head commit, so the label is the
 #     approval that lets that exact revision run on a self-hosted GPU runner: read the diff first. The label is
 #     removed as the run starts; a later push to the PR needs a fresh label.
@@ -97,7 +97,7 @@ jobs:
       !cancelled() && needs.pre-flight.result == 'success'
       && (github.event_name == 'workflow_dispatch'
           || github.event_name == 'push'
-          || github.event.label.name == 'e2e-rl'
+          || github.event.label.name == 'cicd'
           || (github.event_name == 'schedule' && needs.daily-gate.outputs.run == 'true'))
     runs-on: ${{ inputs.runner || 'nemo-ci-gcp-gpu-x2' }}
     timeout-minutes: 120 # a change to the image's inputs rebuilds it first (warm cache ~10 min, cold ~1 h)
@@ -108,7 +108,7 @@ jobs:
         with:
           script: |
             await github.rest.issues.removeLabel({
-              ...context.repo, issue_number: context.payload.pull_request.number, name: 'e2e-rl',
+              ...context.repo, issue_number: context.payload.pull_request.number, name: 'cicd',
             }).catch(() => {});
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -198,7 +198,7 @@ jobs:
             --data "{\"text\": \"CICD Molt ${{ github.event_name }} run on main FAILED: $RUN_URL\"}" "$WEBHOOK"
 
   # The check branch protection requires. Reports only when the test job actually ran: a PR event that did
-  # not carry the `e2e-rl` label leaves the check at "Expected" instead of turning it green untested.
+  # not carry the `cicd` label leaves the check at "Expected" instead of turning it green untested.
   Nemo_CICD_Test:
     needs: [e2e-rl]
     if: always() && !cancelled() && needs.e2e-rl.result != 'skipped'
