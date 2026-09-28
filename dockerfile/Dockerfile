@@ -21,7 +21,7 @@
 #   toolkit + cuDNN 9, Ubuntu 24.04) plus Ubuntu's python 3.12 and the cu130 torch 2.13.0 trio from
 #   download.pytorch.org, which ships x86_64 and aarch64 wheels. (pytorch/pytorch:2.13.0-cuda13.0-
 #   cudnn9-devel carries the same torch but publishes no arm64 manifest.)
-#   torch 2.13.0+cu130 matches vLLM 0.27–0.29's hard torch==2.13.0 pin — NO torch swap. The whole
+#   torch 2.13.0+cu130 matches vLLM 0.27–0.30's hard torch==2.13.0 pin — NO torch swap. The whole
 #   source stack (TE / flash-attn / mamba / DeepEP) is compiled against this torch, so the torch
 #   version and vLLM must stay in lockstep.
 #
@@ -185,7 +185,7 @@ RUN apt-get update && apt-get install -y --allow-change-held-packages rdma-core 
 # vision-only RL and the encoder is frozen — but the weights must load. Torch-pinned so the
 # [audio] extra (librosa/soundfile; torchaudio already in base) can't swap the torch trio.
 # Baking it here removes the per-run, per-node rl_omni3 MOLT_INSTALL_AUDIO install.
-RUN python -m pip install -c /opt/torch-pin.txt "vllm[audio]==0.29.0"
+RUN python -m pip install -c /opt/torch-pin.txt "vllm[audio]==0.30.0"
 
 # --- VLM modeling-code runtime deps + molt requirements + fla -----------
 # requirements.txt minus what's already pinned/built above (torch trio, TE, flash-attn,
