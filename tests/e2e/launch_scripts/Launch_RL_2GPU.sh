@@ -4,8 +4,9 @@
 # 4 samples per update with 8 prompts in flight (the surplus crosses each weight refit as partial rollouts),
 # 4k context, 10 updates, one batch queued ahead of training. FlashREINFORCE loss (--train.force_on_policy:
 # PPO ratio == 1; sequence-level IS gated by binary KL corrects the off-policy tokens) with the Dr. GRPO advantage.
-# Passes when the driver exits 0, update 10 is logged, every weight refit was verified on the engine and
-# the final HF export is written.
+# Passes when the driver exits 0, update 10 is logged, every weight refit was verified on the engine, the
+# final HF export is written and summarize_metrics.py raises no alert (its table of every metric's first /
+# last / min / max / change lands in metrics_summary.md, which the workflow posts as the job summary).
 set -xeuo pipefail
 cd "$(dirname "$0")/../../.."
 WORK="${E2E_WORK_DIR:-.tmp/e2e_rl_2gpu}"
@@ -17,7 +18,8 @@ mkdir -p "$WORK"
 export VLLM_WORKER_MULTIPROC_METHOD=spawn PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MAX_AGENT_TURNS=1
 export RAY_USAGE_STATS_ENABLED=0 TOKENIZERS_PARALLELISM=true
 ray start --head --num-gpus="$(nvidia-smi -L | wc -l)" --disable-usage-stats
-trap 'ray stop --force >/dev/null 2>&1 || true' EXIT
+# On any exit: stop Ray, and write the metrics summary of whatever ran (a failed run still gets its table).
+trap 'ray stop --force >/dev/null 2>&1 || true; [ -f "$WORK/metrics_summary.md" ] || python3 tests/e2e/summarize_metrics.py "$WORK/train.log" --out "$WORK/metrics_summary.md" || true' EXIT
 
 python3 -u -m molt.cli.train_rl_ray \
   --actor.model_name_or_path "$MODEL_PATH" \
@@ -60,7 +62,7 @@ python3 -u -m molt.cli.train_rl_ray \
   --algo.advantage.estimator dr_grpo \
   --algo.advantage.is_correction_level seq \
   --algo.advantage.is_correction_gating binary_kl \
-  --algo.advantage.is_correction_threshold 5e-3 \
+  --algo.advantage.is_correction_threshold 1e-2 \
   --algo.kl.init_coef 0 \
   --reward.clip_range -10 10 \
   --train.agent_path examples/python/agents/math.py \
@@ -71,3 +73,4 @@ python3 -u -m molt.cli.train_rl_ray \
 grep -q 'Global step 10:' "$WORK/train.log"
 [ "$(grep -c 'the broadcast landed on every vLLM weight' "$WORK/train.log")" -ge 9 ]
 [ -f "$WORK/hf/config.json" ] && ls "$WORK/hf"/*.safetensors
+python3 tests/e2e/summarize_metrics.py "$WORK/train.log" --out "$WORK/metrics_summary.md"

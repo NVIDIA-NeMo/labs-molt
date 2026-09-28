@@ -13,10 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Two-GPU asynchronous RL end-to-end check, on demand from the Actions tab: pick the branch (a PR's
-# branch to test it), the released multi-arch image (hijkzzz/molt) and the 2-GPU runner (default: the
-# arm64 GB200 runner the release image is built on). The checked-out tree is mounted over the image's
-# copy, so the run exercises the selected commit. Recipe: tests/e2e/launch_scripts/Launch_RL_2GPU.sh.
+# Two-GPU asynchronous RL end-to-end check (recipe: tests/e2e/launch_scripts/Launch_RL_2GPU.sh), two ways in:
+#   * Actions tab -> Run workflow: pick the branch, the multi-arch image (hijkzzz/molt) and the 2-GPU runner
+#     (default: the arm64 GB200 runner the release image is built on).
+#   * On a PR, fork or in-repo alike: a maintainer puts the `e2e-rl-test` label on it. pull_request_target runs
+#     THIS file from main with the repository's secrets and checks out the PR's head commit, so the label is the
+#     approval that lets that exact revision run on a self-hosted GPU runner: read the diff first. The label is
+#     removed as the run starts; a later push to the PR needs a fresh label.
+# The checked-out tree is mounted over the image's copy. The result is the job's check on the PR, and every
+# metric's first / last / min / max / change over the run is posted as the job summary (alerts fail the job).
 name: E2E RL (2 GPU)
 
 on:
@@ -30,14 +35,17 @@ on:
         description: Runner label with 2 GPUs
         type: string
         default: nemo-ci-gcp-gpu-x2
+  pull_request_target:
+    types: [labeled]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
   id-token: write
+  pull-requests: write
 
 jobs:
   pre-flight:
@@ -53,10 +61,22 @@ jobs:
 
   e2e-rl:
     needs: [pre-flight]
-    runs-on: ${{ inputs.runner }}
-    timeout-minutes: 90
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'e2e-rl-test'
+    runs-on: ${{ inputs.runner || 'nemo-ci-gcp-gpu-x2' }}
+    timeout-minutes: 60
     steps:
+      - name: Consume the trigger label
+        if: github.event_name == 'pull_request_target'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            await github.rest.issues.removeLabel({
+              ...context.repo, issue_number: context.payload.pull_request.number, name: 'e2e-rl-test',
+            }).catch(() => {});
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          # pull_request_target checks out the base by default; test the PR's head commit instead.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       # Authenticated pull: the ephemeral runner fetches the image every run, and anonymous Docker Hub
       # pulls are rate-limited per IP.
       - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
@@ -66,8 +86,13 @@ jobs:
       - name: Async RL, Qwen2.5-Math-1.5B, 10 updates
         uses: ./.github/actions/test-template
         with:
-          image: ${{ inputs.image }}
+          image: ${{ inputs.image || 'hijkzzz/molt:latest' }}
           script: Launch_RL_2GPU
           script-dir: tests/e2e/launch_scripts
-          timeout: "80"
+          timeout: "45"
           coverage-prefix: e2e
+      - name: Metrics summary
+        if: always()
+        run: |
+          cat .tmp/e2e_rl_2gpu/metrics_summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null \
+            || echo "No metrics: the run ended before the first update." >> "$GITHUB_STEP_SUMMARY"
