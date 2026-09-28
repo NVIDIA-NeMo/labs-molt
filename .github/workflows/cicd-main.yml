@@ -145,7 +145,8 @@ jobs:
             *) q="" ;;
           esac
           build=false
-          if [ -n "$q" ] && gh api "$q" --paginate --jq '.files[].filename' \
+          # pulls/N/files answers with an array, compare and commits with {files: [...]}.
+          if [ -n "$q" ] && gh api "$q" --paginate --jq 'if type == "array" then . else .files end | .[].filename' \
                | grep -qE '^(dockerfile/|requirements\.txt$|pyproject\.toml$)'; then
             build=true; IMAGE="molt-e2e:${GITHUB_SHA::8}"
           fi
