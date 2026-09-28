@@ -146,6 +146,10 @@ class RolloutRayActor:
         args = make_arg_parser(FlexibleArgumentParser()).parse_args([])
         args.model = self.kwargs.get("model")
         args.served_model_name = ["policy"]  # clients request model="policy"
+        # vLLM 0.30 registers the token-in/out routes the router uses (/inference/v1/generate,
+        # /v1/chat/completions/render) only behind this flag; older versions have no such attribute.
+        if hasattr(args, "enable_scale_out"):
+            args.enable_scale_out = True
         args.host, args.port = host, port
 
         supported_tasks = await self.llm.get_supported_tasks()
