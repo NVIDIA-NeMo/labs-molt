@@ -25,15 +25,12 @@
 #SBATCH --overcommit
 #SBATCH --exclusive
 
-# Qwen3-4B dense math RL with FA2 + cu_seq_lens packing.
-# Thin wrapper over slurm/_launcher.sh that strips the VLM/MoE knobs
-# (EP=1, text-only single-turn math agent) and appends
-# --fsdp.packing_samples to exercise the HF FA2 packed path
-# (cu_seq_lens_q/k kwargs from utils/fsdp/packing.py:182).
+# Qwen3-4B dense math RL with packed sequences (--fsdp.packing_samples).
+# Thin wrapper over rl_qwen3_6_35b.sh that strips the VLM/MoE knobs
+# (EP=1, text-only single-turn math agent).
 #
-# Dense Qwen3 has no nemo_automodel native impl (HF Qwen3ForCausalLM only). That's fine: this
-# recipe runs EP=1, and molt permits the HF path whenever EP is off; the fallback is forbidden
-# only under expert parallelism (EP>1, e.g. the omni3 MoE), which HF transformers can't shard.
+# Qwen3 loads through nemo_automodel's native implementation, whose packed (THD) attention is
+# Transformer Engine only: --fsdp.packing_samples with flash_attention_2 is refused at startup.
 
 set -euo pipefail
 
@@ -46,9 +43,7 @@ export TP_SIZE="${TP_SIZE:-1}"
 export EP_SIZE="${EP_SIZE:-1}"
 export CP_SIZE="${CP_SIZE:-1}"
 export MAX_LENGTH="${MAX_LENGTH:-16384}"
-# FA2 is required for HF packing (cu_seq_lens path); init-time validation
-# in Actor.from_pretrained refuses other attn impls when packing is on.
-export FSDP_ATTN_IMPLEMENTATION="${FSDP_ATTN_IMPLEMENTATION:-flash_attention_2}"
+export FSDP_ATTN_IMPLEMENTATION="${FSDP_ATTN_IMPLEMENTATION:-te}"
 
 export VLLM_ENABLE_EXPERT_PARALLEL=0
 export FREEZE_VISUAL_ENCODER=0
@@ -145,7 +140,6 @@ ACTOR_GPUS_PER_NODE="${ACTOR_GPUS_PER_NODE:-8}"
 TP_SIZE="${TP_SIZE:-2}"
 EP_SIZE="${EP_SIZE:-2}"
 CP_SIZE="${CP_SIZE:-2}"
-FSDP_ATTN_IMPLEMENTATION="${FSDP_ATTN_IMPLEMENTATION:-te}"
 FREEZE_VISUAL_ENCODER="${FREEZE_VISUAL_ENCODER:-1}"
 # Algo
 KL_COEF="${KL_COEF:-0.001}"
