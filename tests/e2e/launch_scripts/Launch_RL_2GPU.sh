@@ -17,6 +17,9 @@ mkdir -p "$WORK"
 
 export VLLM_WORKER_MULTIPROC_METHOD=spawn PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MAX_AGENT_TURNS=1
 export RAY_USAGE_STATS_ENABLED=0 TOKENIZERS_PARALLELISM=true
+# What the container actually gets (the runner pod's limits may differ from the node): GPUs, RAM, cgroup cap.
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader; free -g | head -2
+echo "cgroup memory limit: $(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo unknown)"
 ray start --head --num-gpus="$(nvidia-smi -L | wc -l)" --disable-usage-stats
 # On any exit: stop Ray, and write the metrics summary of whatever ran (a failed run still gets its table).
 trap 'ray stop --force >/dev/null 2>&1 || true; [ -f "$WORK/metrics_summary.md" ] || python3 tests/e2e/summarize_metrics.py "$WORK/train.log" --out "$WORK/metrics_summary.md" || true' EXIT

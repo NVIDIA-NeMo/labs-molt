@@ -87,6 +87,13 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Runner resources
+        run: |
+          uname -m; nproc
+          nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+          echo "cgroup memory limit: $(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes)"
+          free -g | head -2
+          df -h "$GITHUB_WORKSPACE" /dev/shm
       - name: Async RL, Qwen2.5-Math-1.5B, 10 updates
         uses: ./.github/actions/test-template
         with:
