@@ -128,11 +128,12 @@ jobs:
           tags: ${{ steps.image.outputs.image }}
           # Read-only use of the release build cache for this runner's architecture.
           cache-from: type=registry,ref=hijkzzz/molt-buildcache:${{ runner.arch == 'ARM64' && 'arm64' || 'amd64' }}
+      # `cd` explicitly: the image's login shell does not keep --workdir (the e2e's action does the same).
       - name: Unit tests, in a CPU-only container alongside the e2e
         run: |
           docker run -d --name unit --shm-size=8g --workdir /opt/labs-molt \
             --volume "${{ github.workspace }}:/opt/labs-molt" "${{ steps.image.outputs.image }}" \
-            bash -lc 'pip install -q --target /tmp/pt pytest && PYTHONPATH=/tmp/pt timeout 30m python -m pytest -q -p no:cacheprovider tests/unit'
+            bash -lc 'cd /opt/labs-molt && pip install -q --target /tmp/pt pytest && PYTHONPATH=/tmp/pt timeout 30m python -m pytest -q -p no:cacheprovider tests/unit'
       - name: Async RL, Qwen2.5-Math-1.5B, 10 updates
         uses: ./.github/actions/test-template
         with:
@@ -145,7 +146,7 @@ jobs:
         if: always()
         run: |
           rc=$(docker wait unit 2>/dev/null || echo 1)
-          docker logs unit 2>&1 | tail -30; docker rm -f unit >/dev/null 2>&1 || true
+          docker logs unit 2>&1 | tail -200; docker rm -f unit >/dev/null 2>&1 || true
           [ "$rc" = 0 ]
       - name: Metrics summary
         if: always()
