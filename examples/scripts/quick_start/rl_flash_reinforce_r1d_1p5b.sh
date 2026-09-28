@@ -20,7 +20,8 @@
 # (1,460 MATH problems), where BF16 PG-IS is known to drift. 1,000 episodes x 12 rounds = 12,000 updates; one
 # rollout per prompt, 128 rollouts per update, lr 1e-6 cosine, wd 0.1, temperature 1.0, 8k responses, no KL;
 # 512 rollouts stay in flight and up to 8 finished batches queue ahead of the trainer, so vLLM never waits
-# for training. FlashREINFORCE is a composition of configs:
+# for training; the in-flight surplus crosses weight refits (--train.partial_rollout_enable), which the
+# sequence-level IS weight corrects. FlashREINFORCE is a composition of configs:
 #   --train.force_on_policy                           PPO ratio == 1 -> plain REINFORCE gradient
 #   --algo.advantage.is_correction_level seq          IS weight pi/mu against the vLLM behavior logprobs,
 #   --algo.advantage.is_correction_gating binary_kl     gated per sequence by the mean sampled-token
@@ -90,6 +91,7 @@ python3 -u -m molt.cli.train_rl_ray \
   --train.max_epochs 1 \
   --train.num_episodes "${NUM_EPISODES:-1000}" \
   --train.async_queue_size 8 \
+  --train.partial_rollout_enable \
   --train.force_on_policy \
   --train.colocate_fsdp_models \
   --actor.num_nodes 1 \
