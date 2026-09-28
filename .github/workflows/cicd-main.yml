@@ -134,7 +134,7 @@ jobs:
           docker run -d --name unit --shm-size=8g --workdir /opt/labs-molt \
             --volume "${{ github.workspace }}:/opt/labs-molt" "${{ steps.image.outputs.image }}" \
             bash -lc 'cd /opt/labs-molt && pip install -q --target /tmp/pt pytest && PYTHONPATH=/tmp/pt timeout 30m python -m pytest -q -p no:cacheprovider tests/unit'
-      - name: Async RL, Qwen2.5-Math-1.5B, 10 updates
+      - name: Async RL, Qwen2.5-Math-1.5B-Instruct, 10 updates
         uses: ./.github/actions/test-template
         with:
           image: ${{ steps.image.outputs.image }}

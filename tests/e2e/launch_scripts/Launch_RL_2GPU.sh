@@ -1,6 +1,6 @@
 #!/bin/bash
 # Two-GPU asynchronous RL end-to-end check (the CI "E2E RL" workflow; runnable by hand on any 2-GPU box
-# inside the molt image): Qwen2.5-Math-1.5B on DAPO-Math-17k, one vLLM engine + one actor GPU, 4 prompts x
+# inside the molt image): Qwen2.5-Math-1.5B-Instruct on DAPO-Math-17k, one vLLM engine + one actor GPU, 4 prompts x
 # 4 samples per update with 8 prompts in flight (the surplus crosses each weight refit as partial rollouts),
 # 4k context, 10 updates, one batch queued ahead of training. FlashREINFORCE loss (--train.force_on_policy:
 # PPO ratio == 1; sequence-level IS gated by binary KL corrects the off-policy tokens) with the Dr. GRPO advantage.
@@ -10,9 +10,9 @@
 set -xeuo pipefail
 cd "$(dirname "$0")/../../.."
 WORK="${E2E_WORK_DIR:-.tmp/e2e_rl_2gpu}"
-MODEL_PATH="${MODEL_PATH:-$WORK/Qwen2.5-Math-1.5B}"
+MODEL_PATH="${MODEL_PATH:-$WORK/Qwen2.5-Math-1.5B-Instruct}"
 mkdir -p "$WORK"
-[ -f "$MODEL_PATH/config.json" ] || python3 -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen2.5-Math-1.5B', local_dir='$MODEL_PATH')"
+[ -f "$MODEL_PATH/config.json" ] || python3 -c "from huggingface_hub import snapshot_download; snapshot_download('Qwen/Qwen2.5-Math-1.5B-Instruct', local_dir='$MODEL_PATH')"
 [ -e "$WORK/data/train" ] || python3 examples/python/utils/prepare_dapo.py --max-train 64 --max-eval 8 --out-dir "$WORK/data"
 
 export VLLM_WORKER_MULTIPROC_METHOD=spawn PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True MAX_AGENT_TURNS=1
