@@ -334,10 +334,8 @@ class FsdpStrategy:
 
         kind = cfg["optim"]
         adam = cfg["adam"]
-        # LoRA trains on bf16 master weights (AutoModel's PEFT recipes force them), and bf16
-        # AdamW rounds away a step far below the weight's bf16 ULP. The full-fine-tune
-        # defaults sit exactly there (SFT 5e-6, RL actor 1e-6), so a LoRA run that keeps
-        # them silently trains nothing — LoRA wants its own, much larger LR (1e-4 typical).
+        # LoRA runs on bf16 masters (see BaseModel); at full-fine-tune LRs (SFT 5e-6, RL 1e-6)
+        # bf16 AdamW rounds the step away and the adapters barely move.
         if kind == "adam" and getattr(model, "peft_config", None) is not None and adam["lr"] < 1e-5:
             self.print(
                 f"Warning: LoRA with lr={adam['lr']:g} (< 1e-5) on a bf16 master rounds AdamW "

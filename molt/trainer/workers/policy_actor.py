@@ -60,13 +60,9 @@ def _skip_tied_lm_head(config, name: str) -> bool:
 def _lora_merge_map(model: torch.nn.Module, sd: dict) -> dict:
     """Map each LoRA base weight to ``(A key, B key, scale)`` for the vLLM refit merge.
 
-    vLLM serves full weights, so ``broadcast_to_vllm`` folds ``scale·B@A`` into the base
-    weight and skips the adapter entries. The map is keyed off STATE-DICT names, not module
-    names: activation checkpointing (the RL default ``--actor.gradient_checkpoint=full``)
-    wraps each decoder layer in ``CheckpointWrapper``, which keeps
-    ``_checkpoint_wrapped_module.`` in ``named_modules()`` but strips it from ``state_dict()``
-    keys — a module-name map never matches, and the merge silently no-ops (the rollout then
-    stays on the frozen base for the whole run).
+    Keyed by state-dict names: activation checkpointing wraps layers in ``CheckpointWrapper``,
+    which appears in ``named_modules()`` but is stripped from ``state_dict()`` keys, so a
+    module-name map would never match and the adapters would never reach vLLM.
     """
     from nemo_automodel.shared.parameter_names import canonical_parameter_fqn
 
@@ -717,12 +713,8 @@ class PolicyTrainer:
             weight, _ = gather_full_param(tensor)
             merge = lora_merge.get(name)
             if merge is not None:
-                # Also collectives: every rank must gather A and B in the same
-                # order; only rank 0 keeps the merged result for broadcast.
-                # The fp32 matmul still lands on one bf16 weight rounding, so vLLM's
-                # W' differs from the trainer's W·x + scale·B(A·x) by that bit — the
-                # rollout policy is the trained policy only up to bf16 rounding
-                # (harmless under IS correction, load-bearing for strict on-policy).
+                # Collectives too: every rank gathers A and B in the same order, rank 0 merges.
+                # The merged bf16 weight differs from the trainer's W·x + scale·B(A·x) by one rounding.
                 a, _ = gather_full_param(sd[merge[0]])
                 b, _ = gather_full_param(sd[merge[1]])
                 if is_rank0:
@@ -823,17 +815,8 @@ class PolicyModelActor(BaseModelActor):
 
         self._setup_distributed(strategy)
 
-        # LoRA on the trainable actor only: reference workers keep the plain
-        # checkpoint, which equals the step-0 policy (lora_B inits to zero), so
-        # KL-to-init semantics need no change.
-        peft_config = None
-        if getattr(args.actor, "lora_dim", 0) > 0:
-            peft_config = {"dim": args.actor.lora_dim, "alpha": getattr(args.actor, "lora_alpha", 32)}
-            if getattr(args.actor, "lora_target_modules", None):
-                peft_config["target_modules"] = list(args.actor.lora_target_modules)
-            else:
-                peft_config["match_all_linear"] = True
-
+        # LoRA patches the actor only: reference workers load the plain checkpoint, which
+        # equals the step-0 policy (lora_B starts at zero), so KL-to-init is unchanged.
         actor = Actor(
             pretrain,
             attn_implementation=strategy.args.fsdp.attn_implementation,
@@ -849,17 +832,17 @@ class PolicyModelActor(BaseModelActor):
             freeze_moe_router=getattr(strategy.args.actor, "freeze_moe_router", False),
             moe_aux_loss_coef=args.actor.aux_loss_coef,
             routing_replay=getattr(args.train, "routing_replay", False),
-            peft_config=peft_config,
+            lora_dim=args.actor.lora_dim,
+            lora_alpha=args.actor.lora_alpha,
+            lora_target_modules=args.actor.lora_target_modules,
         )
-        if peft_config is not None:
-            # Two target sets the vLLM refit cannot merge: training on them would leave
-            # the rollout policy behind the trainer, so refuse at build rather than diverge.
+        if actor.peft_config is not None:
+            # Two target sets the vLLM refit cannot merge: training them would leave the
+            # rollout policy behind the trainer, so refuse at build rather than diverge.
             if getattr(actor.model.config, "tie_word_embeddings", False):
                 lm_head = getattr(actor.model, "lm_head", None)
                 if lm_head is not None and getattr(lm_head, "lora_A", None) is not None:
-                    # Refit skips the tied lm_head (it reaches vLLM through embed_tokens,
-                    # which carries no adapter), so a trained lm_head delta never reaches
-                    # the rollout policy.
+                    # The refit skips a tied lm_head (vLLM takes it from embed_tokens).
                     raise ValueError(
                         "LoRA targets a tied lm_head, whose trained delta cannot reach vLLM "
                         "(the refit skips it in favour of embed_tokens). Exclude it, e.g. "
@@ -867,9 +850,7 @@ class PolicyModelActor(BaseModelActor):
                     )
             for name, module in actor.model.named_modules():
                 if getattr(module, "lora_gate_and_up_A", None) is not None:
-                    # AutoModel's grouped MoE adapters (lora_gate_and_up_*/lora_down_*) are
-                    # not lora_A/lora_B, so the merge below never sees them: the base experts
-                    # would reach vLLM unmerged while the trainer keeps updating the adapters.
+                    # Grouped MoE adapters are not lora_A/lora_B, so the merge never sees them.
                     raise ValueError(
                         f"LoRA targets MoE experts ({name}), which the vLLM refit cannot merge. "
                         "Restrict --actor.lora_target_modules to linear layers (e.g. '*.q_proj' ...)."

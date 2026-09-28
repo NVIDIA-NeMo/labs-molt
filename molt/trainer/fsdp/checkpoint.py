@@ -57,13 +57,9 @@ class CheckpointManager:
     def save_model(self, model: nn.Module, tokenizer, output_dir: str, **kwargs) -> None:
         # Use AutoModel's Checkpointer: its custom-model save_pretrained mixin
         # requires it (raises "No checkpointer provided" otherwise). Outputs
-        # consolidated HF safetensors that vLLM can hot-load.
-        #
-        # A LoRA run exports through AutoModel's is_peft path: with is_peft=False the
-        # frozen base weights plus the separate lora_A/lora_B keys go to disk, and
-        # HF/vLLM ignore those unknown keys — the snapshot would silently evaluate as
-        # the UNTRAINED base model. is_peft=True writes a standard PEFT adapter
-        # directory instead (adapter_model.safetensors + adapter_config.json).
+        # consolidated HF safetensors that vLLM can hot-load. LoRA runs export as a PEFT
+        # adapter directory (is_peft) instead: a full-weight export would write the frozen
+        # base plus loose lora_A/lora_B keys that HF and vLLM ignore.
         peft_config = getattr(model, "peft_config", None)
         model = self.strategy._unwrap_model(model)
         # Declare the export precision on the config and every nested sub-config: loaders (vLLM/HF)
@@ -75,9 +71,7 @@ class CheckpointManager:
         ckpt = self._build_checkpointer(
             output_dir, save_consolidated=True, model=model, is_peft=peft_config is not None
         )
-        ckpt.save_model(
-            model=model, weights_path=output_dir, tokenizer=tokenizer, peft_config=peft_config
-        )
+        ckpt.save_model(model=model, weights_path=output_dir, tokenizer=tokenizer, peft_config=peft_config)
         if dist.is_initialized():
             dist.barrier()
         self._promote_hf_export(output_dir)

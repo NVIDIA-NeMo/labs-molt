@@ -25,29 +25,20 @@ silently no-ops, leaving vLLM on the frozen base for the whole run.
 import pytest
 import torch
 import torch.nn as nn
+from nemo_automodel.components._peft.lora import LinearLoRA
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import checkpoint_wrapper
 
 from molt.trainer.workers.policy_actor import _lora_merge_map
 
 
-class _LinearLoRA(nn.Module):
-    """Stand-in for AutoModel's LinearLoRA: ``lora_A``/``lora_B`` submodules plus a scale."""
-
-    def __init__(self, out=4, inp=4, dim=2, scale=1.0):
-        super().__init__()
-        self.weight = nn.Parameter(torch.zeros(out, inp))
-        self.lora_A = nn.Linear(inp, dim, bias=False)
-        self.lora_B = nn.Linear(dim, out, bias=False)
-        self.scale = scale
-
-
 def _toy_model() -> nn.Module:
+    # The real AutoModel LinearLoRA, so the test follows its attribute names (scale = alpha / dim).
     model = nn.Module()
     blocks = []
     for _ in range(2):
         block = nn.Module()
         block.self_attn = nn.Module()
-        block.self_attn.q_proj = _LinearLoRA(scale=2.0)
+        block.self_attn.q_proj = LinearLoRA(nn.Linear(4, 4, bias=False), dim=2, alpha=4)
         blocks.append(block)
     model.layers = nn.ModuleList(blocks)
     return model

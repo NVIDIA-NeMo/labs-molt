@@ -31,16 +31,6 @@ def train(args):
     strategy = get_strategy(args)
     strategy.setup_distributed()
 
-    # LoRA via AutoModel's native PEFT path: injected post-init, pre-FSDP2; base
-    # weights are frozen and the optimizer already filters on requires_grad.
-    peft_config = None
-    if args.model.lora_dim > 0:
-        peft_config = {"dim": args.model.lora_dim, "alpha": args.model.lora_alpha}
-        if args.model.lora_target_modules:
-            peft_config["target_modules"] = list(args.model.lora_target_modules)
-        else:
-            peft_config["match_all_linear"] = True
-
     model = Actor(
         args.model.model_name_or_path,
         attn_implementation=args.fsdp.attn_implementation,
@@ -53,7 +43,9 @@ def train(args):
         packing_samples=args.fsdp.packing_samples,
         freeze_visual_encoder=args.model.freeze_visual_encoder,
         moe_aux_loss_coef=args.model.aux_loss_coef,
-        peft_config=peft_config,
+        lora_dim=args.model.lora_dim,
+        lora_alpha=args.model.lora_alpha,
+        lora_target_modules=args.model.lora_target_modules,
     )
     tokenizer = get_tokenizer(
         args.model.model_name_or_path, model.model, "right", use_fast=not args.data.disable_fast_tokenizer
