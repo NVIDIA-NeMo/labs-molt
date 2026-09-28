@@ -13,20 +13,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Two-GPU asynchronous RL end-to-end check (recipe: tests/e2e/launch_scripts/Launch_RL_2GPU.sh), two ways in:
+# The repository's one GPU check: the unit suite and a two-GPU asynchronous RL end-to-end run (recipe:
+# tests/e2e/launch_scripts/Launch_RL_2GPU.sh) on one 2-GPU runner -- the unit tests run in a CPU-only
+# container alongside the e2e, so they add no wall time. Ways in:
 #   * Actions tab -> Run workflow: pick the branch, the multi-arch image (hijkzzz/molt) and the 2-GPU runner
 #     (default: the arm64 GB200 runner the release image is built on).
-#   * On a PR, fork or in-repo alike: a maintainer puts the `e2e-rl-test` label on it. pull_request_target runs
+#   * On a PR, fork or in-repo alike: a maintainer puts the `e2e-rl` label on it. pull_request_target runs
 #     THIS file from main with the repository's secrets and checks out the PR's head commit, so the label is the
 #     approval that lets that exact revision run on a self-hosted GPU runner: read the diff first. The label is
 #     removed as the run starts; a later push to the PR needs a fresh label.
-#   * After every merge to main (push): if the merge touched the image's inputs (dockerfile/, requirements.txt,
-#     pyproject.toml) the image is built first, on the runner, from the release build cache, and the run uses
-#     it; otherwise the released image. This is where dependency changes get tested -- the PR path deliberately
-#     stays on the released image so a review-time run is always ~8 minutes.
+#   * After every merge to main (push).
 #   * Daily on main (schedule), only when main moved since the last successful run: catches drift in what
 #     the code does not pin -- the `latest` image, the model and dataset on the Hub, the runner.
 #   A failed push or daily run is reported to the CI Slack channel; nobody watches those.
+# The image: the released one, unless the change under test (the PR's files, or the pushed range) touched the
+# image's inputs -- dockerfile/, requirements.txt, pyproject.toml -- in which case it is built first, on the
+# runner, from the release build cache (only the changed layers rebuild), and the run uses it.
 # The checked-out tree is mounted over the image's copy. The result is the job's check on the PR, and every
 # metric's first / last / min / max / change over the run is posted as the job summary (alerts fail the job).
 name: E2E RL (2 GPU)
@@ -95,10 +97,10 @@ jobs:
       !cancelled() && needs.pre-flight.result == 'success'
       && (github.event_name == 'workflow_dispatch'
           || github.event_name == 'push'
-          || github.event.label.name == 'e2e-rl-test'
+          || github.event.label.name == 'e2e-rl'
           || (github.event_name == 'schedule' && needs.daily-gate.outputs.run == 'true'))
     runs-on: ${{ inputs.runner || 'nemo-ci-gcp-gpu-x2' }}
-    timeout-minutes: 120 # a merge that changes the image rebuilds it first (warm cache ~10 min, cold ~1 h)
+    timeout-minutes: 120 # a change to the image's inputs rebuilds it first (warm cache ~10 min, cold ~1 h)
     steps:
       - name: Consume the trigger label
         if: github.event_name == 'pull_request_target'
@@ -106,7 +108,7 @@ jobs:
         with:
           script: |
             await github.rest.issues.removeLabel({
-              ...context.repo, issue_number: context.payload.pull_request.number, name: 'e2e-rl-test',
+              ...context.repo, issue_number: context.payload.pull_request.number, name: 'e2e-rl',
             }).catch(() => {});
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -130,24 +132,28 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           IMAGE: ${{ inputs.image || 'hijkzzz/molt:latest' }}
+          PR: ${{ github.event.pull_request.number }}
           BEFORE: ${{ github.event.before }}
         run: |
+          # The files under test: the PR's, or the pushed range's (the head commit alone on a new branch).
+          case "$GITHUB_EVENT_NAME" in
+            pull_request_target) q="repos/$GITHUB_REPOSITORY/pulls/$PR/files" ;;
+            push) case "$BEFORE" in
+                    ''|0000000000000000000000000000000000000000) q="repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA" ;;
+                    *) q="repos/$GITHUB_REPOSITORY/compare/$BEFORE...$GITHUB_SHA" ;;
+                  esac ;;
+            *) q="" ;;
+          esac
           build=false
-          if [ "$GITHUB_EVENT_NAME" = push ]; then
-            # Files the push changed: the compare range, or the head commit alone on a new/force-pushed branch.
-            case "$BEFORE" in
-              ''|0000000000000000000000000000000000000000) q="repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA" ;;
-              *) q="repos/$GITHUB_REPOSITORY/compare/$BEFORE...$GITHUB_SHA" ;;
-            esac
-            if gh api "$q" --jq '.files[].filename' | grep -qE '^(dockerfile/|requirements\.txt$|pyproject\.toml$)'; then
-              build=true; IMAGE="molt-e2e:${GITHUB_SHA::8}"
-            fi
+          if [ -n "$q" ] && gh api "$q" --paginate --jq '.files[].filename' \
+               | grep -qE '^(dockerfile/|requirements\.txt$|pyproject\.toml$)'; then
+            build=true; IMAGE="molt-e2e:${GITHUB_SHA::8}"
           fi
           echo "image=$IMAGE build=$build"
           { echo "image=$IMAGE"; echo "build=$build"; } >> "$GITHUB_OUTPUT"
       - if: steps.image.outputs.build == 'true'
         uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - name: Build the image (this merge changed its inputs)
+      - name: Build the image (the change under test touched its inputs)
         if: steps.image.outputs.build == 'true'
         uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
         with:
@@ -157,6 +163,11 @@ jobs:
           tags: ${{ steps.image.outputs.image }}
           # Read-only use of the release build cache for this runner's architecture.
           cache-from: type=registry,ref=hijkzzz/molt-buildcache:${{ runner.arch == 'ARM64' && 'arm64' || 'amd64' }}
+      - name: Unit tests, in a CPU-only container alongside the e2e
+        run: |
+          docker run -d --name unit --shm-size=8g --workdir /opt/labs-molt \
+            --volume "${{ github.workspace }}:/opt/labs-molt" "${{ steps.image.outputs.image }}" \
+            bash -lc 'pip install -q --target /tmp/pt pytest && PYTHONPATH=/tmp/pt python -m pytest -q -p no:cacheprovider tests/unit'
       - name: Async RL, Qwen2.5-Math-1.5B, 10 updates
         uses: ./.github/actions/test-template
         with:
@@ -165,6 +176,12 @@ jobs:
           script-dir: tests/e2e/launch_scripts
           timeout: "45"
           coverage-prefix: e2e
+      - name: Unit test result
+        if: always()
+        run: |
+          rc=$(docker wait unit 2>/dev/null || echo 1)
+          docker logs unit 2>&1 | tail -30; docker rm -f unit >/dev/null 2>&1 || true
+          [ "$rc" = 0 ]
       - name: Metrics summary
         if: always()
         run: |
