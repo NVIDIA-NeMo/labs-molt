@@ -341,6 +341,10 @@ class AgentRunner(ChatAgentRunner):
         super().__init__(MyAgent)
 ```
 
+A multi-turn agent that stops on its own turn cap should return
+`Result(truncated=True)` (see `examples/python/agents/chat_geo3k.py`); the
+server marks generation-length / context truncation by itself.
+
 The same server speaks the Anthropic wire too — point `AsyncAnthropic` at
 `ctx.session_url` (the session root *without* `/v1`; the SDK appends
 `/v1/messages` itself); everything else is identical:

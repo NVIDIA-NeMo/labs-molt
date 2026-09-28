@@ -119,16 +119,31 @@ def test_step_marks_last_tool_call_turn_truncated(monkeypatch):
     assert env.tool_call_count == 1
 
 
-def test_chat_agent_marks_last_tool_call_turn_truncated(monkeypatch):
-    chat_geo3k = _load_chat_geo3k(monkeypatch)
-    message = SimpleNamespace(content="let me compute <tool_call>x</tool_call>")
-    create = AsyncMock(return_value=SimpleNamespace(choices=[SimpleNamespace(message=message)]))
+def _run_chat_agent(monkeypatch, chat_geo3k, replies, max_turns):
+    """Drive Geo3kAgent.run against a scripted model that answers ``replies`` turn by turn.
+    Returns (result, create_mock, executed_tool_calls)."""
+    executed = []
+    it = iter(replies)
+    create = AsyncMock(
+        side_effect=lambda **kwargs: SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=next(it)))]
+        )
+    )
     client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
     monkeypatch.setattr(chat_geo3k, "AsyncOpenAI", lambda **kwargs: client)
-    monkeypatch.setattr(chat_geo3k, "_MAX_TURNS", 1)
-    monkeypatch.setattr(chat_geo3k, "_extract_tool_call", lambda text: {"name": "python_executor", "arguments": {}})
-    monkeypatch.setattr(chat_geo3k, "_grade_answer", lambda text, label: (0.0, ""))
-    monkeypatch.setattr(chat_geo3k, "_TOOLS", {"python_executor": SimpleNamespace(execute=lambda arguments: "1")})
+    monkeypatch.setattr(chat_geo3k, "_MAX_TURNS", max_turns)
+    monkeypatch.setattr(
+        chat_geo3k,
+        "_extract_tool_call",
+        lambda text: {"name": "python_executor", "arguments": {"code": text}} if "<tool_call>" in text else None,
+    )
+    monkeypatch.setattr(chat_geo3k, "_final_answer", lambda text: "42" if "boxed" in text else "")
+    monkeypatch.setattr(chat_geo3k, "_grade_answer", lambda text, label: (1.0 if "boxed" in text else 0.0, ""))
+    monkeypatch.setattr(
+        chat_geo3k,
+        "_TOOLS",
+        {"python_executor": SimpleNamespace(execute=lambda arguments: executed.append(arguments) or "1")},
+    )
     ctx = SimpleNamespace(
         base_url="http://localhost/v1",
         api_key="EMPTY",
@@ -138,10 +153,31 @@ def test_chat_agent_marks_last_tool_call_turn_truncated(monkeypatch):
         sampling_params=SimpleNamespace(max_tokens=8, temperature=1.0),
         label="",
     )
+    return asyncio.run(chat_geo3k.Geo3kAgent().run(ctx)), create, executed
 
-    result = asyncio.run(chat_geo3k.Geo3kAgent().run(ctx))
 
+def test_chat_agent_marks_last_tool_call_turn_truncated_without_running_the_tool(monkeypatch):
+    # The model keeps calling the tool: turn 1's call runs and is fed back, turn 2 (the cap) is a
+    # pending call the model can never see the result of -> truncated, tool NOT executed, but the
+    # call still counts (the model did emit it; matches the step runner's tool_call_total).
+    chat_geo3k = _load_chat_geo3k(monkeypatch)
+    tool_call = "let me compute <tool_call>x</tool_call>"
+    result, create, executed = _run_chat_agent(monkeypatch, chat_geo3k, [tool_call, tool_call], max_turns=2)
     assert result.truncated is True
+    assert create.await_count == 2
+    assert len(executed) == 1
+    assert float(result.info["geo3k_tool_call_total"]) == 2.0
+    assert float(result.info["turn_index"]) == 2.0
+
+
+def test_chat_agent_final_answer_on_last_turn_is_not_truncated(monkeypatch):
+    chat_geo3k = _load_chat_geo3k(monkeypatch)
+    replies = ["let me compute <tool_call>x</tool_call>", "so the answer is \\boxed{42}"]
+    result, create, executed = _run_chat_agent(monkeypatch, chat_geo3k, replies, max_turns=2)
+    assert result.truncated is False
+    assert create.await_count == 2
+    assert len(executed) == 1
+    assert float(result.reward) == 1.0
 
 
 def test_step_reuses_generated_turn_end_for_feedback(monkeypatch):

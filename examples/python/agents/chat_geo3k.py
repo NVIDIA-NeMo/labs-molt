@@ -167,6 +167,13 @@ class Geo3kAgent(ChatAgent):
                 break
 
             tool_call_count += 1
+            if turn == _MAX_TURNS:
+                # Turn cap reached with a tool call still pending: the episode is cut off
+                # externally. Skip the tool — no turn is left to show the model its output, so
+                # the subprocess would be pure waste and the unsent tool_response would leave
+                # `messages` out of sync with the traced conversation.
+                truncated = True
+                break
             name = tool_call["name"]
             tool = _TOOLS.get(name)
             obs_text = (
@@ -177,7 +184,6 @@ class Geo3kAgent(ChatAgent):
                 else f"Tool `{name}` is not supported. Available: {list(_TOOLS)}"
             )
             messages.append({"role": "user", "content": f"<tool_response>\n{obs_text}\n</tool_response>"})
-            truncated = turn == _MAX_TURNS
 
         reward_value, _ = await asyncio.to_thread(_grade_answer, "\n".join(assistant_history), ctx.label)
         reward = torch.tensor(reward_value, dtype=torch.float32)

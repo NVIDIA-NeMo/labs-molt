@@ -134,7 +134,11 @@ class ChatAgent(ABC):
 
         Returns:
             Result with a scalar ``reward`` (required); ``score`` and ``info``
-            are optional (same contract as ``Env.step``).
+            are optional (same contract as ``Env.step``). Set ``truncated=True``
+            when your own loop cuts the episode off (a turn cap, a wall-clock
+            budget, ...): the server only detects generation-length / context
+            truncation by itself, and the trainer's ``truncated_rate`` metrics
+            read the OR of the two.
         """
         raise NotImplementedError
 
