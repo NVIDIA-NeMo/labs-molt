@@ -20,9 +20,13 @@
 #     THIS file from main with the repository's secrets and checks out the PR's head commit, so the label is the
 #     approval that lets that exact revision run on a self-hosted GPU runner: read the diff first. The label is
 #     removed as the run starts; a later push to the PR needs a fresh label.
+#   * After every merge to main (push): if the merge touched the image's inputs (dockerfile/, requirements.txt,
+#     pyproject.toml) the image is built first, on the runner, from the release build cache, and the run uses
+#     it; otherwise the released image. This is where dependency changes get tested -- the PR path deliberately
+#     stays on the released image so a review-time run is always ~8 minutes.
 #   * Daily on main (schedule), only when main moved since the last successful run: catches drift in what
-#     the code does not pin -- the `latest` image, the model and dataset on the Hub, the runner -- and
-#     reports a failure to the CI Slack channel.
+#     the code does not pin -- the `latest` image, the model and dataset on the Hub, the runner.
+#   A failed push or daily run is reported to the CI Slack channel; nobody watches those.
 # The checked-out tree is mounted over the image's copy. The result is the job's check on the PR, and every
 # metric's first / last / min / max / change over the run is posted as the job summary (alerts fail the job).
 name: E2E RL (2 GPU)
@@ -40,6 +44,8 @@ on:
         default: nemo-ci-gcp-gpu-x2
   pull_request_target:
     types: [labeled]
+  push:
+    branches: [main]
   schedule:
     - cron: "0 10 * * *" # daily, 10:00 UTC
 
@@ -88,10 +94,11 @@ jobs:
     if: |
       !cancelled() && needs.pre-flight.result == 'success'
       && (github.event_name == 'workflow_dispatch'
+          || github.event_name == 'push'
           || github.event.label.name == 'e2e-rl-test'
           || (github.event_name == 'schedule' && needs.daily-gate.outputs.run == 'true'))
     runs-on: ${{ inputs.runner || 'nemo-ci-gcp-gpu-x2' }}
-    timeout-minutes: 60
+    timeout-minutes: 120 # a merge that changes the image rebuilds it first (warm cache ~10 min, cold ~1 h)
     steps:
       - name: Consume the trigger label
         if: github.event_name == 'pull_request_target'
@@ -118,10 +125,42 @@ jobs:
           echo "cgroup memory limit: $(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes)"
           free -g | head -2
           df -h "$GITHUB_WORKSPACE" /dev/shm
+      - name: Resolve the image
+        id: image
+        env:
+          GH_TOKEN: ${{ github.token }}
+          IMAGE: ${{ inputs.image || 'hijkzzz/molt:latest' }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          build=false
+          if [ "$GITHUB_EVENT_NAME" = push ]; then
+            # Files the push changed: the compare range, or the head commit alone on a new/force-pushed branch.
+            case "$BEFORE" in
+              ''|0000000000000000000000000000000000000000) q="repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA" ;;
+              *) q="repos/$GITHUB_REPOSITORY/compare/$BEFORE...$GITHUB_SHA" ;;
+            esac
+            if gh api "$q" --jq '.files[].filename' | grep -qE '^(dockerfile/|requirements\.txt$|pyproject\.toml$)'; then
+              build=true; IMAGE="molt-e2e:${GITHUB_SHA::8}"
+            fi
+          fi
+          echo "image=$IMAGE build=$build"
+          { echo "image=$IMAGE"; echo "build=$build"; } >> "$GITHUB_OUTPUT"
+      - if: steps.image.outputs.build == 'true'
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build the image (this merge changed its inputs)
+        if: steps.image.outputs.build == 'true'
+        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        with:
+          file: dockerfile/Dockerfile
+          context: .
+          load: true
+          tags: ${{ steps.image.outputs.image }}
+          # Read-only use of the release build cache for this runner's architecture.
+          cache-from: type=registry,ref=hijkzzz/molt-buildcache:${{ runner.arch == 'ARM64' && 'arm64' || 'amd64' }}
       - name: Async RL, Qwen2.5-Math-1.5B, 10 updates
         uses: ./.github/actions/test-template
         with:
-          image: ${{ inputs.image || 'hijkzzz/molt:latest' }}
+          image: ${{ steps.image.outputs.image }}
           script: Launch_RL_2GPU
           script-dir: tests/e2e/launch_scripts
           timeout: "45"
@@ -131,12 +170,12 @@ jobs:
         run: |
           cat .tmp/e2e_rl_2gpu/metrics_summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null \
             || echo "No metrics: the run ended before the first update." >> "$GITHUB_STEP_SUMMARY"
-      - name: Report a failed daily run to Slack
-        if: failure() && github.event_name == 'schedule'
+      - name: Report a failed main run to Slack
+        if: failure() && (github.event_name == 'schedule' || github.event_name == 'push')
         env:
           WEBHOOK: ${{ secrets.SLACK_CI_CHANNEL_WEBHOOK }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           [ -n "$WEBHOOK" ] || { echo "SLACK_CI_CHANNEL_WEBHOOK not set"; exit 0; }
           curl -sS -X POST -H 'Content-type: application/json' \
-            --data "{\"text\": \"E2E RL (2 GPU) daily run on main FAILED: $RUN_URL\"}" "$WEBHOOK"
+            --data "{\"text\": \"E2E RL (2 GPU) ${{ github.event_name }} run on main FAILED: $RUN_URL\"}" "$WEBHOOK"
