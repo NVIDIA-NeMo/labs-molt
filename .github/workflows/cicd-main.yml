@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# The repository's one GPU check: the unit suite and a two-GPU asynchronous RL end-to-end run (recipe:
+# CICD Molt, the repository's one test workflow: the unit suite and a two-GPU asynchronous RL end-to-end run (recipe:
 # tests/e2e/launch_scripts/Launch_RL_2GPU.sh) on one 2-GPU runner -- the unit tests run in a CPU-only
 # container alongside the e2e, so they add no wall time. Ways in:
 #   * Actions tab -> Run workflow: pick the branch, the multi-arch image (hijkzzz/molt) and the 2-GPU runner
@@ -31,7 +31,7 @@
 # runner, from the release build cache (only the changed layers rebuild), and the run uses it.
 # The checked-out tree is mounted over the image's copy. The result is the job's check on the PR, and every
 # metric's first / last / min / max / change over the run is posted as the job summary (alerts fail the job).
-name: E2E RL (2 GPU)
+name: CICD Molt
 
 on:
   workflow_dispatch:
@@ -86,7 +86,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          last=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/e2e-rl.yml/runs?branch=main&status=success&per_page=1" \
+          last=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/cicd-main.yml/runs?branch=main&status=success&per_page=1" \
             --jq '.workflow_runs[0].head_sha // ""')
           echo "last passing run: ${last:-none}; main: $GITHUB_SHA"
           echo "run=$([ "$last" != "$GITHUB_SHA" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
@@ -195,4 +195,15 @@ jobs:
         run: |
           [ -n "$WEBHOOK" ] || { echo "SLACK_CI_CHANNEL_WEBHOOK not set"; exit 0; }
           curl -sS -X POST -H 'Content-type: application/json' \
-            --data "{\"text\": \"E2E RL (2 GPU) ${{ github.event_name }} run on main FAILED: $RUN_URL\"}" "$WEBHOOK"
+            --data "{\"text\": \"CICD Molt ${{ github.event_name }} run on main FAILED: $RUN_URL\"}" "$WEBHOOK"
+
+  # The check branch protection requires. Reports only when the test job actually ran: a PR event that did
+  # not carry the `e2e-rl` label leaves the check at "Expected" instead of turning it green untested.
+  Nemo_CICD_Test:
+    needs: [e2e-rl]
+    if: always() && !cancelled() && needs.e2e-rl.result != 'skipped'
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "e2e-rl: ${{ needs.e2e-rl.result }}"
+          [ "${{ needs.e2e-rl.result }}" = success ]
