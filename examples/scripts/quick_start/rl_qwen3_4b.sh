@@ -85,7 +85,7 @@ python3 -u -m molt.cli.train_rl_ray \
   --vllm.gpu_memory_utilization 0.8 \
   --vllm.distributed_executor_backend mp \
   --fsdp.param_dtype bf16 \
-  --fsdp.attn_implementation flash_attention_2 \
+  --fsdp.attn_implementation te \
   --fsdp.tp_size 1 \
   --fsdp.ep_size 1 \
   --fsdp.cp_size 1 \
