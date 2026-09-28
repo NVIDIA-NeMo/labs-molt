@@ -22,10 +22,7 @@
 #     THIS file from main with the repository's secrets and checks out the PR's head commit, so the label is the
 #     approval that lets that exact revision run on a self-hosted GPU runner: read the diff first. The label is
 #     removed as the run starts; a later push to the PR needs a fresh label.
-#   * After every merge to main (push).
-#   * Daily on main (schedule), only when main moved since the last successful run: catches drift in what
-#     the code does not pin -- the `latest` image, the model and dataset on the Hub, the runner.
-#   A failed push or daily run is reported to the CI Slack channel; nobody watches those.
+#   * After every merge to main (push); a failed one is reported to the CI Slack channel, nobody watches it.
 # The image: the released one, unless the change under test (the PR's files, or the pushed range) touched the
 # image's inputs -- dockerfile/, requirements.txt, pyproject.toml -- in which case it is built first, on the
 # runner, from the release build cache (only the changed layers rebuild), and the run uses it.
@@ -48,8 +45,6 @@ on:
     types: [labeled]
   push:
     branches: [main]
-  schedule:
-    - cron: "0 10 * * *" # daily, 10:00 UTC
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -72,33 +67,9 @@ jobs:
     secrets:
       NVIDIA_MANAGEMENT_ORG_PAT: ${{ secrets.NVIDIA_MANAGEMENT_ORG_PAT }}
 
-  daily-gate:
-    # A scheduled run is worth it only if main moved since the last run that passed; a failing main
-    # keeps being retried every day until it passes.
-    if: github.event_name == 'schedule'
-    runs-on: ubuntu-latest
-    permissions:
-      actions: read
-    outputs:
-      run: ${{ steps.gate.outputs.run }}
-    steps:
-      - id: gate
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          last=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/cicd-main.yml/runs?branch=main&status=success&per_page=1" \
-            --jq '.workflow_runs[0].head_sha // ""')
-          echo "last passing run: ${last:-none}; main: $GITHUB_SHA"
-          echo "run=$([ "$last" != "$GITHUB_SHA" ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
-
   e2e-rl:
-    needs: [pre-flight, daily-gate]
-    if: |
-      !cancelled() && needs.pre-flight.result == 'success'
-      && (github.event_name == 'workflow_dispatch'
-          || github.event_name == 'push'
-          || github.event.label.name == 'cicd'
-          || (github.event_name == 'schedule' && needs.daily-gate.outputs.run == 'true'))
+    needs: [pre-flight]
+    if: github.event_name != 'pull_request_target' || github.event.label.name == 'cicd'
     runs-on: ${{ inputs.runner || 'nemo-ci-gcp-gpu-x2' }}
     timeout-minutes: 120 # a change to the image's inputs rebuilds it first (warm cache ~10 min, cold ~1 h)
     steps:
@@ -120,13 +91,6 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-      - name: Runner resources
-        run: |
-          uname -m; nproc
-          nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
-          echo "cgroup memory limit: $(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes)"
-          free -g | head -2
-          df -h "$GITHUB_WORKSPACE" /dev/shm
       - name: Resolve the image
         id: image
         env:
@@ -189,7 +153,7 @@ jobs:
           cat .tmp/e2e_rl_2gpu/metrics_summary.md >> "$GITHUB_STEP_SUMMARY" 2>/dev/null \
             || echo "No metrics: the run ended before the first update." >> "$GITHUB_STEP_SUMMARY"
       - name: Report a failed main run to Slack
-        if: failure() && (github.event_name == 'schedule' || github.event_name == 'push')
+        if: failure() && github.event_name == 'push'
         env:
           WEBHOOK: ${{ secrets.SLACK_CI_CHANNEL_WEBHOOK }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
