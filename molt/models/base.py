@@ -330,7 +330,9 @@ class BaseModel(nn.Module):
         compute_dtype = convert_to_torch_dtype(param_dtype)
         is_moe = _detect_moe_arch(pretrain_or_model)
         ep_active = moe_mesh is not None
-        if is_moe and not ep_active:
+        # A single-process actor runs an MoE without EP: AutoModel then builds its plain GroupedExperts.
+        # Across ranks the dispatcher-based experts need an EP mesh, so that case still requires ep_size > 1.
+        if is_moe and not ep_active and dist.is_initialized() and dist.get_world_size() > 1:
             raise ValueError("MoE models require --fsdp.ep_size > 1 in the AutoModel custom-only branch.")
         use_hf_model = _will_use_hf_model(pretrain_or_model)
         # EP dispatch is a nemo_automodel custom-path feature; HF has no equivalent. An

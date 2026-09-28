@@ -16,6 +16,8 @@
 # Adapted from OpenRLHF (https://github.com/OpenRLHF/OpenRLHF),
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
+import json
+
 from torch.utils.data import Dataset
 
 from molt.utils.vlm_utils import should_expand_image_placeholder, split_image_placeholder
@@ -29,6 +31,7 @@ def preprocess_data(
     prerender=True,
     expand_image_placeholder: bool = False,
     tools=None,
+    chat_template_kwargs=None,
 ):
     # Verifier ground-truth answer for RL reward computation (empty if no label_key).
     label = "" if label_key is None else data[label_key]
@@ -64,6 +67,7 @@ def preprocess_data(
     # chat templates into a system-side preamble that teaches the model
     # the `<tool_call>{...}</tool_call>` emission format natively.
     kwargs = {"tools": tools} if tools else {}
+    kwargs.update(chat_template_kwargs or {})
     prompt = apply_chat_template(chat, tokenize=False, add_generation_prompt=True, **kwargs)
     return prompt, label
 
@@ -106,6 +110,7 @@ class PromptDataset(Dataset):
         self.image_key = getattr(self.strategy.args.data, "image_key", "images")
         apply_chat_template = getattr(self.strategy.args.data, "apply_chat_template", False)
         self.apply_chat_template = self.tokenizer.apply_chat_template if apply_chat_template else None
+        self.chat_template_kwargs = json.loads(getattr(self.strategy.args.data, "chat_template_kwargs", None) or "{}")
         self.expand_image_placeholder = should_expand_image_placeholder(self.tokenizer)
 
     def __len__(self):
@@ -124,6 +129,7 @@ class PromptDataset(Dataset):
             prerender=self.prerender,
             expand_image_placeholder=self.expand_image_placeholder,
             tools=tools,
+            chat_template_kwargs=self.chat_template_kwargs,
         )
         return data.get("datasource", "default"), prompt, label, data.get(self.image_key, None), tools
 

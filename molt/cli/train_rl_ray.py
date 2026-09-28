@@ -428,6 +428,13 @@ if __name__ == "__main__":
         "<tool_call>{...}</tool_call> emission format without manual prompt engineering.",
     )
     parser.add_argument(
+        "--data.chat_template_kwargs",
+        type=str,
+        default=None,
+        help="JSON dict of extra apply_chat_template kwargs for step runners, e.g. '{\"enable_thinking\": false}' "
+        "(Qwen3.5/3.6: answer without a thinking block).",
+    )
+    parser.add_argument(
         "--data.apply_chat_template",
         action="store_true",
         default=False,
