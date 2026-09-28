@@ -285,8 +285,10 @@ def test_compaction_starts_a_fresh_segment():
     assert session.trajectories[1].observation_tokens == expected2  # segment 2 token-exact from compacted
     assert [len(t.action_ranges) for t in session.trajectories] == [2, 1]
 
-    out = stitch_session(state, "sid", Result(reward=1.0, score=0.5))
+    out = stitch_session(state, "sid", Result(reward=1.0, score=0.5, truncated=True))
     assert len(out) == 2 and all(t.reward == 1.0 and t.scores == 0.5 for t in out)
+    # The agent's cut ends the episode: only the last segment is truncated, the first was complete.
+    assert [t.truncated for t in out] == [False, True]
 
 
 def test_template_rewritten_history_starts_fresh_segment():
