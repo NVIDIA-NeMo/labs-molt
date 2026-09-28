@@ -151,8 +151,10 @@ core
 exp
 wandb
 .claude/*
-# Ship the project skills (Claude Code loads them for every contributor)
+# Ship the project skills (Claude Code loads them for every contributor) and the shared project
+# settings (effort level for /claude review); personal overrides stay in .claude/settings.local.json.
 !.claude/skills/
+!.claude/settings.json
 
 # Local verification outputs
 .tmp*/
