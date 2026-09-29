@@ -233,18 +233,23 @@ pip install "molt-rl[vllm]"
 > release instead — it can lag the pin in `setup.py`, and R3 routing replay needs
 > the newer pin (it fails fast with instructions when the installed AutoModel is too old).
 
-### 🪶 Optional: AutoModel-Slim, a lightweight backend
+### 🪶 Optional backend: AutoModel-Slim
 
-**The default stays upstream NVIDIA AutoModel**, pinned in `setup.py`; every command above installs it, and
-nothing below applies unless you opt in. This repo's
-[`automodel-slim`](https://github.com/NVIDIA-NeMo/labs-molt/tree/automodel-slim) branch
-carries a lightweight version of that same pinned commit: same package name and API, trimmed to the
-model families and the parallel stack molt uses (Qwen2 / Qwen3 / 3.5 / 3.6 / 3.8, DeepSeek V4.1,
-GLM 5.3, Gemma 4, Nemotron 3, Muse, Inkling; FSDP2 / TP / EP / CP, TE + THD packing, DeepEP / HybridEP
-MoE, router replay, LoRA, FP8, Dion, DCP checkpointing with HF export). 758 files / 282k lines down to
-252 / ~97k; forward logits are bit-exact with upstream on every kept family and the molt RL e2e
-metrics match. `setup.py` holds both pins (`AUTOMODEL`); opt in with `MOLT_AUTOMODEL=slim` at install or
-image-build time, or point the slurm recipes at a checkout:
+**The default stays upstream NVIDIA AutoModel**, pinned in `setup.py`; every command above installs it,
+and nothing in this section applies unless you opt in.
+
+[`automodel-slim`](https://github.com/NVIDIA-NeMo/labs-molt/tree/automodel-slim) is molt's own copy of that
+pinned AutoModel commit (`8f73178c`), trimmed to what molt uses and maintained in this repo. Like upstream it
+is PyTorch-native and Hugging Face-native: Hugging Face checkpoints in, native FSDP2 implementations for
+training, Hugging Face safetensors out for vLLM and `transformers`. Same package name (`nemo_automodel`),
+same import paths, same API, so molt's code does not change when you switch.
+
+It keeps the model families molt trains (Qwen2 / 2.5, Qwen3 / 3.5 / 3.6 / 3.8, DeepSeek V4.1 Flash,
+GLM 5.x, Gemma 4, Nemotron 3, Muse Glimmer, Inkling) and the training stack behind them (FSDP2 with
+TP / EP / CP, TransformerEngine attention with THD packing, DeepEP / HybridEP MoE dispatch, router replay,
+LoRA, FP8, Dion / Muon, DCP checkpoints with consolidated HF export). Everything else is removed: 758 files /
+282k lines down to 252 / ~97k. Forward logits are bit-exact with upstream on every kept family, molt's RL
+e2e metrics match, and the branch runs its own seven-minute CI on molt's image and runners.
 
 ```bash
 MOLT_AUTOMODEL=slim pip install -e ".[vllm]"                                          # local install
@@ -252,9 +257,10 @@ docker build --build-arg MOLT_AUTOMODEL=slim -f dockerfile/Dockerfile -t molt:sl
 EXTRA_PYTHONPATH=/path/to/automodel-slim ...                                          # slurm recipes: a checkout wins over the baked-in package
 ```
 
-Model and parallel-stack changes go to that branch; its PRs get the same `cicd` label check and
-`/claude review` as this repo. The slim install follows that branch's head: merge there, then rebuild the
-image (or reinstall) to pick the change up.
+`setup.py` holds both pins (`AUTOMODEL`); the slim install follows the branch head, so a merge there is
+live on the next image build or reinstall. Model and parallel-stack changes go to that branch as PRs, with
+the same `cicd` label check and `/claude review` as this repo; its README carries the per-family parity
+table against upstream and the maintenance rules.
 
 ## 🚀 Quick Start
 
@@ -434,8 +440,8 @@ Four reference agents ship under `examples/python/agents/`:
 
 ## 🍳 Recipes
 
-Reference launch scripts live under `examples/scripts/`. Two end-to-end
-families ship today, both on the AutoModel + FSDP2 backend:
+Reference launch scripts live under `examples/scripts/`, all end-to-end
+on the AutoModel + FSDP2 backend:
 
 | Workflow | quick_start | slurm |
 |---|---|---|
