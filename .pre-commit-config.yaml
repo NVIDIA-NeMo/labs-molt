@@ -37,10 +37,6 @@ repos:
       args: ["-t", "B614"]
       exclude: "^tests/"
 
-  - repo: https://github.com/astral-sh/uv-pre-commit
-    rev: "b84c4a0a90bd58c7d82ae8f0d4d5e77b1ddd3ce6"  # frozen: 0.12.5
-    hooks:
-
   - repo: local
     hooks:
       - id: no-underscore-md
