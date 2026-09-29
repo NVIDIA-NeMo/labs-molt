@@ -1,11 +1,25 @@
+<div align="center">
+
 # 🪶 AutoModel-Slim
+
+**NeMo AutoModel, trimmed to what [molt](https://github.com/NVIDIA-NeMo/labs-molt) needs. This is where molt's model backend is developed now.**
 
 [![CICD AutoModel-Slim](https://github.com/NVIDIA-NeMo/labs-molt/actions/workflows/cicd-automodel-slim.yml/badge.svg?branch=automodel-slim)](https://github.com/NVIDIA-NeMo/labs-molt/actions/workflows/cicd-automodel-slim.yml)
 [![Base: Automodel 8f73178c](https://img.shields.io/badge/base-Automodel%208f73178c-76b900)](https://github.com/NVIDIA-NeMo/Automodel/tree/8f73178ca51d4c1e55ccf05df5da6540a9e24f7e)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](#-provenance-and-license)
 
-**NeMo AutoModel, trimmed to what [molt](https://github.com/NVIDIA-NeMo/labs-molt) needs. This is where
-molt's model backend is developed now.**
+🧩 [Model families](#-model-families) · ✅ [Parity with upstream](#-parity-with-upstream) · 🧱 [What is kept](#-what-is-kept) ·
+🧹 [What was removed](#-what-was-removed) · 📦 [Installation](#-installation) · 🤝 [Contributing](#-contributing) · 🔁 [CI](#-ci) ·
+🔧 [Maintenance](#-maintenance) · 📄 [Provenance](#-provenance-and-license)
+
+| | upstream `8f73178c` | AutoModel-Slim |
+|---|---|---|
+| Python files / lines | 758 / 282k | 252 / ~97k |
+| model families | 58 | 10 (below) + shared utilities |
+| tests | 1,005 files | 194 files (kept areas only) |
+| forward logits vs upstream | | bit-exact on every kept family ([table](#-parity-with-upstream)) |
+
+</div>
 
 AutoModel-Slim is molt's model backend: [NVIDIA-NeMo/Automodel](https://github.com/NVIDIA-NeMo/Automodel)
 at commit `8f73178c` with everything molt does not use removed, same package name (`nemo_automodel`),
@@ -15,31 +29,20 @@ tensor / expert / context parallelism, packed for TransformerEngine attention, a
 checkpoints plus consolidated Hugging Face safetensors that `transformers` and vLLM load directly. molt's
 RL and SFT actor delegates all of that to it.
 
-| | upstream `8f73178c` | AutoModel-Slim |
-|---|---|---|
-| Python files / lines | 758 / 282k | 252 / ~97k |
-| model families | 58 | 10 (below) + shared utilities |
-| tests | 1,005 files | 194 files (kept areas only) |
-| forward logits vs upstream | | bit-exact on every kept family ([table](#-parity-with-upstream)) |
-
-🧩 [Model families](#-model-families) · ✅ [Parity with upstream](#-parity-with-upstream) · 🧱 [What is kept](#-what-is-kept) ·
-🧹 [What was removed](#-what-was-removed) · 📦 [Installation](#-installation) · 🤝 [Contributing](#-contributing) · 🔁 [CI](#-ci) ·
-🔧 [Maintenance](#-maintenance) · 📄 [Provenance](#-provenance-and-license)
-
 ## 🧩 Model families
 
-| Family | Directories | Architectures | molt RL e2e |
-|---|---|---|---|
-| Qwen2 / Qwen2.5 | `qwen2` | `Qwen2ForCausalLM` | RL, dense 1.5B |
-| Qwen3 | `qwen3`, `qwen3_moe`, `qwen3_next`, `qwen3_vl`, `qwen3_vl_moe` | `Qwen3ForCausalLM`, `Qwen3MoeForCausalLM`, `Qwen3NextForCausalLM`, `Qwen3VLForConditionalGeneration`, `Qwen3VLMoeForConditionalGeneration` | RL, 30B-A3B EP8 |
-| Qwen3.5 / 3.6 | `qwen3_5`, `qwen3_5_moe` | `Qwen3_5ForCausalLM`, `Qwen3_5ForConditionalGeneration`, `Qwen3_5MoeForCausalLM`, `Qwen3_5MoeForConditionalGeneration` | RL, 35B-A3B EP8 / CP8 |
-| Qwen3.8 Flash Next | `qwen3_8_flash_next` | `Qwen3_8_FlashNextForConditionalGeneration`, `Qwen4ExpForConditionalGeneration` |  |
-| DeepSeek V4.1 Flash | `deepseek_v41`, `deepseek_v4`, `deepseek_v3` (shared RoPE / FP8 helpers) | `DeepseekV41ForCausalLM` (subclasses the V4 implementation) |  |
-| GLM 5.x, 5.3-Flash | `glm_moe_dsa`, `glm5_next`, `glm4_moe` (shared adapter helpers) | `GlmMoeDsaForCausalLM`, `Glm5NextForConditionalGeneration` | RL, GLM-5.2 753B EP / CP16 |
-| Gemma 4 (dense, MoE, unified) | `gemma4_moe`, `gemma4_unified` | `Gemma4ForConditionalGeneration`, `Gemma4UnifiedForConditionalGeneration` | RL, 26B-A4B EP8 |
-| Nemotron 3 / 3.5 | `nemotron_v3`, `nemotron_omni` | `NemotronHForCausalLM`, `NemotronH_Nano_Omni_Reasoning_V3`, `NemotronH_Omni_Reasoning_V3` | RL, Nano 30B-A3B EP8 |
-| Muse Glimmer | `muse_glimmer` | `MuseGlimmerForConditionalGeneration` | RL, 30B TP2 |
-| Inkling | `inkling` | `InklingForConditionalGeneration` |  |
+| Family | Directories | Architectures |
+|---|---|---|
+| Qwen2 / Qwen2.5 | `qwen2` | `Qwen2ForCausalLM` |
+| Qwen3 | `qwen3`, `qwen3_moe`, `qwen3_next`, `qwen3_vl`, `qwen3_vl_moe` | `Qwen3ForCausalLM`, `Qwen3MoeForCausalLM`, `Qwen3NextForCausalLM`, `Qwen3VLForConditionalGeneration`, `Qwen3VLMoeForConditionalGeneration` |
+| Qwen3.5 / 3.6 | `qwen3_5`, `qwen3_5_moe` | `Qwen3_5ForCausalLM`, `Qwen3_5ForConditionalGeneration`, `Qwen3_5MoeForCausalLM`, `Qwen3_5MoeForConditionalGeneration` |
+| Qwen3.8 Flash Next | `qwen3_8_flash_next` | `Qwen3_8_FlashNextForConditionalGeneration`, `Qwen4ExpForConditionalGeneration` |
+| DeepSeek V4.1 Flash | `deepseek_v41`, `deepseek_v4`, `deepseek_v3` (shared RoPE / FP8 helpers) | `DeepseekV41ForCausalLM` (subclasses the V4 implementation) |
+| GLM 5.x, 5.3-Flash | `glm_moe_dsa`, `glm5_next`, `glm4_moe` (shared adapter helpers) | `GlmMoeDsaForCausalLM`, `Glm5NextForConditionalGeneration` |
+| Gemma 4 (dense, MoE, unified) | `gemma4_moe`, `gemma4_unified` | `Gemma4ForConditionalGeneration`, `Gemma4UnifiedForConditionalGeneration` |
+| Nemotron 3 / 3.5 | `nemotron_v3`, `nemotron_omni` | `NemotronHForCausalLM`, `NemotronH_Nano_Omni_Reasoning_V3`, `NemotronH_Omni_Reasoning_V3` |
+| Muse Glimmer | `muse_glimmer` | `MuseGlimmerForConditionalGeneration` |
+| Inkling | `inkling` | `InklingForConditionalGeneration` |
 
 `llama/` and `gpt_oss/` hold only the RoPE helpers the Qwen and GLM implementations import; there is
 no Llama or GPT-OSS model class. Dense HF architectures without a native implementation still load
@@ -47,27 +50,28 @@ through the plain transformers path (FSDP2, with TP plans for Qwen2 / Qwen3).
 
 ## ✅ Parity with upstream
 
-Same checkpoint, same input batch, forward logits compared to the last bit between upstream
+Two kinds of evidence per family. **Logits**: same checkpoint, same input batch, forward logits compared to the last bit between upstream
 `8f73178c` and this tree, both built the way molt builds its actor (FSDP2 + EP mesh, TE attention,
 fp32 masters under a bf16 mixed-precision policy, THD packing or the padded forward molt uses for the
 GDN families). Families whose checkpoints are hundreds of GB run their real config cut to a few layers
-with seeded random weights. Run on 8 H100 with the molt `0.1.10` image on 2026-09-29 against tree
-`0b35e05`:
+with seeded random weights; run on 8 H100 with the molt `0.1.10` image on 2026-09-29 against tree
+`0b35e05`. **molt RL e2e**: the family was trained end to end in molt (vLLM rollout, weight refit,
+checkpointing) at the listed scale and parallelism, and the metrics matched upstream's run.
 
-| Family | Build | Parallelism | Tokens compared | max abs diff | Result |
-|---|---|---|---|---|---|
-| Qwen2.5 (R1-Distill-Qwen-1.5B) | real weights | FSDP2 ×8, THD | 924 | 0 | ✅ bit-exact |
-| Qwen3-MoE (Qwen3-30B-A3B) | real weights | EP8, THD | 924 | 0 | ✅ bit-exact |
-| Qwen3.6 (Qwen3.6-35B-A3B) | real weights | EP8, padded | 2 × 512 | 0 | ✅ bit-exact |
-| Qwen3.5 dense (27B config) | seeded, 4 layers | FSDP2 ×8, padded | 2 × 512 | 0 | ✅ bit-exact |
-| Qwen3.8 Flash Next | seeded, 6 layers | EP8, flex attention, THD | 924 | 0 | ✅ bit-exact |
-| DeepSeek V4.1 Flash | seeded, 2 layers | EP8, tilelang DSA, padded | 2 × 512 | 0 | ✅ bit-exact |
-| GLM 5.3 | seeded, 5 layers | EP8, tilelang DSA, THD | 924 | 0 | ✅ bit-exact |
-| GLM 5.3-Flash | seeded, 8 layers | EP8, THD | 924 | 0 | ✅ bit-exact |
-| Gemma 4 MoE (26B-A4B) | real weights | EP8, THD | 924 | 0 | ✅ bit-exact |
-| Nemotron 3 Nano (30B-A3B) | real weights | EP8, THD | 924 | 0 | ✅ bit-exact, see the note below |
-| Muse Glimmer (30B) | real weights | FSDP2 ×8, THD | 924 | 0 | ✅ bit-exact |
-| Inkling Small | seeded, 4 layers | EP8, THD | 924 | 0 | ✅ bit-exact |
+| Family | Build | Parallelism | Tokens compared | max abs diff | Logits | molt RL e2e |
+|---|---|---|---|---|---|---|
+| Qwen2.5 (R1-Distill-Qwen-1.5B) | real weights | FSDP2 ×8, THD | 924 | 0 | ✅ bit-exact | dense 1.5B |
+| Qwen3-MoE (Qwen3-30B-A3B) | real weights | EP8, THD | 924 | 0 | ✅ bit-exact | 30B-A3B, EP8 |
+| Qwen3.6 (Qwen3.6-35B-A3B) | real weights | EP8, padded | 2 × 512 | 0 | ✅ bit-exact | 35B-A3B, EP8 / CP8 |
+| Qwen3.5 dense (27B config) | seeded, 4 layers | FSDP2 ×8, padded | 2 × 512 | 0 | ✅ bit-exact | — |
+| Qwen3.8 Flash Next | seeded, 6 layers | EP8, flex attention, THD | 924 | 0 | ✅ bit-exact | — |
+| DeepSeek V4.1 Flash | seeded, 2 layers | EP8, tilelang DSA, padded | 2 × 512 | 0 | ✅ bit-exact | — |
+| GLM 5.3 | seeded, 5 layers | EP8, tilelang DSA, THD | 924 | 0 | ✅ bit-exact | GLM-5.2 753B, EP / CP16 |
+| GLM 5.3-Flash | seeded, 8 layers | EP8, THD | 924 | 0 | ✅ bit-exact | — |
+| Gemma 4 MoE (26B-A4B) | real weights | EP8, THD | 924 | 0 | ✅ bit-exact | 26B-A4B, EP8 |
+| Nemotron 3 Nano (30B-A3B) | real weights | EP8, THD | 924 | 0 | ✅ bit-exact, see the note below | Nano 30B-A3B, EP8 |
+| Muse Glimmer (30B) | real weights | FSDP2 ×8, THD | 924 | 0 | ✅ bit-exact | 30B, TP2 |
+| Inkling Small | seeded, 4 layers | EP8, THD | 924 | 0 | ✅ bit-exact | — |
 
 **Note on Nemotron 3.** On the THD path it is not run-to-run reproducible in upstream itself: seven upstream runs gave
 three distinct logit tensors (pairwise max diff 2.4 to 2.7, mean 0.06), and each of the three slim runs
