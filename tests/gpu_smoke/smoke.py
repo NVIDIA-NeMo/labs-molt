@@ -54,7 +54,9 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--arch", choices=ARCHS, required=True)
 ap.add_argument("--seqlen", type=int, default=256)
 ap.add_argument("--train", action="store_true")
+ap.add_argument("--summary", help="append a markdown row (family, export, parity, train, reload, seconds) to this file")
 args = ap.parse_args()
+summary = {}
 config_file, n_layers, n_experts, ep, padded, reference = ARCHS[args.arch]
 
 dist.init_process_group("nccl")
@@ -84,6 +86,7 @@ def compare(ours, ref, what, tol):
     agree = (ours.argmax(-1) == ref.argmax(-1))[mask.bool().cpu()].float().mean().item()
     log(f"{what}: rel_fro={fro:.2e} rel_max={mx:.2e} argmax_agree={agree:.3f} (tol {tol[0]:.0e} / {tol[1]:.0e})")
     assert fro <= tol[0] and mx <= tol[1], f"{what} disagrees beyond tolerance"
+    return f"{fro:.1e} / {mx:.1e} / {agree:.3f}"
 
 
 # --- config: real architecture, the last few layers (layer-type patterns end on a full-attention layer,
@@ -208,11 +211,12 @@ if rank == 0:
     issues = {k: v for k, v in info.items() if v}
     log(f"export loads into transformers {HF.__name__}: {issues or 'clean'}")
     assert not issues, "the consolidated HF export does not load cleanly into transformers"
+    summary["export"] = f"clean ({HF.__name__})"
     if reference == "hf":
         hf = hf.cuda().eval()
         with torch.no_grad():
             hf_logits = (hf(input_ids=seq, attention_mask=mask).logits.float() * mask.unsqueeze(-1)).cpu()
-        compare(logits, hf_logits, f"vs transformers {HF.__name__}", HF_TOL)
+        summary["parity"] = compare(logits, hf_logits, f"vs transformers {HF.__name__}", HF_TOL)
     del hf
 dist.barrier()
 
@@ -234,15 +238,20 @@ if args.train:
     assert all(torch.isfinite(torch.tensor(losses + norms))), f"non-finite loss / grad norm {losses} {norms}"
     log(f"train: loss {' -> '.join(f'{l:.4f}' for l in losses)}  grad_norm {' -> '.join(f'{n:.3f}' for n in norms)}")
     assert losses[-1] < losses[0], "loss did not decrease over the training steps"
+    summary["train"] = " → ".join(f"{l:.2f}" for l in losses)
     ckpt.load_model(model=model, model_path=os.path.join(out_dir, "model"))
     dist.barrier()
     reloaded = forward_logits()
     if torch.equal(reloaded, logits):
         log("checkpoint reload ok: forward bit-exact with the saved weights")
+        summary["reload"] = "bit-exact"
     else:
-        compare(reloaded, logits, "checkpoint reload vs saved forward", RELOAD_TOL)
+        summary["reload"] = compare(reloaded, logits, "checkpoint reload vs saved forward", RELOAD_TOL)
 if rank == 0:
     shutil.rmtree(out_dir, ignore_errors=True)
+    if args.summary:
+        with open(args.summary, "a") as f:
+            f.write(f"| {args.arch} | " + " | ".join(summary.get(k, "–") for k in ("export", "parity", "train", "reload")) + f" | {time.time() - t0:.0f} |\n")
 shutil.rmtree(cfg_dir, ignore_errors=True)
 dist.barrier()
 dist.destroy_process_group()

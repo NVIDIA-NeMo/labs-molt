@@ -139,14 +139,19 @@ jobs:
           ARCHS: qwen2_5 qwen3 qwen3_moe qwen3_6 inkling nemotron3
         run: |
           mkdir -p .kcache
+          printf '| family | export → transformers | logits vs transformers (rel_fro / rel_max / argmax agree) | train loss | reload | s |\n|---|---|---|---|---|---|\n' > smoke_summary.md
           docker run --rm --gpus all --shm-size=16g --workdir /src --volume "$GITHUB_WORKSPACE:/src" -e ARCHS "$IMAGE" \
             bash -lc 'cd /src && nvidia-smi -L && python -c "import torch, transformer_engine as te; print(torch.__version__, te.__version__, torch.cuda.get_device_capability())" && \
               export NVTE_FUSED_ATTN=1 NVTE_FLASH_ATTN=0 CUDNN_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/cudnn \
                      LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH:-} \
                      TRITON_CACHE_DIR=/src/.kcache/triton TORCHINDUCTOR_CACHE_DIR=/src/.kcache/inductor PYTHONPATH=/src && \
               for arch in $ARCHS; do echo "===== $arch"; EXTRA=""; [ "$arch" = qwen3_6 ] && EXTRA="--train"; \
-                timeout 12m torchrun --nproc_per_node=2 tests/gpu_smoke/smoke.py --arch $arch $EXTRA || exit 1; \
+                timeout 12m torchrun --nproc_per_node=2 tests/gpu_smoke/smoke.py --arch $arch $EXTRA --summary /src/smoke_summary.md || { echo "| $arch | **FAILED** | | | | |" >> /src/smoke_summary.md; exit 1; }; \
               done'
+      - name: Smoke summary
+        if: always()
+        run: |
+          { echo "### GPU smoke ($(nvidia-smi --query-gpu=name --format=csv,noheader | head -1))"; cat smoke_summary.md; } >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         if: always() && steps.kcache.outputs.cache-hit != 'true'
         with:
@@ -156,7 +161,9 @@ jobs:
         if: always()
         run: |
           rc=$(docker wait unit 2>/dev/null || echo 1)
-          docker logs unit 2>&1 | tail -200; docker rm -f unit >/dev/null 2>&1 || true
+          docker logs unit 2>&1 | tail -200
+          { echo "### Unit tests"; docker logs unit 2>&1 | grep -E "passed|failed|error" | tail -1; } >> "$GITHUB_STEP_SUMMARY"
+          docker rm -f unit >/dev/null 2>&1 || true
           [ "$rc" = 0 ]
       - name: Report a failed branch run to Slack
         if: failure() && github.event_name == 'push'

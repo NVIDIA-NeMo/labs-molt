@@ -129,8 +129,9 @@ CI Slack channel) and finishes in about ten minutes:
 | `test` · unit | molt image, CPU container alongside the smoke | the Qwen / MoE / distributed / checkpoint / loading unit tests |
 | `test` · smoke | molt image, 2 GPUs | `tests/gpu_smoke/smoke.py`: seeded few-layer Qwen2.5, Qwen3, Qwen3-MoE, Qwen3.6-MoE, Inkling and Nemotron 3 (MoE families on EP2), built the way molt builds its actor (FSDP2 + EP mesh, TE attention, THD packing or the padded forward molt uses for Qwen3.5-MoE). The consolidated HF export (the path molt's vLLM refit uses) must load into transformers with no missing or unexpected keys, and that transformers model, in bf16, must reproduce the forward logits within a relative tolerance sized to bf16 noise. Qwen3.6 and Inkling get the export check only: their tiny random builds disagree with transformers far beyond the other families (Qwen3.6's real-weight numerics are molt's e2e job; Inkling's disagreement is an open item). Qwen3.6 also runs three AdamW steps with molt's mesh-aware clip (the loss must fall) and reloads the DCP checkpoint saved beforehand, which must reproduce the original logits |
 
-There is no Dockerfile here: the image is molt's, and the checkout under test is mounted over the copy
-baked into it. JIT-compiled kernels (Triton for GDN, Inductor) persist between runs through
+Each run writes a per-family table (export, logits parity, train loss, reload, seconds) and the unit-test
+result to the job summary. There is no Dockerfile here: the image is molt's, and the checkout under test is
+mounted over the copy baked into it. JIT-compiled kernels (Triton for GDN, Inductor) persist between runs through
 `actions/cache`. Real-weight validation (bit-exact logits against the commit this branch was cut from,
 molt RL e2e) was done on a cluster and is recorded in the commit messages; add an `ARCHS` entry to the
 smoke when another family needs protecting, with a `configs/*.json`. Gemma 4 is not in the smoke yet: its
