@@ -239,6 +239,9 @@ that still drives fully-async agentic RL at frontier MoE scale on vLLM.
 stack that takes an NVIDIA AutoModel from SFT to frontier-scale agentic
 RL on vLLM. Read every line that touches your gradients, in plain PyTorch.
 
+<details>
+<summary>¹ How the RL-code line counts were measured</summary>
+
 > ¹ RL code = every Python file the framework's RL path uses — online
 > trainer, rollout, Ray orchestration, experience/advantage/reward/KL/loss,
 > actor/critic/RM inference, plus shared models, utils, parallelism, and
@@ -254,6 +257,8 @@ RL on vLLM. Read every line that touches your gradients, in plain PyTorch.
 > SFT/distillation. Molt measured 2026-07-20 on this repo; the others
 > measured 2026-06-16 at each repo's then-latest main HEAD
 > (verl `86e8123`, slime `243773c`, OpenRLHF `b3d2927`).
+
+</details>
 
 ## 🎯 Supported Scope
 ### ⚙️ Training & runtime
@@ -316,6 +321,9 @@ turns until `terminated` or `truncated`.
 
 ### 💬 2. `ChatAgent` — you own the loop via the OpenAI **or** Anthropic SDK
 
+<details>
+<summary>Full ChatAgent example</summary>
+
 ```python
 from openai import AsyncOpenAI
 from molt.agents import ChatAgent, ChatAgentRunner, ChatContext, Result
@@ -337,6 +345,8 @@ class AgentRunner(ChatAgentRunner):
     def __init__(self):
         super().__init__(MyAgent)
 ```
+
+</details>
 
 A multi-turn agent that stops on its own turn cap should return
 `Result(truncated=True)` (see `examples/python/agents/chat_geo3k.py`); the
@@ -514,33 +524,51 @@ actually deployed), point `--train.agent_path` at the task's real agent (e.g.
 built on the omni3 EP8 / CP8 / TE / DeepEP recipe.
 
 ## 🎛️ Scaling Knobs
-Molt targets AutoModel custom models with FSDP2:
-| | Mode | Flag |
+Molt targets AutoModel custom models with FSDP2.
+
+**Actor (FSDP2)**
+
+| Mode | Flag | Note |
 |---|---|---|
-| **Actor** | Tensor parallel | `--fsdp.tp_size 2` |
-| | Expert parallel | `--fsdp.ep_size 8` (e.g. `256` for DeepSeek-V3-class MoE) |
-| | Context parallel | `--fsdp.cp_size 8` (32K+ sequences), incl. VLMs and MoE routing replay |
-| | Optimizer CPU offload | `--fsdp.offload optimizer` (frees VRAM for the largest actors) |
-| **vLLM rollout** | Tensor parallel | `--vllm.tensor_parallel_size 2` |
-| | Expert parallel | `--vllm.enable_expert_parallel` (EP = TP × DP) |
-| | Data parallel | `--vllm.data_parallel_size 4` (single-node mp; raises EP past TP — DeepSeek-V3-style TP8+DP4 → EP32) |
-| | Scheduler token budget | `--vllm.max_num_batched_tokens 32768` |
-| | MTP spec-decode | `--vllm.mtp_num_speculative_tokens 1` |
-| **MoE stability** | Router replay (R3) | `--train.routing_replay` |
-| | Router freeze | `--actor.freeze_moe_router` |
-Context parallelism is delegated to AutoModel's `ContextParallelSharder`, so each
-model gets the sharding its attention backend needs — round-robin for hybrid
-SSM / linear-attention models (Nemotron-Omni, Qwen3.5-MoE), flat THD streams for
-sparse-attention models (GLM-5.2 DSA). VLM vision towers and routing replay shard
-with the sequence, so `--fsdp.cp_size` composes with `--data.image_key` and
-`--train.routing_replay`. Sample packing (`--fsdp.packing_samples`) is text-only
-and off by default; under CP it takes the THD path.
+| Tensor parallel | `--fsdp.tp_size 2` | |
+| Expert parallel | `--fsdp.ep_size 8` | `256` for DeepSeek-V3-class MoE |
+| Context parallel | `--fsdp.cp_size 8` | 32K+ sequences; VLMs and MoE routing replay shard with the sequence |
+| Optimizer CPU offload | `--fsdp.offload optimizer` | frees VRAM for the largest actors |
+
+**vLLM rollout**
+
+| Mode | Flag | Note |
+|---|---|---|
+| Tensor parallel | `--vllm.tensor_parallel_size 2` | |
+| Expert parallel | `--vllm.enable_expert_parallel` | EP = TP × DP |
+| Data parallel | `--vllm.data_parallel_size 4` | single-node mp; raises EP past TP (DeepSeek-V3-style TP8 + DP4 → EP32) |
+| Scheduler token budget | `--vllm.max_num_batched_tokens 32768` | |
+| MTP speculative decoding | `--vllm.mtp_num_speculative_tokens 1` | details in [Deep dives](#-deep-dives) |
+
+**MoE stability**
+
+| Mode | Flag | Note |
+|---|---|---|
+| Router replay (R3) | `--train.routing_replay` | details in [Deep dives](#-deep-dives) |
+| Router freeze | `--actor.freeze_moe_router` | |
+
+Context parallelism is delegated to AutoModel's `ContextParallelSharder`, so each model gets the sharding
+its attention backend needs:
+
+- round-robin for hybrid SSM / linear-attention models (Nemotron-Omni, Qwen3.5-MoE), flat THD streams for
+  sparse-attention models (GLM-5.2 DSA);
+- VLM vision towers and routing replay shard with the sequence, so `--fsdp.cp_size` composes with
+  `--data.image_key` and `--train.routing_replay`;
+- sample packing (`--fsdp.packing_samples`) is text-only and off by default; under CP it takes the THD path.
 
 ## 🔬 Deep dives
 
 The long-form notes behind the knobs above.
 
 ### ⚖️ IS correction — train/rollout logprob mismatch
+
+<details>
+<summary>The knobs, the named schemes and their prior art</summary>
 
 Async and partial rollout make the FSDP actor's recomputed `pi_train` diverge from
 vLLM's gen-time `pi_rollout` (different kernels, plus a mid-request weight swap the
@@ -572,7 +600,12 @@ References: **TIS** (truncated importance sampling of the train/infer ratio), **
 (token-level masking of out-of-band ratios), and **MIS** (masked importance sampling, Yingru Li —
 sequence-level masked IS, which motivates the `seq`/`geo` rejection filter).
 
+</details>
+
 ### ⚡ MTP rollout — speculative decoding
+
+<details>
+<summary>How the MTP draft is used, what it changes and which checkpoints support it</summary>
 
 Checkpoints that ship a multi-token-prediction (MTP) head — e.g. **Qwen3.6-MoE**
 (`mtp_num_hidden_layers: 1`) — can use it to **speed up generation** via vLLM
@@ -600,7 +633,12 @@ Notes:
   unavailable until upstream adds it; vLLM errors at engine init if enabled on an
   unsupported checkpoint.
 
+</details>
+
 ### 🎯 MoE routing stability — Router Replay (R3) and router freeze
+
+<details>
+<summary>Why MoE RL drifts, how R3 replays vLLM's routing, when to freeze the router</summary>
 
 MoE RL is unstable because the rollout (vLLM) and training (FSDP) routers pick
 experts **independently** — even at identical weights, numerical differences
@@ -643,7 +681,12 @@ fixed router is acceptable.
 --actor.freeze_moe_router   # off by default; redundant with R3
 ```
 
+</details>
+
 ### 🧩 LoRA fine-tuning
+
+<details>
+<summary>Flags, target matching, learning rates and the RL constraints</summary>
 
 Both paths take the same three flags (`--model.lora_*` for SFT, `--actor.lora_*` for RL);
 `--*.lora_dim 0` (the default) is plain full fine-tuning:
@@ -673,6 +716,8 @@ Constraints:
   (`adapter_model.safetensors` + `adapter_config.json`), not merged full weights; load it
   with `PeftModel.from_pretrained(base, adapter_dir)` or vLLM's `--enable-lora`. The DCP
   resume checkpoints stay full-weight, so resuming is unchanged.
+
+</details>
 
 ## ✅ Validation
 
