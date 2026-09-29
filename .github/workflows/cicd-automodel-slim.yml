@@ -132,10 +132,14 @@ jobs:
                 tests/unit_tests/models/qwen3_next tests/unit_tests/models/qwen3_5 tests/unit_tests/models/qwen3_5_moe \
                 tests/unit_tests/models/common tests/unit_tests/moe tests/unit_tests/distributed \
                 tests/unit_tests/checkpoint tests/unit_tests/_transformers'
+      # CUDNN_PATH / LD_LIBRARY_PATH pin TE to the bundled cuDNN, as molt's launch scripts do: the login shell
+      # can shadow the image's ENV with the apt cuDNN, which breaks the fused-attention kernel.
       - name: GPU smoke, Qwen dense / MoE / 3.6 (bit-exact vs base, train step, checkpoint round trip)
         run: |
           docker run --rm --gpus all --shm-size=16g --workdir /src --volume "$GITHUB_WORKSPACE:/src" "$IMAGE" \
-            bash -lc 'cd /src && export NVTE_FUSED_ATTN=1 NVTE_FLASH_ATTN=0 && mkdir -p /tmp/ref && \
+            bash -lc 'cd /src && nvidia-smi -L && python -c "import torch, transformer_engine as te; print(torch.__version__, getattr(te, \"__version__\", \"?\"), torch.cuda.get_device_capability())" && \
+              export NVTE_FUSED_ATTN=1 NVTE_FLASH_ATTN=0 CUDNN_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/cudnn \
+                     LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH:-} && mkdir -p /tmp/ref && \
               for arch in dense moe qwen3_6; do \
                 PYTHONPATH=/src/base timeout 10m torchrun --nproc_per_node=2 base/tests/gpu_smoke/qwen_smoke.py --arch $arch --out /tmp/ref/$arch.pt && \
                 PYTHONPATH=/src      timeout 10m torchrun --nproc_per_node=2 tests/gpu_smoke/qwen_smoke.py      --arch $arch --ref /tmp/ref/$arch.pt --train; \
