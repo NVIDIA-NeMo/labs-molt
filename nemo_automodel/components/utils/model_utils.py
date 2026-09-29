@@ -26,9 +26,7 @@ from nemo_automodel.shared.import_utils import safe_import
 from nemo_automodel.shared.parameter_names import canonical_parameter_fqn
 
 HAVE_TORCHAO, torch_ao = safe_import("torchao")
-HAVE_BNB, bnb = safe_import("bitsandbytes")
 
-import math
 
 import torch
 import torch.nn as nn
@@ -143,19 +141,6 @@ def filter_forward_kwargs(model: nn.Module, kwargs: dict) -> dict:
     return filtered
 
 
-def _get_logical_numel(param) -> int:
-    """Return the logical number of elements for a parameter,
-    accounting for quantized (packed) storage.
-
-    For bitsandbytes 4-bit params (Params4bit), the physical tensor
-    packs multiple values per byte. We recover the logical count from
-    the original shape stored in param.quant_state.
-    """
-    if HAVE_BNB and isinstance(param, bnb.nn.Params4bit) and getattr(param, "quant_state", None) is not None:
-        return math.prod(param.quant_state.shape)
-    return param.numel()
-
-
 @torch.no_grad()
 def _get_model_param_stats(model: nn.Module) -> tuple[int, int, float]:
     """
@@ -174,7 +159,7 @@ def _get_model_param_stats(model: nn.Module) -> tuple[int, int, float]:
     local_sq_norm = 0.0
 
     for p in model.parameters():
-        n = _get_logical_numel(p)
+        n = p.numel()
         total_params += n
         if p.requires_grad:
             trainable_params += n

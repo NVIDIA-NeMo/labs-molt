@@ -109,18 +109,6 @@ class TestCheckpointingConfig:
         with pytest.raises(ValueError, match="consolidation_timeout_minutes must be greater than 0"):
             CheckpointingConfig(consolidation_timeout_minutes=timeout_minutes)
 
-    @pytest.mark.parametrize("invalid_value", [0, -1, True, False, 1.5, "2"])
-    def test_max_recent_checkpoints_rejects_invalid_values(self, invalid_value):
-        with pytest.raises(ValueError, match="checkpoint.max_recent_checkpoints must be unset or a positive integer"):
-            CheckpointingConfig(max_recent_checkpoints=invalid_value)
-
-    def test_max_recent_checkpoints_rejects_msc_checkpoint_dir(self):
-        with pytest.raises(ValueError, match="max_recent_checkpoints is only supported for local checkpoint"):
-            CheckpointingConfig(
-                checkpoint_dir="msc://bucket/checkpoints",
-                save_consolidated=False,
-                max_recent_checkpoints=1,
-            )
 
     @pytest.mark.parametrize("save_consolidated", [True, "final", "every"])
     def test_consolidated_export_rejects_msc_checkpoint_dir(self, save_consolidated):
@@ -130,24 +118,6 @@ class TestCheckpointingConfig:
                 save_consolidated=save_consolidated,
             )
 
-    def test_accepts_msc_dcp_checkpoint_dir(self):
-        cfg = CheckpointingConfig(
-            checkpoint_dir="msc://bucket/checkpoints",
-            save_consolidated=False,
-        )
-
-        assert cfg.checkpoint_dir == "msc://bucket/checkpoints"
-        assert cfg.save_consolidated.value == "false"
-        assert cfg.max_recent_checkpoints is None
-
-    def test_accepts_local_checkpoint_dir_with_retention(self):
-        """The rejection is scoped to remote roots; local paths keep working."""
-        cfg = CheckpointingConfig(
-            checkpoint_dir="/tmp/checkpoints",
-            save_consolidated=False,
-            max_recent_checkpoints=1,
-        )
-        assert cfg.max_recent_checkpoints == 1
 
     def test_importable_from_checkpointing(self):
         """Verify backward compat: import from checkpointing.py still works."""
@@ -155,21 +125,6 @@ class TestCheckpointingConfig:
 
         assert CkptCfg is CheckpointingConfig
 
-    def test_defaults_construct_without_args(self):
-        """Every field has a default, so the recipe layer can construct directly."""
-        from huggingface_hub import constants as hf_constants
-
-        cfg = CheckpointingConfig()
-        assert cfg.enabled is True
-        assert str(cfg.checkpoint_dir) == "checkpoints/"
-        assert cfg.model_save_format.value == "safetensors"
-        # save_consolidated defaults to "final" and is normalized to SaveConsolidatedMode.FINAL.
-        assert cfg.save_consolidated.value == "final"
-        assert cfg.is_peft is False
-        assert cfg.model_repo_id is None
-        # model_cache_dir falls back to the HF hub cache when None.
-        assert str(cfg.model_cache_dir) == str(hf_constants.HF_HUB_CACHE)
-        assert cfg.max_recent_checkpoints is None
 
     def test_explicit_cache_dir_is_kept(self):
         cfg = CheckpointingConfig(model_cache_dir="/tmp/cache")

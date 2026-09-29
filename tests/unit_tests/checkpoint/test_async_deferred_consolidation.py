@@ -37,7 +37,6 @@ def _make_async_checkpointer(
     tmp_path,
     save_consolidated="every",
     single_rank_consolidation=False,
-    diffusers_compatible=False,
     future=None,
 ):
     """Build a real Checkpointer in async mode with mocked internals (no dist)."""
@@ -51,7 +50,6 @@ def _make_async_checkpointer(
         is_peft=False,
         is_async=True,
         single_rank_consolidation=single_rank_consolidation,
-        diffusers_compatible=diffusers_compatible,
     )
     # CheckpointingConfig.__post_init__ downgrades is_async on torch < 2.9; force it
     # back on so the test exercises the async path regardless of local torch.

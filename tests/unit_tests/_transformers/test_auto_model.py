@@ -1200,7 +1200,6 @@ class TestBuildModelRetryDepth:
             loss_fn=None,
             peft_config=None,
             fp8_config=None,
-            compile_config=None,
             load_base_model=True,
         ), mock_config
 

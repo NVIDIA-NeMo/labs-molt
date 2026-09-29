@@ -18,7 +18,6 @@ Functions for resolving which model class to use (custom vs HF), downloading
 weights, applying config overrides, and instantiating the model.
 """
 
-import gc
 import glob
 import inspect
 import json
@@ -470,22 +469,6 @@ def _prepopulate_remote_code_cache(hf_config, pretrained_model_name_or_path, kwa
                 pass
 
 
-def _setup_bnb_loading_kwargs(kwargs: dict) -> None:
-    """Configure kwargs for HF from_pretrained to work with BitsAndBytes quantization.
-
-    Sets ``device_map`` so HF loads+quantizes per-shard on the current GPU, and
-    disables the async weight loader introduced in transformers v5 which can
-    materialize many full-precision tensors concurrently before the quantizer
-    runs, causing OOM on memory-constrained systems.
-    """
-    kwargs.setdefault("device_map", {"": torch.cuda.current_device()})
-    prev = os.environ.get("HF_DEACTIVATE_ASYNC_LOAD")
-    if prev is None:
-        os.environ["HF_DEACTIVATE_ASYNC_LOAD"] = "1"
-        logger.info("Set HF_DEACTIVATE_ASYNC_LOAD=1 for BnB-compatible synchronous weight loading.")
-    logger.info("BnB loading: device_map=%s", kwargs["device_map"])
-
-
 # Fraction of TOTAL CUDA memory that the estimated BF16 footprint may occupy
 # before we refuse the load and point the user at the streaming workaround.
 # We budget against total (not free) memory so the verdict is deterministic
@@ -793,267 +776,6 @@ def _has_safetensors(model_dir: str) -> bool:
     return False
 
 
-def _stream_load_bnb_weights(model, model_dir, device, torch_dtype, *, disable_mmap: bool = False):
-    """Load safetensor shards one-at-a-time, quantizing BnB Params4bit on the fly.
-
-    Peak memory ≈ (accumulated quantized weights) + (one bf16 weight tensor)
-    instead of (full bf16 model) with standard HF loading.
-    When disable_mmap=True, one tensor at a time is cloned to anonymous CPU
-    memory before CUDA transfer to avoid UMA page-migration stalls.
-    """
-    import bitsandbytes as bnb
-
-    index_path = os.path.join(model_dir, "model.safetensors.index.json")
-    if os.path.exists(index_path):
-        with open(index_path) as f:
-            index = json.load(f)
-        shard_files = list(dict.fromkeys(index["weight_map"].values()))
-    else:
-        shard_files = ["model.safetensors"]
-
-    # Build name → (module, attr_name, param_or_buffer) index
-    param_map: dict[str, tuple] = {}
-    for name, param in model.named_parameters():
-        parts = name.rsplit(".", 1)
-        mod = model.get_submodule(parts[0]) if len(parts) == 2 else model
-        param_map[name] = (mod, parts[-1], param)
-    for name, buf in model.named_buffers():
-        if name not in param_map:
-            parts = name.rsplit(".", 1)
-            mod = model.get_submodule(parts[0]) if len(parts) == 2 else model
-            param_map[name] = (mod, parts[-1], buf)
-
-    loaded_keys: set[str] = set()
-    device = torch.device(device) if not isinstance(device, torch.device) else device
-
-    def consume_tensor(key: str, tensor: torch.Tensor) -> None:
-        """Install one checkpoint tensor into the target model.
-
-        Args:
-            key: Fully-qualified state-dict key. The key determines the tensor's rank and axis semantics.
-            tensor: Tensor from the active safetensors shard. This function takes ownership and may cast,
-                quantize, move, or install it as a parameter/buffer.
-
-        Returns:
-            None.
-        """
-        if key not in param_map:
-            logger.debug("Skipping key not in model: %s", key)
-            del tensor
-            return
-
-        mod, attr, old_param = param_map[key]
-
-        if isinstance(old_param, bnb.nn.Params4bit):
-            if torch_dtype is not None:
-                tensor = tensor.to(dtype=torch_dtype)
-            new_param = bnb.nn.Params4bit(
-                data=tensor,
-                requires_grad=False,
-                compress_statistics=old_param.compress_statistics,
-                quant_type=old_param.quant_type,
-                quant_storage=old_param.quant_storage,
-                module=mod if isinstance(mod, bnb.nn.Linear4bit) else None,
-                bnb_quantized=False,
-            )
-            del tensor
-            new_param._quantize(device)
-            mod._parameters[attr] = new_param
-        else:
-            target_dtype = torch_dtype if torch_dtype is not None else tensor.dtype
-            materialized = tensor.to(device=device, dtype=target_dtype)
-            del tensor
-            if isinstance(old_param, torch.nn.Parameter):
-                mod._parameters[attr] = torch.nn.Parameter(materialized, requires_grad=old_param.requires_grad)
-            else:
-                mod._buffers[attr] = materialized
-
-        loaded_keys.add(key)
-
-    for shard_idx, shard_file in enumerate(shard_files):
-        shard_path = os.path.join(model_dir, shard_file)
-        logger.info(
-            "Streaming BnB shard %d/%d: %s",
-            shard_idx + 1,
-            len(shard_files),
-            shard_file,
-        )
-
-        from safetensors import safe_open
-
-        with safe_open(shard_path, framework="pt") as f:
-            for key in f.keys():
-                tensor = f.get_tensor(key)
-                if disable_mmap and key in param_map:
-                    # Avoid full-shard materialization while detaching the next
-                    # CUDA/quantization copy from mmap-backed checkpoint pages.
-                    tensor = tensor.clone()
-                try:
-                    consume_tensor(key, tensor)
-                finally:
-                    del tensor
-
-        gc.collect()
-        torch.cuda.empty_cache()
-
-    # Tie weights before validating: safetensors typically stores only one copy
-    # of a tied pair (e.g. Llama's lm_head.weight tied to embed_tokens.weight),
-    # so the untied sibling is still on meta at this point. tie_weights()
-    # re-establishes the Python-level alias so both sides point at the loaded
-    # tensor.
-    if hasattr(model, "tie_weights"):
-        model.tie_weights()
-
-    # Any param/buffer still on meta after load+tie is a real missing key —
-    # forward pass would silently produce NaN.  Fail loudly instead.
-    missing: list[str] = []
-    for name, (_, _, _) in param_map.items():
-        if name in loaded_keys:
-            continue
-        current = _get_model_tensor(model, name)
-        if current is None or (hasattr(current, "device") and current.device.type == "meta"):
-            missing.append(name)
-
-    if missing:
-        preview = ", ".join(missing[:10])
-        more = f" (+{len(missing) - 10} more)" if len(missing) > 10 else ""
-        raise RuntimeError(
-            f"Streaming BnB load left {len(missing)} tensor(s) unmaterialized after tie_weights: {preview}{more}"
-        )
-
-    logger.info(
-        "Streaming BnB load complete: %d tensors loaded (%d additional tied after load)",
-        len(loaded_keys),
-        len(param_map) - len(loaded_keys),
-    )
-
-
-def _get_bnb_modules_to_not_convert(model, quantization_config):
-    """Mirror HF BnB's default skip-list semantics before streaming replacement."""
-    from transformers.quantizers.base import get_keys_to_not_convert
-
-    skip_modules = getattr(quantization_config, "llm_int8_skip_modules", None)
-    keep_in_fp32_modules = getattr(model, "_keep_in_fp32_modules", None)
-
-    modules_to_not_convert = get_keys_to_not_convert(model) if skip_modules is None else []
-    if skip_modules is not None:
-        modules_to_not_convert.extend(skip_modules)
-    if keep_in_fp32_modules is not None:
-        modules_to_not_convert.extend(keep_in_fp32_modules)
-
-    return list(set(modules_to_not_convert))
-
-
-def _streaming_bnb_supported(cls, hf_config) -> bool:
-    """Whether streaming BnB can safely load HF safetensors directly into the target class.
-
-    The streaming loader maps safetensors keys 1:1 onto ``model.named_parameters()``.
-    Two cases break that 1:1 assumption and must fall back to the standard HF loader:
-
-    1. Automodel's custom implementations fuse projections (e.g. MoE
-       ``mlp.experts.gate_up_proj``) and rely on a ``state_dict_adapter`` to translate
-       HF-style keys on load. Detected via the ``HFCheckpointingMixin`` marker.
-    2. Vanilla HF classes whose safetensors use a legacy layout that HF's loader
-       reshapes/renames at load time (e.g. Mixtral ``block_sparse_moe.experts.*.w1`` →
-       fused ``mlp.experts.gate_up_proj``). Detected via HF's per-model-type
-       ``get_checkpoint_conversion_mapping`` — any non-empty mapping means the streaming
-       path would leave fused tensors on meta device.
-    """
-    try:
-        model_cls = cls._model_mapping[type(hf_config)]
-    except (KeyError, TypeError):
-        return False
-    try:
-        from nemo_automodel.components.models.common.hf_checkpointing_mixin import HFCheckpointingMixin
-
-        if issubclass(model_cls, HFCheckpointingMixin):
-            return False
-    except ImportError:
-        pass
-    try:
-        from transformers.conversion_mapping import get_checkpoint_conversion_mapping
-    except ImportError:
-        return True
-    model_type = getattr(hf_config, "model_type", None)
-    if model_type and get_checkpoint_conversion_mapping(model_type):
-        return False
-    return True
-
-
-def _init_model_bnb_streaming(
-    cls, pretrained_model_name_or_path, hf_config, attn_implementation, torch_dtype, quantization_config, **kwargs
-):
-    """Create model on meta device, replace Linear→Linear4bit, stream-load+quantize.
-
-    This avoids materializing the full bf16 model in memory, which is critical
-    for unified-memory systems (e.g. DGX Spark) where CPU and GPU share the
-    same physical memory pool.
-
-    Returns ``(is_custom_model=False, model)`` so the caller treats it like an
-    HF-loaded model with weights already present.
-    """
-    from transformers.initialization import no_init_weights
-    from transformers.integrations.bitsandbytes import replace_with_bnb_linear
-
-    from nemo_automodel.components.utils.model_utils import init_empty_weights
-
-    if isinstance(torch_dtype, str) and torch_dtype != "auto":
-        torch_dtype = dtype_from_str(torch_dtype)
-    if torch_dtype == "auto":
-        torch_dtype = getattr(hf_config, "torch_dtype", torch.bfloat16)
-        if isinstance(torch_dtype, str):
-            torch_dtype = dtype_from_str(torch_dtype)
-
-    device = torch.cuda.current_device()
-
-    # 1. Download weights if needed
-    disable_mmap = bool(kwargs.pop("disable_mmap", False))
-    _download_model_weights(hf_config, pretrained_model_name_or_path, **kwargs)
-
-    # 2. Resolve to local directory & verify safetensors
-    model_dir = _resolve_model_dir(
-        pretrained_model_name_or_path,
-        revision=hf_config._commit_hash,
-        cache_dir=kwargs.get("cache_dir"),
-        subfolder=kwargs.get("subfolder", ""),
-    )
-    if not _has_safetensors(model_dir):
-        raise FileNotFoundError(f"Streaming BnB loading requires safetensors checkpoint, but none found in {model_dir}")
-
-    # 3. Create model skeleton on meta device (zero memory)
-    logger.info("Creating model skeleton on meta device for streaming BnB quantization")
-    with no_init_weights(), init_empty_weights():
-        model = cls._from_config_parent_class(
-            hf_config,
-            dtype=torch_dtype,
-            attn_implementation=attn_implementation,
-        )
-
-    # 4. Replace nn.Linear → bnb.nn.Linear4bit (still on meta, no memory)
-    modules_to_not_convert = _get_bnb_modules_to_not_convert(model, quantization_config)
-    model = replace_with_bnb_linear(
-        model,
-        modules_to_not_convert=modules_to_not_convert,
-        quantization_config=quantization_config,
-    )
-
-    # 5. Stream-load weights, quantizing each tensor on the fly
-    _stream_load_bnb_weights(model, model_dir, device, torch_dtype, disable_mmap=disable_mmap)
-
-    # 6. Store quantization_config on the model (HF convention)
-    model.config.quantization_config = quantization_config
-    model.is_quantized = True
-
-    # 7. Wrap with HFCheckpointingMixin
-    try:
-        hf_model_cls = cls._model_mapping[type(hf_config)]
-    except KeyError:
-        hf_model_cls = type(model)
-    model.__class__ = _get_mixin_wrapped_class(hf_model_cls)
-
-    return False, model
-
-
 def _get_model_tensor(model, name: str):
     """Return a parameter or buffer by its fully-qualified state-dict key."""
     try:
@@ -1223,34 +945,6 @@ def __init_model(
     if torch_dtype != "auto":
         _propagate_torch_dtype_to_subconfigs(hf_config, torch_dtype)
 
-    # Streaming BnB loading: when quantization is requested and we're loading from a
-    # pretrained checkpoint, use streaming quantization to avoid materializing the full
-    # bf16 model in memory. This is critical for unified-memory systems (DGX Spark)
-    # and large models (70B+). Can be disabled with AUTOMODEL_BNB_STREAMING=0.
-    _bnb_streaming = os.environ.get("AUTOMODEL_BNB_STREAMING", "1") != "0"
-    if (
-        quantization_config is not None
-        and is_pretrained_init
-        and not force_hf
-        and _bnb_streaming
-        and _streaming_bnb_supported(cls, hf_config)
-    ):
-        try:
-            logger.info("Using streaming BnB quantization for memory-efficient loading")
-            return _init_model_bnb_streaming(
-                cls,
-                pretrained_model_name_or_path,
-                hf_config,
-                attn_implementation,
-                torch_dtype,
-                quantization_config,
-                **kwargs,
-            )
-        except FileNotFoundError:
-            logger.warning(
-                "Streaming BnB loading unavailable (no safetensors checkpoint); falling back to standard HF loading."
-            )
-
     # 1. if force_hf is True, use HF model class wrapped with mixin
     if force_hf:
         # Refuse early if HF's loader would dequantize an FP8 checkpoint to a
@@ -1269,7 +963,6 @@ def __init_model(
             )
         if quantization_config is not None:
             kwargs["quantization_config"] = quantization_config
-            _setup_bnb_loading_kwargs(kwargs)
         if is_pretrained_init:
             with skip_random_init():
                 model = cls._from_pretrained_parent_class(
@@ -1379,7 +1072,6 @@ def __init_model(
     _prepopulate_remote_code_cache(hf_config, pretrained_model_name_or_path, kwargs, process_group=process_group)
     if quantization_config is not None:
         kwargs["quantization_config"] = quantization_config
-        _setup_bnb_loading_kwargs(kwargs)
     # For trust_remote_code custom configs, pre-resolve the model class so we
     # can strip yaml-level config-attr kwargs (e.g. ``dlm_paradigm``) that the
     # custom ``__init__`` may not accept. Without this, HF forwards them as

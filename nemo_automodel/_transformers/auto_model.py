@@ -60,7 +60,6 @@ if TYPE_CHECKING:
     from torch.distributed.device_mesh import DeviceMesh
 
     from nemo_automodel.components.quantization.fp8 import FP8Config
-    from nemo_automodel.components.utils.compile_utils import CompileConfig
 
 #  Re-exports from sibling modules (backward compatibility)
 # Backward-compat shim for trust_remote_code models (e.g. DeciLM)
@@ -388,7 +387,6 @@ class _BaseNeMoAutoModelClass(_BaseAutoModelClass):
         mesh,
         peft_config,
         fp8_config,
-        compile_config,
         load_base_model,
         _retry_depth=0,
         **kwargs,
@@ -438,7 +436,6 @@ class _BaseNeMoAutoModelClass(_BaseAutoModelClass):
                 mesh=mesh,
                 peft_config=peft_config,
                 fp8_config=fp8_config,
-                compile_config=compile_config,
                 load_base_model=load_base_model,
                 _retry_depth=_retry_depth + 1,
                 **retry_kwargs,
@@ -626,7 +623,6 @@ class _BaseNeMoAutoModelClass(_BaseAutoModelClass):
             model_wrapper=model_wrapper,
             is_meta_device=is_meta_device,
             device=device,
-            compile_config=compile_config,
             load_base_model=load_base_model,
             cache_dir=cache_dir,
             freeze_config=freeze_config,
@@ -652,7 +648,6 @@ class _BaseNeMoAutoModelClass(_BaseAutoModelClass):
         device_mesh: Optional["DeviceMesh"] = None,
         peft_config: dict | None = None,
         fp8_config: Optional["FP8Config"] = None,
-        compile_config: Optional["CompileConfig"] = None,
         **kwargs,
     ) -> PreTrainedModel:
         """
@@ -702,8 +697,6 @@ class _BaseNeMoAutoModelClass(_BaseAutoModelClass):
                 If provided, LoRA adapters will be applied to the model. Default: None.
             fp8_config (FP8Config | None, optional): FP8 quantization configuration.
                 If provided, FP8 quantization will be applied. Default: None.
-            compile_config (CompileConfig | None, optional): Configuration for torch.compile.
-                If provided, the model will be compiled. Default: None.
             **kwargs: Additional keyword arguments. Notable ones include:
                 - dtype (str | torch.dtype): Model storage dtype. Takes precedence
                   over ``torch_dtype`` when not ``None``; accepts ``auto``.
@@ -772,7 +765,6 @@ class _BaseNeMoAutoModelClass(_BaseAutoModelClass):
             mesh=mesh,
             peft_config=peft_config,
             fp8_config=fp8_config,
-            compile_config=compile_config,
             load_base_model=True,
             **kwargs,
         )
@@ -793,7 +785,6 @@ class _BaseNeMoAutoModelClass(_BaseAutoModelClass):
         device_mesh: Optional["DeviceMesh"] = None,
         peft_config: dict | None = None,
         fp8_config: Optional["FP8Config"] = None,
-        compile_config: Optional["CompileConfig"] = None,
         **kwargs,
     ) -> PreTrainedModel:
         """
@@ -870,7 +861,6 @@ class _BaseNeMoAutoModelClass(_BaseAutoModelClass):
             mesh=mesh,
             peft_config=peft_config,
             fp8_config=fp8_config,
-            compile_config=compile_config,
             load_base_model=kwargs.pop("load_base_model", False),
             **kwargs,
         )

@@ -130,7 +130,6 @@ class CheckpointingConfig:
     consolidation_timeout_minutes: int = 30  # Timeout for inline consolidated-export synchronization.
     # Retain this many recent checkpoint directories. Preserve checkpoints targeted by checkpoint-root pointers,
     # such as `LATEST` and `LOWEST_VAL`, in addition to the recent window. `None` keeps all checkpoints.
-    max_recent_checkpoints: int | None = None
 
     def __post_init__(self):
         """Resolve the cache dir, enforce PEFT constraints, and coerce the save format/mode."""
@@ -153,19 +152,6 @@ class CheckpointingConfig:
             )
             self.model_save_format = "safetensors"
             self.save_consolidated = SaveConsolidatedMode.FINAL
-
-        if self.max_recent_checkpoints is not None:
-            if (
-                isinstance(self.max_recent_checkpoints, bool)
-                or not isinstance(self.max_recent_checkpoints, int)
-                or self.max_recent_checkpoints < 1
-            ):
-                raise ValueError("checkpoint.max_recent_checkpoints must be unset or a positive integer")
-            if is_cloud_path(self.checkpoint_dir):
-                raise ValueError(
-                    "checkpoint.max_recent_checkpoints is only supported for local checkpoint directories; "
-                    "unset it when checkpoint.checkpoint_dir uses msc:// storage"
-                )
 
         # Convert a raw string such as "safetensors" into the right Enum.
         formats = [v.value for v in SerializationFormat]

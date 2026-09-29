@@ -48,7 +48,6 @@ from nemo_automodel.components.distributed.mesh import MeshContext
 from nemo_automodel.components.distributed.tp_replicas import broadcast_tp_replicas
 from nemo_automodel.components.models.common.utils import cast_frozen_modules_to_compute_dtype
 from nemo_automodel.components.quantization.fp8 import apply_fp8_to_model
-from nemo_automodel.components.utils.compile_utils import compile_model
 from nemo_automodel.components.utils.model_utils import (
     FreezeConfig,
     apply_parameter_freezing,
@@ -339,7 +338,6 @@ def apply_model_infrastructure(
     quantization_config=None,
     fp8_config=None,
     parallelize_fn=None,
-    compile_config=None,
     load_base_model=False,
     cache_dir=None,
     pretrained_model_name_or_path="",
@@ -368,7 +366,6 @@ def apply_model_infrastructure(
         quantization_config: Quantization configuration. Default: None
         fp8_config: FP8 configuration. Default: None
         parallelize_fn: Function to apply parallelization (EP + FSDP2). Default: None
-        compile_config: Compilation configuration. Default: None
         pretrained_model_name_or_path: Model name or path for checkpoint loading. Default: ""
         load_base_model: Whether to load base model weights (True for from_pretrained). Default: False
         cache_dir: Cache directory for model weights. Default: None
@@ -493,8 +490,6 @@ def apply_model_infrastructure(
 
     model = _shard_ep_fsdp(model, model_wrapper, parallelize_fn, mesh, reapply_trainability)
     _ensure_tied_lm_heads(model)
-    if compile_config is not None and not isinstance(model_wrapper, FSDP2Manager):
-        model = compile_model(model, compile_config)
     if isinstance(model_wrapper, FSDP2Manager):
         model_parts = model.parts if hasattr(model, "parts") else [model]
         for mp in model_parts:
@@ -587,9 +582,7 @@ def apply_model_infrastructure(
             model.to(device, non_blocking=True)
         except NotImplementedError as e:
             if "Cannot copy out of meta tensor" in str(e):
-                logger.warning(
-                    "model.to(device) failed (meta tensors); using model.to_empty(device=device) instead."
-                )
+                logger.warning("model.to(device) failed (meta tensors); using model.to_empty(device=device) instead.")
                 model.to_empty(device=device)
             else:
                 raise

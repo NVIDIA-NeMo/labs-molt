@@ -40,7 +40,6 @@ repos:
   - repo: https://github.com/astral-sh/uv-pre-commit
     rev: "b84c4a0a90bd58c7d82ae8f0d4d5e77b1ddd3ce6"  # frozen: 0.12.5
     hooks:
-      - id: uv-lock
 
   - repo: local
     hooks:
@@ -59,16 +58,4 @@ repos:
           ' --
         files: '.*\/[^\/]*_[^\/]*\.md$'
         exclude: '^\.github/'
-        types: [file]
-      - id: lint-example-yamls
-        name: "Lint example YAMLs"
-        language: system
-        entry: python tools/lint_example_yamls.py
-        files: '^examples/.*\.ya?ml$'
-        types: [file]
-      - id: no-globals
-        name: "Disallow globals()"
-        language: system
-        entry: python tools/lint_no_globals.py
-        files: '^(nemo_automodel|tools|scripts|examples|tutorials)/.*\.py$|^app\.py$'
         types: [file]

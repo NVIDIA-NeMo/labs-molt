@@ -13,7 +13,7 @@ everything molt does not use removed, the same package name, import path and API
 
 | | upstream `8f73178c` | AutoModel-Slim |
 |---|---|---|
-| Python files / lines | 758 / 282k | 249 / ~99k |
+| Python files / lines | 758 / 282k | 252 / ~97k |
 | model families | 58 | 10 (below) + shared utilities |
 | tests | 1,005 files | 194 files (kept areas only) |
 | forward logits vs upstream | | bit-exact on every kept family |
@@ -68,7 +68,9 @@ sequence / token-classification heads, tokenizer wrappers, pipeline parallelism,
 Megatron-FSDP strategies, QAT and QLoRA, UCCL-EP and Mixture-of-Kittens dispatchers,
 MagiAttention, Triton LoRA kernels and the fused LoRA MLP, transformers-v4 compatibility patches, the
 capability-based model docs, the full-state-dict and `.bin` checkpoint load paths (every model,
-including single-GPU custom models, loads through DCP), the diffusers-compatible export flag,
+including single-GPU custom models, loads through DCP), the diffusers-compatible export flag, the
+torch.compile wrapper, the checkpoint retention lifecycle, the bitsandbytes 4-bit loading path, the MFU
+formulas and parallel strategies of removed families,
 unreferenced training-stack helpers, and 48 model families. Tests bound to removed code were dropped.
 
 Kept files were not refactored. Where a kept file imported a removed module, the import and the branch
@@ -141,17 +143,16 @@ needs protecting (GLM-5.3 and DeepSeek V4.1 run as seeded 2–5 layer builds in 
   every `nemo_automodel.*` string names a kept module). A GPU change must keep forward logits
   bit-exact against the previous commit for the affected families (same checkpoint, same input), and
   a change to loading, EP or CP must run one molt RL e2e (dense Qwen2 and Qwen3.6-35B EP8 / CP8).
-- **Bumping molt.** Update the pin in molt's `requirements.txt` through a molt PR; molt's own e2e CI
-  is the acceptance test. Tag this branch at each molt release.
+- **Picking changes up in molt.** molt's `setup.py` pins this branch by name (`AUTOMODEL["slim"]`), so a
+  merge here is live on the next molt image build or reinstall; molt's own e2e CI is the acceptance test.
 - **Adding a family.** Copy `components/models/<family>/` from upstream (or the mirror), restore its
   `_transformers/registry.py` entries, run the closure checks to see which removed helpers it needs,
   and compare logits against upstream with real weights or a seeded few-layer build.
 - **Known load-bearing pieces that look removable but are not:** `_transformers/capabilities.py`
   (`model.supports` is read by the EP / CP parallelizers), `components/models/deepseek_v4/kernels/`
   (loaded by name through `safe_import_from`), `components/distributed/blockdiag_cp/` (imported by
-  the Qwen3.5 / 3.8 model code), the `Union` form of `DistributedStrategyConfig` (importers write
-  `... | None`), and the `Mistral3ForConditionalGeneration` identifier must stay out of the tree
-  because GitHub's push protection reads it as a Mistral API key.
+  the Qwen3.5 / 3.8 model code), and the `Union` form of `DistributedStrategyConfig` (importers write
+  `... | None`).
 
 ## Provenance and license
 

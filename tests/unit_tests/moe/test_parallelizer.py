@@ -25,6 +25,17 @@ import pytest
 SELECTIVE_CTX = ("CTX_FORWARD", "CTX_RECOMPUTE")
 
 
+@pytest.fixture(autouse=True)
+def _restore_real_nemo_modules():
+    """_import_parallelizer_with_stubs re-imports nemo_automodel modules against stub torch modules;
+    put the real ones back so test files collected after this one do not inherit the stubs."""
+    before = {k: v for k, v in sys.modules.items() if k.startswith("nemo_automodel")}
+    yield
+    for k in [k for k in sys.modules if k.startswith("nemo_automodel") and k not in before]:
+        del sys.modules[k]
+    sys.modules.update(before)
+
+
 class DummyParam:
     """Mock parameter with requires_grad attribute."""
 

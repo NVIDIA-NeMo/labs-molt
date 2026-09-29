@@ -36,30 +36,6 @@ from nemo_automodel.components.utils import flops_utils
 # ---------------------------------------------------------------------------
 
 
-def _minimax_m2_cfg() -> SimpleNamespace:
-    """MiniMax-M2.5-like config (simplified for testing)."""
-    return SimpleNamespace(
-        hidden_size=3072,
-        num_hidden_layers=24,
-        num_attention_heads=24,
-        num_key_value_heads=8,
-        vocab_size=131072,
-        intermediate_size=1280,
-        num_experts_per_tok=8,
-        max_position_embeddings=4096,
-        head_dim=128,
-    )
-
-
-def _minimax_m2_with_mtp_cfg() -> SimpleNamespace:
-    """MiniMax-M2 config with MTP modules enabled."""
-    cfg = _minimax_m2_cfg()
-    cfg.use_mtp = True
-    cfg.num_mtp_modules = 2
-    cfg.mtp_transformer_layers = 1
-    return cfg
-
-
 def _qwen3_5_moe_cfg() -> SimpleNamespace:
     """Qwen3.5-35B-A3B MoE config (simplified)."""
     return SimpleNamespace(
@@ -126,90 +102,9 @@ def _mla_moe_cfg() -> SimpleNamespace:
     )
 
 
-def _step3_5_flash_cfg() -> SimpleNamespace:
-    """Step-3.5-Flash config (simplified)."""
-    return SimpleNamespace(
-        hidden_size=2048,
-        num_hidden_layers=8,
-        num_attention_heads=16,
-        num_attention_groups=4,
-        head_dim=128,
-        vocab_size=65536,
-        intermediate_size=5632,
-        moe_intermediate_size=1280,
-        moe_top_k=8,
-        share_expert_dim=1280,
-        sliding_window=512,
-        max_position_embeddings=4096,
-        # first 3 dense, rest MoE
-        moe_layers_enum="3,4,5,6,7",
-    )
-
-
-def _deepseek_v3_dsa_cfg() -> SimpleNamespace:
-    """DeepSeek V3.2 config with DSA (sparse attention)."""
-    return SimpleNamespace(
-        hidden_size=7168,
-        num_hidden_layers=8,
-        num_attention_heads=128,
-        intermediate_size=18432,
-        vocab_size=151936,
-        q_lora_rank=1536,
-        kv_lora_rank=512,
-        qk_nope_head_dim=128,
-        qk_rope_head_dim=64,
-        v_head_dim=128,
-        moe_intermediate_size=2048,
-        num_experts_per_tok=8,
-        moe_layer_freq=[0] * 2 + [1] * 6,
-        mtp_num_layers=None,
-        index_topk=256,
-        index_n_heads=4,
-        index_head_dim=64,
-    )
-
-
 # ---------------------------------------------------------------------------
 # Tests: minimax_m2_flops
 # ---------------------------------------------------------------------------
-
-
-class TestMinimaxM2Flops:
-    def test_basic_computation(self):
-        cfg = _minimax_m2_cfg()
-        result = flops_utils.minimax_m2_flops(cfg, gbs=1, seq_len=1024)
-        assert isinstance(result, (int, float))
-        assert result > 0
-
-    def test_positive_and_deterministic(self):
-        cfg = _minimax_m2_cfg()
-        r1 = flops_utils.minimax_m2_flops(cfg, gbs=1, seq_len=1024)
-        r2 = flops_utils.minimax_m2_flops(cfg, gbs=1, seq_len=1024)
-        assert r1 == r2
-
-    def test_gbs_scaling(self):
-        cfg = _minimax_m2_cfg()
-        r1 = flops_utils.minimax_m2_flops(cfg, gbs=1, seq_len=1024)
-        r2 = flops_utils.minimax_m2_flops(cfg, gbs=2, seq_len=1024)
-        assert r2 == pytest.approx(2 * r1, rel=1e-6)
-
-    def test_mtp_increases_flops(self):
-        cfg_no_mtp = _minimax_m2_cfg()
-        cfg_mtp = _minimax_m2_with_mtp_cfg()
-        no_mtp = flops_utils.minimax_m2_flops(cfg_no_mtp, gbs=1, seq_len=1024)
-        with_mtp = flops_utils.minimax_m2_flops(cfg_mtp, gbs=1, seq_len=1024)
-        assert with_mtp > no_mtp
-
-    def test_default_seq_len(self):
-        cfg = _minimax_m2_cfg()
-        result = flops_utils.minimax_m2_flops(cfg, gbs=1)
-        expected = flops_utils.minimax_m2_flops(cfg, gbs=1, seq_len=4096)
-        assert result == expected
-
-    def test_precomputed_value(self):
-        cfg = _minimax_m2_cfg()
-        actual = int(flops_utils.minimax_m2_flops(cfg, gbs=1, seq_len=1024))
-        assert actual == 20564303413248
 
 
 # ---------------------------------------------------------------------------
@@ -356,56 +251,9 @@ class TestMlaMoeFlops:
 # ---------------------------------------------------------------------------
 
 
-class TestStep35FlashFlops:
-    def test_basic(self):
-        cfg = _step3_5_flash_cfg()
-        result = flops_utils.step3_5_flash_flops(cfg, gbs=1, seq_len=1024)
-        assert result > 0
-
-    def test_gbs_scaling(self):
-        cfg = _step3_5_flash_cfg()
-        r1 = flops_utils.step3_5_flash_flops(cfg, gbs=1, seq_len=1024)
-        r2 = flops_utils.step3_5_flash_flops(cfg, gbs=2, seq_len=1024)
-        assert r2 == pytest.approx(2 * r1, rel=1e-6)
-
-    def test_mtp_increases_flops(self):
-        cfg = _step3_5_flash_cfg()
-        base = flops_utils.step3_5_flash_flops(cfg, gbs=1, seq_len=1024)
-        cfg.num_nextn_predict_layers = 2
-        with_mtp = flops_utils.step3_5_flash_flops(cfg, gbs=1, seq_len=1024)
-        assert with_mtp > base
-
-    def test_precomputed_value(self):
-        cfg = _step3_5_flash_cfg()
-        actual = int(flops_utils.step3_5_flash_flops(cfg, gbs=1, seq_len=1024))
-        assert actual == 4235974410240
-
-
 # ---------------------------------------------------------------------------
 # Tests: deepseekv3_flops with DSA (sparse attention)
 # ---------------------------------------------------------------------------
-
-
-class TestDeepseekV3DSA:
-    def test_dsa_produces_different_result(self):
-        """Sparse attention (DSA) should produce different FLOPs than full attention."""
-        dsa_cfg = _deepseek_v3_dsa_cfg()
-        full_cfg = _deepseek_v3_dsa_cfg()
-        full_cfg.index_topk = None
-        full_cfg.index_n_heads = 0
-        full_cfg.index_head_dim = 0
-
-        dsa_result = flops_utils.deepseekv3_flops(dsa_cfg, gbs=1, seq_len=1024)
-        full_result = flops_utils.deepseekv3_flops(full_cfg, gbs=1, seq_len=1024)
-        assert dsa_result != full_result
-        # Both should be positive
-        assert dsa_result > 0
-        assert full_result > 0
-
-    def test_dsa_precomputed_value(self):
-        cfg = _deepseek_v3_dsa_cfg()
-        actual = int(flops_utils.deepseekv3_flops(cfg, gbs=1, seq_len=1024))
-        assert actual == 35941427183616
 
 
 # ---------------------------------------------------------------------------
@@ -512,9 +360,6 @@ class TestGetFlopsFormula:
         cls = type(class_name, (), {})
         return cls()
 
-    def test_minimax(self):
-        cfg = self._make_config("MiniMaxM2Config")
-        assert flops_utils.get_flops_formula_for_hf_config(cfg) == flops_utils.minimax_m2_flops
 
     def test_qwen3_5_moe(self):
         cfg = self._make_config("Qwen3_5MoeConfig")
@@ -524,25 +369,11 @@ class TestGetFlopsFormula:
         cfg = self._make_config("Qwen3_5Config")
         assert flops_utils.get_flops_formula_for_hf_config(cfg) == flops_utils.qwen3_5_flops
 
-    def test_glm4_moe_lite(self):
-        cfg = self._make_config("Glm4MoeLiteConfig")
-        assert flops_utils.get_flops_formula_for_hf_config(cfg) == flops_utils.mla_moe_flops
 
     def test_glm_moe_dsa(self):
         cfg = self._make_config("GlmMoeDsaConfig")
         assert flops_utils.get_flops_formula_for_hf_config(cfg) == flops_utils.mla_moe_flops
 
-    def test_mistral3(self):
-        cfg = self._make_config("Mistral3Config")
-        assert flops_utils.get_flops_formula_for_hf_config(cfg) == flops_utils.mla_moe_flops
-
-    def test_kimi_k2(self):
-        cfg = self._make_config("KimiK2Config")
-        assert flops_utils.get_flops_formula_for_hf_config(cfg) == flops_utils.mla_moe_flops
-
-    def test_kimi_k3(self):
-        cfg = self._make_config("KimiK3TextConfig")
-        assert flops_utils.get_flops_formula_for_hf_config(cfg) == flops_utils.kimi_k3_flops
 
     def test_unknown_falls_back_to_transformer(self):
         cfg = self._make_config("UnknownModelConfig")

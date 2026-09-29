@@ -417,7 +417,6 @@ class TestForceHfBranchWiring:
             lambda path, attn, **_: PretrainedConfig(architectures=["Dummy"], quantization_config=None),
         )
         monkeypatch.setattr(model_init, "_propagate_torch_dtype_to_subconfigs", lambda *a, **k: None)
-        monkeypatch.setattr(model_init, "_streaming_bnb_supported", lambda *a, **k: False)
 
         class _DummyCls:
             _model_mapping = {}
@@ -458,7 +457,6 @@ class TestForceHfBranchWiring:
             ),
         )
         monkeypatch.setattr(model_init, "_propagate_torch_dtype_to_subconfigs", lambda *a, **k: None)
-        monkeypatch.setattr(model_init, "_streaming_bnb_supported", lambda *a, **k: False)
         monkeypatch.setattr(model_init, "_resolve_custom_model_cls_for_config", lambda *a, **k: None)
 
         class _DummyCls:
@@ -497,7 +495,6 @@ class TestConfigOnlyInitSkipsPreflight:
 
         monkeypatch.setattr(model_init, "_check_fp8_dequantize_will_fit", _raise_sentinel)
         monkeypatch.setattr(model_init, "_propagate_torch_dtype_to_subconfigs", lambda *a, **k: None)
-        monkeypatch.setattr(model_init, "_streaming_bnb_supported", lambda *a, **k: False)
 
     @staticmethod
     def _fp8_config_object():

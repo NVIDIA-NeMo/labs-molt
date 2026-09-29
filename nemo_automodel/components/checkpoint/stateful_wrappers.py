@@ -71,20 +71,6 @@ _OPTIMIZER_PARTS_KEY = "optimizer_parts"
 _OPTIMIZER_PART_KEY_PREFIX = "stage_"
 
 
-def _is_quantized_module(module: torch.nn.Module) -> bool:
-    """Check if a module is a BitsAndBytes quantized type.
-
-    Detects quantization by checking for `quant_state` attribute which is
-    common across BitsAndBytes quantized module types (Params4bit, Int8Params, etc.).
-    """
-    return getattr(module, "quant_state", None) is not None
-
-
-def _has_quantized_params(model: torch.nn.Module) -> bool:
-    """Check if model has any BitsAndBytes quantized modules."""
-    return any(map(_is_quantized_module, model.modules()))
-
-
 def _has_expert_parallelism(model: torch.nn.Module) -> bool:
     """Check if any MoE expert module in the model has expert parallelism enabled.
 
@@ -422,9 +408,7 @@ class ModelState:
         # nothing from them. The local collection keeps each PP rank's own stage
         # adapters, which the gather then unions into the complete adapter.
         use_local_peft_collection = self.is_peft and (
-            self.pp_group is not None
-            or any(_has_expert_parallelism(m) for m in self.model)
-            or any(_has_quantized_params(m) for m in self.model)
+            self.pp_group is not None or any(_has_expert_parallelism(m) for m in self.model)
         )
         if use_local_peft_collection:
             model_state_dict = {k: v for sd in map(_get_peft_state_dict, self.model) for k, v in sd.items()}
@@ -624,9 +608,7 @@ class OptimizerState:
             if len(set(self.optimizer_part_ids)) != len(self.optimizer_part_ids):
                 raise ValueError(f"Optimizer part IDs must be unique, got {self.optimizer_part_ids}.")
         self._use_native_optimizer_state = self.is_peft and (
-            has_expert_parallelism
-            or any(_has_expert_parallelism(model_part) for model_part in self.model)
-            or any(_has_quantized_params(model_part) for model_part in self.model)
+            has_expert_parallelism or any(_has_expert_parallelism(model_part) for model_part in self.model)
         )
 
     def state_dict(self) -> dict[str, Any]:

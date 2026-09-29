@@ -25,11 +25,10 @@ from torch.distributed.tensor import DTensor
 from nemo_automodel.components._peft.lora_experts import GroupedExpertsDeepEPLoRA, GroupedExpertsLoRA
 from nemo_automodel.components._peft.module_matcher import ModuleMatcher
 from nemo_automodel.components.moe.layers import GroupedExperts, GroupedExpertsDeepEP, GroupedExpertsTE
-from nemo_automodel.shared.import_utils import safe_import, safe_import_te
+from nemo_automodel.shared.import_utils import safe_import_te
 from nemo_automodel.shared.tp_linear import tp_linear_forward
 from nemo_automodel.shared.utils import dtype_from_str
 
-HAS_BNB, bitsandbytes = safe_import("bitsandbytes")
 HAS_TE, transformer_engine = safe_import_te()
 
 logger = logging.getLogger(__name__)
@@ -72,12 +71,6 @@ class PeftConfig:
             use_triton=d.get("use_triton", False),
             moe_rank_scaling=d.get("moe_rank_scaling", False),
         )
-
-
-def _extract_base_dtype(quantization_config, default_dtype=torch.bfloat16) -> torch.dtype:
-    if hasattr(quantization_config, "bnb_4bit_compute_dtype"):
-        return quantization_config.bnb_4bit_compute_dtype
-    return default_dtype
 
 
 class LinearLoRA(nn.Linear):
@@ -245,10 +238,10 @@ class LinearLoRA(nn.Linear):
             raise RuntimeError("materialize_effective_weight does not support active LoRA training dropout")
         if self.use_dora:
             raise NotImplementedError("materialize_effective_weight does not support DoRA")
-        if getattr(self, "super_fwd", None) is not None or getattr(self, "quant_state", None) is not None:
+        if getattr(self, "super_fwd", None) is not None:
             raise NotImplementedError(
-                "materialize_effective_weight supports only ordinary torch linear weights, not delegated or "
-                "quantized linear implementations"
+                "materialize_effective_weight supports only ordinary torch linear weights, not delegated "
+                "linear implementations"
             )
         if self.weight.layout != torch.strided or self.weight.is_quantized:
             raise NotImplementedError(
@@ -423,8 +416,6 @@ def patch_linear_module(
     if use_dora:
         if HAS_TE and isinstance(orig_linear, transformer_engine.pytorch.Linear):
             raise ValueError("DoRA is not supported for transformer_engine.pytorch.Linear layers.")
-        if getattr(orig_linear, "quant_state", None) is not None:
-            raise ValueError("DoRA is not supported for quantized linear layers (e.g., BitsAndBytes).")
 
     linear_lora_cls = LinearLoRA
     linear_lora_cls._init_adapter(
@@ -441,17 +432,7 @@ def patch_linear_module(
     cls = orig_linear.__class__
     new_cls = type("PatchedLinearLoRA", (linear_lora_cls, cls), {})
 
-    # If the model uses quantized weights, we want to use orig_linear's forward
-    if (
-        getattr(orig_linear, "quant_state", None) is not None
-        and orig_linear.quant_state.__class__ == bitsandbytes.functional.QuantState
-    ):
-        if HAS_TE:
-            assert not isinstance(orig_linear, transformer_engine.pytorch.Linear), (
-                "quant_state is not supported with transformer_engine.pytorch.Linear"
-            )
-        orig_linear.super_fwd = orig_linear.forward
-    elif HAS_TE and isinstance(orig_linear, transformer_engine.pytorch.Linear):
+    if HAS_TE and isinstance(orig_linear, transformer_engine.pytorch.Linear):
         # Delegate base computation to TE's forward so TE kernels (including FP8)
         # are used instead of falling back to F.linear().
         orig_linear.super_fwd = orig_linear.forward
@@ -565,7 +546,7 @@ def apply_lora_to_linear_modules(
                 num_modules_matched += 1
                 lora_dtype = peft_config.lora_dtype
                 if quantization_config is not None and lora_dtype is None:
-                    lora_dtype = _extract_base_dtype(quantization_config, torch.bfloat16)
+                    lora_dtype = torch.bfloat16
 
                 # Compute effective LoRA rank for MoE modules
                 moe_dim = peft_config.dim
@@ -610,7 +591,7 @@ def apply_lora_to_linear_modules(
                 # For QLora, set lora_dtype to float16/bfloat16 since base weights are quantized
                 lora_dtype = peft_config.lora_dtype
                 if quantization_config is not None and lora_dtype is None:
-                    lora_dtype = _extract_base_dtype(quantization_config, torch.bfloat16)
+                    lora_dtype = torch.bfloat16
 
                 patch_linear_module(
                     module,

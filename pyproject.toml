@@ -460,7 +460,6 @@ exclude = [
 # imported under try/except or feature gates. Keep this list narrow so that
 # accidental stale imports (e.g. after a package reorg) are still surfaced.
 allowed-unresolved-imports = [
-    "bitsandbytes",
     "causal_conv1d",
     "comet_ml",
     "cut_cross_entropy",
