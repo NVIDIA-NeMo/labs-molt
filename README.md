@@ -82,75 +82,76 @@ rollout.
 | 🪶 **Small, hackable surface** | ~9.2K LOC of RL code across 3 thin layers | Fork one layer without touching the others — read it in an afternoon |
 
 ## 📦 Installation
-First clone the repo — the launch scripts, agents, and recipes live here, and
-`examples/scripts/docker_run.sh` mounts this checkout into the container. For local
-(non-container) development, add the editable install: it pulls the exact git-pinned
-AutoModel this repo is validated against (`setup.py`, `AUTOMODEL`), so R3 routing replay and Muon work out of the box:
+
+Clone the repo first: the launch scripts, agents and recipes live here, and the container mounts this
+checkout.
+
+```bash
 git clone https://github.com/NVIDIA-NeMo/labs-molt.git
 cd labs-molt
-pip install -e ".[vllm]"          # local development only — the container bakes everything in
-> **Requires CUDA 13.** The git-pinned AutoModel is only compatible with the CUDA-13 torch
-> build (`torch==2.13.0+cu130`); a CUDA-12 environment will not work. If your host driver is
-> older than 580 (native CUDA 13), use the container instead — it ships the CUDA
-> forward-compatibility layer and enables it automatically.
-**The recommended path is the project container** (`dockerfile/Dockerfile`). It bakes the
-full CUDA-13 stack — torch 2.13 · vLLM · TransformerEngine · flash-attn · mamba · DeepEP ·
-NVIDIA AutoModel — built for A100 / H100 / H200 / B200·GB200, so it runs SFT and RL as-is
-with no local dependency wrangling. Pull the prebuilt image from Docker Hub:
-docker pull hijkzzz/molt:latest   # or a pinned release: hijkzzz/molt:0.1.10
-...or build it yourself from the Dockerfile (e.g. to change the CUDA / vLLM / AutoModel pins):
-docker build -f dockerfile/Dockerfile -t hijkzzz/molt:latest .
-From 0.1.9 the Docker Hub tags are multi-arch (amd64 + arm64), so the same `docker pull` works on
-x86 and on Grace-Blackwell (GB200 / GB300) hosts. The one Dockerfile builds both: run it on the
-matching host, or `docker buildx build --platform linux/amd64,linux/arm64 --push` to publish a tag.
-The released package is also on PyPI for checkout-free installs:
+```
+
+Then pick one of three ways to get the stack.
+
+### 1. Container (recommended)
+
+`dockerfile/Dockerfile` bakes the full CUDA-13 stack: torch 2.13, vLLM, TransformerEngine, flash-attn,
+mamba, DeepEP and NVIDIA AutoModel, built for A100 / H100 / H200 / B200 / GB200. SFT and RL run as-is,
+with no local dependency work. Pull the prebuilt image, or build it yourself to change a pin:
+
+```bash
+docker pull hijkzzz/molt:latest                                 # or a pinned release: hijkzzz/molt:0.1.10
+docker build -f dockerfile/Dockerfile -t hijkzzz/molt:latest .  # e.g. to change the CUDA / vLLM / AutoModel pins
+```
+
+From 0.1.9 the Docker Hub tags are multi-arch (amd64 + arm64): the same `docker pull` works on x86 and on
+Grace-Blackwell (GB200 / GB300) hosts, and the one Dockerfile builds both. Run it on the matching host, or
+`docker buildx build --platform linux/amd64,linux/arm64 --push` to publish a tag.
+
+### 2. Local editable install
+
+For development outside the container. It pulls the exact git-pinned AutoModel this repo is validated
+against (`setup.py`, `AUTOMODEL`), so R3 routing replay and Muon work out of the box:
+
+```bash
+pip install -e ".[vllm]"
+```
+
+> **Requires CUDA 13.** The git-pinned AutoModel is only compatible with the CUDA-13 torch build
+> (`torch==2.13.0+cu130`); a CUDA-12 environment will not work. If your host driver is older than 580
+> (native CUDA 13), use the container instead: it ships the CUDA forward-compatibility layer and enables
+> it automatically.
+
+### 3. PyPI
+
+For checkout-free installs:
+
+```bash
 pip install "molt-rl[vllm]"
-> **Note**: PyPI forbids git-pinned dependencies, so `molt-rl` depends on AutoModel's PyPI
-> release instead — it can lag the pin in `setup.py`, and R3 routing replay needs
-> the newer pin (it fails fast with instructions when the installed AutoModel is too old).
+```
+
+> **Note**: PyPI forbids git-pinned dependencies, so `molt-rl` depends on AutoModel's PyPI release
+> instead. It can lag the pin in `setup.py`, and R3 routing replay needs the newer pin (it fails fast with
+> instructions when the installed AutoModel is too old).
 
 ### Optional backend: AutoModel-Slim
 
-**The default stays upstream NVIDIA AutoModel**, pinned in `setup.py`; every command above installs it,
-and nothing below applies unless you opt in.
+**The default is upstream NVIDIA AutoModel**, pinned in `setup.py`; every command above installs it, and
+nothing in this subsection applies unless you opt in.
 
-[`automodel-slim`](https://github.com/NVIDIA-NeMo/labs-molt/tree/automodel-slim) is this repo's own copy of
-the pinned AutoModel commit (`8f73178c`), trimmed to what molt uses and maintained here so molt can fix and
-extend its model backend on its own schedule. Same package name (`nemo_automodel`), same import paths, same
-API: molt's code does not change when you switch.
+[`automodel-slim`](https://github.com/NVIDIA-NeMo/labs-molt/tree/automodel-slim) is molt's own copy of that
+pinned AutoModel commit, trimmed to what molt uses and maintained in this repo. Like upstream it is
+PyTorch-native and Hugging Face-native: Hugging Face checkpoints in, native FSDP2 implementations for
+training, Hugging Face safetensors out for vLLM and `transformers`. Same package name (`nemo_automodel`),
+same import paths, same API, so molt's code does not change when you switch.
 
-**What it keeps**
-
-- Model families: Qwen2 / 2.5, Qwen3 (dense, MoE, Next, VL), Qwen3.5 / 3.6, Qwen3.8 Flash Next,
-  DeepSeek V4.1 Flash, GLM 5.x / 5.3-Flash, Gemma 4 (dense, MoE, unified), Nemotron 3 / 3.5, Muse Glimmer,
-  Inkling. Dense HF architectures without a native implementation still load through the plain
-  transformers path.
-- Training stack: FSDP2 with TP / EP / CP (round-robin, block-diagonal and model-owned CP), TransformerEngine
-  attention with THD packing, DeepEP / HybridEP MoE dispatch, router replay (R3), LoRA including MoE expert
-  LoRA, FP8 / MXFP8, Dion / Muon, DCP checkpointing with consolidated HF export, the Triton fused grad-norm
-  kernel.
-- Removed: recipes and training loops, datasets, the CLI, loggers, evaluation, speculative-decoding drafters,
-  diffusion, retrieval and classification heads, pipeline parallelism, DDP / Megatron-FSDP, QAT / QLoRA,
-  dispatchers and kernels molt never selects, and 48 model families. 758 files / 282k lines down to
-  252 / ~97k. Kept files were not refactored.
-
-**How it is validated**
-
-- Forward logits against upstream `8f73178c` on every kept family (real weights for the six checkpoints on
-  hand, seeded few-layer builds for the rest) are bit-exact; Nemotron 3's THD path is not run-to-run
-  reproducible in upstream itself, and slim lands in the same two output clusters.
-- molt RL e2e on Qwen2 dense, Qwen3.6-35B, Nemotron 3, Gemma 4 and Muse reproduces the upstream metrics;
-  a 4-hour 1.5B slim-vs-upstream A/B stays aligned on reward, `vllm_kl` and gradient norm.
-- Branch CI (about seven minutes on molt's image and runners): the unit tests of the kept areas plus a 2-GPU
-  smoke that builds Qwen2.5 / Qwen3 / Qwen3-MoE / Qwen3.6 / Inkling / Nemotron 3 the way molt builds its
-  actor, checks that the consolidated HF export loads into transformers and reproduces the logits, trains a
-  few steps and round-trips a DCP checkpoint. The per-family parity table and the rules of the branch are in
-  its README.
-
-**How to use it**
-
-`setup.py` holds both pins (`AUTOMODEL`); opt in with `MOLT_AUTOMODEL=slim` at install or image-build time,
-or point the slurm recipes at a checkout:
+It keeps the model families molt trains (Qwen2 / 2.5, Qwen3 / 3.5 / 3.6 / 3.8, DeepSeek V4.1 Flash,
+GLM 5.x, Gemma 4, Nemotron 3, Muse Glimmer, Inkling) and the training stack behind them (FSDP2 with
+TP / EP / CP, TransformerEngine attention with THD packing, DeepEP / HybridEP MoE dispatch, router replay,
+LoRA, FP8, Dion / Muon, DCP checkpoints with consolidated HF export); everything else is removed, 758 files /
+282k lines down to 252 / ~97k. Forward logits are bit-exact with upstream on every kept family, molt's RL
+e2e metrics match, and the branch runs its own seven-minute CI on molt's image and runners. The per-family
+parity table, the kept / removed lists and the maintenance rules are in the branch's README.
 
 ```bash
 MOLT_AUTOMODEL=slim pip install -e ".[vllm]"                                          # local install
@@ -158,14 +159,9 @@ docker build --build-arg MOLT_AUTOMODEL=slim -f dockerfile/Dockerfile -t molt:sl
 EXTRA_PYTHONPATH=/path/to/automodel-slim ...                                          # slurm recipes: a checkout wins over the baked-in package
 ```
 
-The slim install follows the branch head: merge there, then rebuild the image (or reinstall) to pick the
-change up; `pip` records the exact commit it installed in `direct_url.json`.
-
-**Working on the backend**
-
-Model and parallel-stack changes go to that branch as PRs. They get the same `cicd` label check and
-`/claude review` as this repo, and the branch README spells out the maintenance rules: delete rather than
-add, no refactors of kept files, the closure checks before merge.
+`setup.py` holds both pins (`AUTOMODEL`); the slim install follows the branch head, so a merge there is
+live on the next image build or reinstall. Model and parallel-stack changes go to that branch as PRs, with
+the same `cicd` label check and `/claude review` as this repo.
 
 ## 🚀 Quick Start
 
@@ -243,37 +239,30 @@ that still drives fully-async agentic RL at frontier MoE scale on vLLM.
 stack that takes an NVIDIA AutoModel from SFT to frontier-scale agentic
 RL on vLLM. Read every line that touches your gradients, in plain PyTorch.
 
-<details>
-<summary><b>¹ How the RL-code line counts were measured</b></summary>
-
-¹ RL code = every Python file the framework's RL path uses — online
-trainer, rollout, Ray orchestration, experience/advantage/reward/KL/loss,
-actor/critic/RM inference, plus shared models, utils, parallelism, and
-kernels the RL training command depends on. Excludes pure SFT, DPO/KTO/IPO
-trainers, reward-model **training**, distillation, vendored third-party
-code, tests, examples, scripts, and docs. Counts code lines only (blank
-and comment-only lines excluded). Measured by tracing the import graph
-from each RL entry point (`molt.cli.train_rl_ray`,
-`openrlhf.cli.train_ppo_ray`, `verl.trainer.main_ppo`); slime loads its
-Megatron/SGLang backends lazily, so its core `slime/` package plus its
-`slime_plugins/` model-zoo (+~4.7K — the in-repo model code its RL path
-uses, counted on the same basis as molt's `models/`) are counted, minus
-SFT/distillation. Molt measured 2026-07-20 on this repo; the others
-measured 2026-06-16 at each repo's then-latest main HEAD
-(verl `86e8123`, slime `243773c`, OpenRLHF `b3d2927`).
-
-</details>
+> ¹ RL code = every Python file the framework's RL path uses — online
+> trainer, rollout, Ray orchestration, experience/advantage/reward/KL/loss,
+> actor/critic/RM inference, plus shared models, utils, parallelism, and
+> kernels the RL training command depends on. Excludes pure SFT, DPO/KTO/IPO
+> trainers, reward-model **training**, distillation, vendored third-party
+> code, tests, examples, scripts, and docs. Counts code lines only (blank
+> and comment-only lines excluded). Measured by tracing the import graph
+> from each RL entry point (`molt.cli.train_rl_ray`,
+> `openrlhf.cli.train_ppo_ray`, `verl.trainer.main_ppo`); slime loads its
+> Megatron/SGLang backends lazily, so its core `slime/` package plus its
+> `slime_plugins/` model-zoo (+~4.7K — the in-repo model code its RL path
+> uses, counted on the same basis as molt's `models/`) are counted, minus
+> SFT/distillation. Molt measured 2026-07-20 on this repo; the others
+> measured 2026-06-16 at each repo's then-latest main HEAD
+> (verl `86e8123`, slime `243773c`, OpenRLHF `b3d2927`).
 
 ## 🎯 Supported Scope
 ### Training & runtime
-| Area | Support |
-|---|---|
-| SFT | `molt.cli.train_sft` |
-| RL | vLLM-backed online RL via `molt.cli.train_rl_ray` |
-| Runtime | Ray placement, async rollout queues, vLLM engines, partial rollout sync |
-| Model scale | AutoModel + FSDP2 with TP / EP / CP, MoE-native — e.g. DeepSeek-V3 at `--fsdp.ep_size 256` |
-| Model backend | **NVIDIA AutoModel is the primary path** — native CP / EP / TP, custom MoE+EP parallelizer, TE fused attention; everything model-side aligns with AutoModel's own recipes. The HF transformers path is a **non-preferred fallback** (AutoModel drops to it only when a model has no native class) supporting **text + flash_attention_2 + packing only — no CP / EP / TP** |
-| Optimizer | `adam` (default), with CPU offload for the largest actors (`--fsdp.offload optimizer`). `muon` (Newton–Schulz via Dion: Muon for 2D weights and grouped MoE experts, AdamW for embeddings / head / norms) is **experimental** — runs distributed (FSDP / EP) but has shown no consistent win over `adam` yet, which stays the recommended default |
+- **SFT** — `molt.cli.train_sft`
+- **RL** — vLLM-backed online RL via `molt.cli.train_rl_ray`
+- **Runtime** — Ray placement, async rollout queues, vLLM engines, partial rollout sync
+- **Model scale** — AutoModel + FSDP2 with TP / EP / CP, MoE-native — e.g. DeepSeek-V3 at `--fsdp.ep_size 256`
+- **Model backend** — **NVIDIA AutoModel is the primary path** — native CP / EP / TP, custom MoE+EP parallelizer, TE fused attention; everything model-side aligns with AutoModel's own recipes. The HF transformers path is a **non-preferred fallback** (AutoModel drops to it only when a model has no native class) supporting **text + flash_attention_2 + packing only — no CP / EP / TP**
+- **Optimizer** — `adam` (default), with CPU offload for the largest actors (`--fsdp.offload optimizer`). `muon` (Newton–Schulz via Dion: Muon for 2D weights and grouped MoE experts, AdamW for embeddings / head / norms) is **experimental** — runs distributed (FSDP / EP) but has shown no consistent win over `adam` yet, which stays the recommended default
 ### Agents & rewards
 | Area | Support |
 |---|---|
@@ -282,13 +271,11 @@ measured 2026-06-16 at each repo's then-latest main HEAD
 | Modalities | Text and VLM prompts, including image payloads |
 | Chat templates | Assistant spans (SFT loss mask + multi-turn rollout stitching) are derived from the model's own chat template — no hard-coded markers. Verified on ChatML (Qwen3.x, Nemotron-Omni), Kimi-K2.6, GLM, Gemma, and DeepSeek |
 ### Algorithms
-| Area | Support |
-|---|---|
-| Estimators | `reinforce`, `reinforce_baseline`, `rloo`, `grpo`, `dr_grpo`, `gae` (PPO), `on_policy_distill` |
-| PPO critic | `--algo.advantage.estimator gae` adds a value model: its own Ray group (`CriticModelActor`), colocated on the actor's GPUs by default or disaggregatable, GAE advantages (`--algo.advantage.lam`) + clipped value loss (`--critic.value_clip`), own optimizer/LR (`--critic.adam.lr`) and resumable `_critic` checkpoint. Built on `NeMoAutoModelForCausalLM` + a scalar value head, so it keeps the native TP / EP / CP path |
-| Distillation | On-policy distillation — per-token reverse KL to a frozen teacher, via `--algo.advantage.estimator on_policy_distill` + `--ref.model_name_or_path` |
-| IS correction | Train/rollout logprob-mismatch correction for off-policy / async rollout: `is_correction_level {off,token,seq,geo}` × `is_correction_mode {mask,clip,trunc}` (covers TIS, IcePop, seq-mask-tis; see *IS correction* below) |
-| KL | Optional reference workers when `--algo.kl.init_coef > 0` (the reference doubles as the distillation teacher) |
+- **Estimators** — `reinforce`, `reinforce_baseline`, `rloo`, `grpo`, `dr_grpo`, `gae` (PPO), `on_policy_distill`
+- **PPO critic** — `--algo.advantage.estimator gae` adds a value model: its own Ray group (`CriticModelActor`), colocated on the actor's GPUs by default or disaggregatable, GAE advantages (`--algo.advantage.lam`) + clipped value loss (`--critic.value_clip`), own optimizer/LR (`--critic.adam.lr`) and resumable `_critic` checkpoint. Built on `NeMoAutoModelForCausalLM` + a scalar value head, so it keeps the native TP / EP / CP path
+- **Distillation** — On-policy distillation — per-token reverse KL to a frozen teacher, via `--algo.advantage.estimator on_policy_distill` + `--ref.model_name_or_path`
+- **IS correction** — Train/rollout logprob-mismatch correction for off-policy / async rollout: `is_correction_level {off,token,seq,geo}` × `is_correction_mode {mask,clip,trunc}` (covers TIS, IcePop, seq-mask-tis; see *IS correction* below)
+- **KL** — Optional reference workers when `--algo.kl.init_coef > 0` (the reference doubles as the distillation teacher)
 ### MoE routing stability
 | Area | Support |
 |---|---|
@@ -329,9 +316,6 @@ turns until `terminated` or `truncated`.
 
 ### 2. `ChatAgent` — you own the loop via the OpenAI **or** Anthropic SDK
 
-<details>
-<summary><b>Full ChatAgent example</b></summary>
-
 ```python
 from openai import AsyncOpenAI
 from molt.agents import ChatAgent, ChatAgentRunner, ChatContext, Result
@@ -353,8 +337,6 @@ class AgentRunner(ChatAgentRunner):
     def __init__(self):
         super().__init__(MyAgent)
 ```
-
-</details>
 
 A multi-turn agent that stops on its own turn cap should return
 `Result(truncated=True)` (see `examples/python/agents/chat_geo3k.py`); the
@@ -556,10 +538,9 @@ and off by default; under CP it takes the THD path.
 
 ## 🔬 Deep dives
 
-The long-form notes behind the knobs above. Each one opens in place.
+The long-form notes behind the knobs above.
 
-<details>
-<summary><b>IS correction — train/rollout logprob mismatch</b></summary>
+### IS correction — train/rollout logprob mismatch
 
 Async and partial rollout make the FSDP actor's recomputed `pi_train` diverge from
 vLLM's gen-time `pi_rollout` (different kernels, plus a mid-request weight swap the
@@ -591,10 +572,7 @@ References: **TIS** (truncated importance sampling of the train/infer ratio), **
 (token-level masking of out-of-band ratios), and **MIS** (masked importance sampling, Yingru Li —
 sequence-level masked IS, which motivates the `seq`/`geo` rejection filter).
 
-</details>
-
-<details>
-<summary><b>MTP rollout — speculative decoding</b></summary>
+### MTP rollout — speculative decoding
 
 Checkpoints that ship a multi-token-prediction (MTP) head — e.g. **Qwen3.6-MoE**
 (`mtp_num_hidden_layers: 1`) — can use it to **speed up generation** via vLLM
@@ -622,10 +600,7 @@ Notes:
   unavailable until upstream adds it; vLLM errors at engine init if enabled on an
   unsupported checkpoint.
 
-</details>
-
-<details>
-<summary><b>MoE routing stability — Router Replay (R3) and router freeze</b></summary>
+### MoE routing stability — Router Replay (R3) and router freeze
 
 MoE RL is unstable because the rollout (vLLM) and training (FSDP) routers pick
 experts **independently** — even at identical weights, numerical differences
@@ -668,10 +643,7 @@ fixed router is acceptable.
 --actor.freeze_moe_router   # off by default; redundant with R3
 ```
 
-</details>
-
-<details>
-<summary><b>LoRA fine-tuning</b></summary>
+### LoRA fine-tuning
 
 Both paths take the same three flags (`--model.lora_*` for SFT, `--actor.lora_*` for RL);
 `--*.lora_dim 0` (the default) is plain full fine-tuning:
@@ -701,8 +673,6 @@ Constraints:
   (`adapter_model.safetensors` + `adapter_config.json`), not merged full weights; load it
   with `PeftModel.from_pretrained(base, adapter_dir)` or vLLM's `--enable-lora`. The DCP
   resume checkpoints stay full-weight, so resuming is unchanged.
-
-</details>
 
 ## ✅ Validation
 
