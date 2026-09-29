@@ -46,6 +46,8 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
+      # A docs-only or deployment push skips copyright-check on purpose; the summary must not count that skip as a failure.
+      SKIPPING_IS_ALLOWED: ${{ needs.pre-flight.outputs.docs_only == 'true' || needs.pre-flight.outputs.is_deployment_workflow == 'true' }}
     steps:
       - name: Result
         run: |
