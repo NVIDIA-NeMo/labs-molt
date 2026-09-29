@@ -24,7 +24,7 @@
 #     removed as the run starts; a later push to the PR needs a fresh label.
 #   * After every merge to main (push); a failed one is reported to the CI Slack channel, nobody watches it.
 # The image: the released one, unless the change under test (the PR's files, or the pushed range) touched the
-# image's inputs -- dockerfile/, requirements.txt, pyproject.toml -- in which case it is built first, on the
+# image's inputs -- dockerfile/, requirements.txt, setup.py, pyproject.toml -- in which case it is built first, on the
 # runner, from the release build cache (only the changed layers rebuild), and the run uses it.
 # The checked-out tree is mounted over the image's copy. The result is the job's check on the PR, and every
 # metric's first / last / min / max / change over the run is posted as the job summary (alerts fail the job).
@@ -111,7 +111,7 @@ jobs:
           build=false
           # pulls/N/files answers with an array, compare and commits with {files: [...]}.
           if [ -n "$q" ] && gh api "$q" --paginate --jq 'if type == "array" then . else .files end | .[].filename' \
-               | grep -qE '^(dockerfile/|requirements\.txt$|pyproject\.toml$)'; then
+               | grep -qE '^(dockerfile/|requirements\.txt$|setup\.py$|pyproject\.toml$)'; then
             build=true; IMAGE="molt-e2e:${GITHUB_SHA::8}"
           fi
           echo "image=$IMAGE build=$build"

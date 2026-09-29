@@ -27,7 +27,7 @@
 #
 # Runs BOTH SFT and RL (vLLM) for omni3 (Nemotron-H Mamba2+MoE) and qwen3.6 (Qwen3.5-MoE).
 # System stack baked in: TE + flash-attn + DeepEP + mamba + fla + vLLM.
-# AutoModel is baked in too (nemo-automodel installed from the requirements.txt pin below),
+# AutoModel is baked in too (the nemo-automodel pin from setup.py, MOLT_AUTOMODEL=upstream|slim),
 # so this image is SELF-CONTAINED — runnable as-is (e.g. pushed to Docker Hub) with no
 # external mount. At runtime the launch scripts OPTIONALLY prepend a sibling Automodel
 # checkout to PYTHONPATH; since PYTHONPATH is searched before site-packages, that dev
@@ -188,26 +188,28 @@ RUN apt-get update && apt-get install -y --allow-change-held-packages rdma-core 
 RUN python -m pip install -c /opt/torch-pin.txt "vllm[audio]==0.30.0"
 
 # --- VLM modeling-code runtime deps + molt requirements + fla -----------
-# requirements.txt minus what's already pinned/built above (torch trio, TE, flash-attn,
+# setup.py resolves requirements.txt plus the AutoModel source selected by MOLT_AUTOMODEL (upstream,
+# or slim for AutoModel-Slim); the grep drops what is already built above (torch trio, TE, flash-attn,
 # mamba/causal-conv1d, deepep, vllm, fla, ray, dion). Installed WITH deps but torch-pinned
 # (-c /opt/torch-pin.txt) so transitive deps (multiprocess, pyarrow, ...) come in without
 # swapping torch/the source-built stack. (--no-deps here would skip multiprocess -> SFT crash.)
-# NOTE: nemo-automodel is intentionally NOT filtered out — it installs from the requirements.txt
-# git pin here, baking AutoModel into the image (self-contained for Docker Hub). The runtime
-# PYTHONPATH sibling-checkout override (above) takes precedence over this baked copy.
+# AutoModel is baked in, so the image is self-contained (Docker Hub); the runtime PYTHONPATH
+# sibling-checkout override (above) takes precedence over this baked copy.
 # transformers is deliberately NOT pinned anywhere in this repo: AutoModel's exact pin wins here
 # (vLLM only sets a floor), so its validated transformers version travels with the AutoModel bump.
 ARG INSTALL_TEST_DEPS=0
-COPY requirements.txt /tmp/requirements.txt
+ARG MOLT_AUTOMODEL=upstream
+COPY setup.py requirements.txt /tmp/molt/
 RUN if [ "$INSTALL_TEST_DEPS" = "1" ]; then python -m pip install coverage pytest; fi && \
     python -m pip install ftfy open_clip_torch timm wcwidth && \
-    grep -ivE '^[[:space:]]*(dion|vllm|torch|torchvision|torchaudio|transformer[-_]engine|flash[-_]attn|flash[-_]linear[-_]attention|fla([-_]core)?|mamba[-_]ssm|causal[-_]conv1d|deep[-_]ep|ray)([=<>!~ ]|$)' \
-        /tmp/requirements.txt > /tmp/req.filtered.txt && \
-    python -m pip install -c /opt/torch-pin.txt -r /tmp/req.filtered.txt && \
+    cd /tmp/molt && MOLT_PRINT_REQUIREMENTS=1 MOLT_AUTOMODEL=$MOLT_AUTOMODEL python setup.py | \
+        grep -ivE '^[[:space:]]*(dion|vllm|torch|torchvision|torchaudio|transformer[-_]engine|flash[-_]attn|flash[-_]linear[-_]attention|fla([-_]core)?|mamba[-_]ssm|causal[-_]conv1d|deep[-_]ep|ray)([=<>!~ ]|$)' \
+        > /tmp/req.txt && cd / && \
+    python -m pip install -c /opt/torch-pin.txt -r /tmp/req.txt && \
     python -m pip install "ray[default]==2.55.0" && \
     python -m pip install --no-cache-dir --no-deps "flash-linear-attention==0.4.2" "fla-core==0.4.2" && \
     python -c "import importlib.util as u; assert u.find_spec('fla.ops.cp') and u.find_spec('fla.modules.convolution') and u.find_spec('fla.ops.gated_delta_rule'), 'fla CP ops missing'" && \
-    rm -f /tmp/requirements.txt /tmp/req.filtered.txt
+    rm -rf /tmp/molt /tmp/req.txt
 
 # DSA sparse attention (backend.attn="tilelang"): AutoModel's `cuda` extra. The pin is
 # load-bearing — 0.1.9 compiles the kernels but its backward NaNs once an index block mixes

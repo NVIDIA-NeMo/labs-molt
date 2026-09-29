@@ -20,6 +20,14 @@ from setuptools import find_packages, setup
 
 _build_mode = os.getenv("MOLT_BUILD_MODE", "")
 
+# The AutoModel source, selected with MOLT_AUTOMODEL (default upstream). "slim" is AutoModel-Slim: the
+# upstream commit trimmed to the backend molt uses, on this repo's automodel-slim branch; same package
+# name and API; the install follows that branch's head.
+AUTOMODEL = {
+    "upstream": "nemo-automodel @ git+https://github.com/NVIDIA-NeMo/Automodel.git@8f73178ca51d4c1e55ccf05df5da6540a9e24f7e",
+    "slim": "nemo-automodel @ git+https://github.com/NVIDIA-NeMo/labs-molt.git@automodel-slim",
+}
+
 
 def _is_nightly():
     return _build_mode.lower() == "nightly"
@@ -27,12 +35,14 @@ def _is_nightly():
 
 def _fetch_requirements(path):
     with open(path, "r") as fd:
-        reqs = [r.strip() for r in fd.readlines()]
+        reqs = [r.strip() for r in fd.readlines() if r.strip() and not r.startswith("#")]
     # Source/editable installs keep the exact git pins (R3 needs that AutoModel commit).
     # PyPI rejects direct-URL requirements, so the PyPI build (python-package.yml sets
-    # MOLT_PYPI_BUILD=1) swaps nemo-automodel to its release floor and drops dion (no PyPI dist).
+    # MOLT_PYPI_BUILD=1) uses AutoModel's release floor and drops dion (no PyPI dist).
     if os.getenv("MOLT_PYPI_BUILD") == "1":
         reqs = [r for r in reqs if "git+" not in r] + ["nemo-automodel>=0.5.0"]
+    else:
+        reqs.append(AUTOMODEL[os.getenv("MOLT_AUTOMODEL", "upstream")])
     return reqs
 
 
@@ -58,6 +68,10 @@ def _fetch_package_name():
 
 
 # Setup configuration
+if os.getenv("MOLT_PRINT_REQUIREMENTS") == "1":  # the image build asks for the resolved list
+    print("\n".join(_fetch_requirements("requirements.txt")))
+    raise SystemExit(0)
+
 setup(
     author="NVIDIA CORPORATION & AFFILIATES",
     license="Apache-2.0",
