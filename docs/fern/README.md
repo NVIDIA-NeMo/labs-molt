@@ -96,6 +96,11 @@ export FERN_TOKEN="$DOCS_FERN_TOKEN"
 npm run preview
 ```
 
+For pull requests, `fern-docs-preview.yml` runs after the approved PR commit is
+mirrored to `pull-request/<number>`. When `PUBLISH_FERN_PREVIEWS=true`, it builds
+a hosted preview for changes under `docs/**` or to `fern-docs-ci.yml` and posts
+the link on the PR.
+
 ## Troubleshooting
 
 | Error | Fix |
