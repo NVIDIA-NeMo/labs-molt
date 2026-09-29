@@ -70,13 +70,12 @@ with seeded random weights. Run on 8 H100 with the molt `0.1.10` image on 2026-0
 | Muse Glimmer (30B) | real weights | FSDP2 ×8, THD | 924 | 0 | ✅ bit-exact |
 | Inkling Small | seeded, 4 layers | EP8, THD | 924 | 0 | ✅ bit-exact |
 
-† Nemotron 3 on the THD path is not run-to-run reproducible in upstream itself: eight runs (five upstream,
-three slim across three commits) produced exactly two distinct logit tensors; every upstream / slim pair in
-the same cluster is bit-exact, pairs across clusters differ by max 2.7 / mean 0.06 on both sides alike
-(upstream vs upstream included). The Mamba-2 SSD Triton kernels (`_chunk_scan`, `_state_passing`,
-`_bmm_chunk`, `_chunk_cumsum`) are autotuned at process start on this path, which is consistent with a
-two-way split; the padded path is bit-exact every time. Nemotron 3 Omni shares this model code; no
-checkpoint was available to run it.
+† Nemotron 3 on the THD path is not run-to-run reproducible in upstream itself: seven upstream runs gave
+three distinct logit tensors (pairwise max diff 2.4 to 2.7, mean 0.06), and each of the three slim runs
+(three commits) is bit-exact with one of them, so the variance is upstream's, not a slim difference. The
+Mamba-2 SSD Triton kernels (`_chunk_scan`, `_state_passing`, `_bmm_chunk`, `_chunk_cumsum`) are autotuned
+at process start on this path, a known source of run-to-run variance; the padded path is bit-exact every
+time. Nemotron 3 Omni shares this model code; no checkpoint was available to run it.
 
 molt RL e2e runs (Qwen2 dense, Qwen3.6-35B, Nemotron 3, Gemma 4, Muse) reproduce the upstream
 metrics within run-to-run noise. A 4-hour slim-vs-upstream RL A/B on DeepSeek-R1-Distill-Qwen-1.5B
