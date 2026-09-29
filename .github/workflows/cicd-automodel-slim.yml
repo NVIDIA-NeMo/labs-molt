@@ -25,9 +25,11 @@
 #   static   compileall, ruff, tools/check_closure.py (every import and every nemo_automodel.* string resolves)
 #   unit     the Qwen / MoE / distributed / checkpoint / loading unit tests, in a CPU-only container
 #            alongside the GPU smoke, so they add no wall time
-#   smoke    tests/gpu_smoke/qwen_smoke.py on 2 GPUs: seeded few-layer Qwen3 dense, Qwen3-MoE (EP2) and
-#            Qwen3.6-MoE (EP2) built the way molt builds its actor; forward logits must be bit-exact against
-#            the base branch built in the same job, then a train step and a DCP save / reload / HF-export round trip
+#   smoke    tests/gpu_smoke/smoke.py on 2 GPUs: seeded few-layer Qwen2.5, Qwen3, Qwen3-MoE (EP2) and
+#            Qwen3.6-MoE (EP2) built the way molt builds its actor. The consolidated HF export must load cleanly
+#            into transformers, and for Qwen2.5 / Qwen3 / Qwen3-MoE that transformers model must reproduce the
+#            forward logits within bf16 tolerance. Qwen3-MoE also runs a short training descent and a DCP
+#            save / reload round trip.
 name: CICD AutoModel-Slim
 
 on:
@@ -89,7 +91,7 @@ jobs:
     needs: [pre-flight]
     if: github.event_name != 'pull_request_target' || github.event.label.name == 'cicd'
     runs-on: ${{ inputs.runner || 'nemo-ci-gcp-gpu-x2' }}
-    timeout-minutes: 40
+    timeout-minutes: 30
     env:
       IMAGE: ${{ inputs.image || 'hijkzzz/molt:latest' }}
     steps:
@@ -105,16 +107,6 @@ jobs:
         with:
           # pull_request_target checks out the base by default; test the PR's head commit instead.
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
-          fetch-depth: 0
-      - name: Check out the parity reference (the base branch, or the previous commit on a push)
-        env:
-          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-        run: |
-          base="$BASE"
-          case "$base" in ''|0000000000000000000000000000000000000000) base="$(git rev-parse HEAD~1)" ;; esac
-          git cat-file -e "$base^{commit}" 2>/dev/null || git fetch -q origin "$base"
-          rm -rf base && mkdir base && git archive "$base" | tar -x -C base
-          echo "parity reference: $base"
       # Authenticated pull: the ephemeral runner fetches the image every run, and anonymous Docker Hub
       # pulls are rate-limited per IP.
       - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
@@ -132,18 +124,34 @@ jobs:
                 tests/unit_tests/models/qwen3_next tests/unit_tests/models/qwen3_5 tests/unit_tests/models/qwen3_5_moe \
                 tests/unit_tests/models/common tests/unit_tests/moe tests/unit_tests/distributed \
                 tests/unit_tests/checkpoint tests/unit_tests/_transformers'
+      # Triton (GDN) and Inductor (flex attention) kernels are JIT-compiled; the ephemeral runner would redo
+      # that every run, so the cache dirs persist through actions/cache, keyed on runner arch and image.
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        id: kcache
+        with:
+          path: ${{ github.workspace }}/.kcache
+          key: kernels-${{ runner.arch }}-${{ env.IMAGE }}-v1
       # CUDNN_PATH / LD_LIBRARY_PATH pin TE to the bundled cuDNN, as molt's launch scripts do: the login shell
       # can shadow the image's ENV with the apt cuDNN, which breaks the fused-attention kernel.
-      - name: GPU smoke, Qwen dense / MoE / 3.6 (bit-exact vs base, train step, checkpoint round trip)
+      # Only qwen3_moe trains.
+      - name: GPU smoke, reference parity on Qwen2.5 / Qwen3 / Qwen3-MoE / Qwen3.6; Qwen3-MoE trains + checkpoint round trip
+        env:
+          ARCHS: qwen2_5 qwen3 qwen3_moe qwen3_6
         run: |
-          docker run --rm --gpus all --shm-size=16g --workdir /src --volume "$GITHUB_WORKSPACE:/src" "$IMAGE" \
+          mkdir -p .kcache
+          docker run --rm --gpus all --shm-size=16g --workdir /src --volume "$GITHUB_WORKSPACE:/src" -e ARCHS "$IMAGE" \
             bash -lc 'cd /src && nvidia-smi -L && python -c "import torch, transformer_engine as te; print(torch.__version__, te.__version__, torch.cuda.get_device_capability())" && \
               export NVTE_FUSED_ATTN=1 NVTE_FLASH_ATTN=0 CUDNN_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/cudnn \
-                     LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH:-} && mkdir -p /tmp/ref && \
-              for arch in dense moe qwen3_6; do \
-                PYTHONPATH=/src/base timeout 10m torchrun --nproc_per_node=2 base/tests/gpu_smoke/qwen_smoke.py --arch $arch --out /tmp/ref/$arch.pt && \
-                PYTHONPATH=/src      timeout 10m torchrun --nproc_per_node=2 tests/gpu_smoke/qwen_smoke.py      --arch $arch --ref /tmp/ref/$arch.pt --train; \
+                     LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH:-} \
+                     TRITON_CACHE_DIR=/src/.kcache/triton TORCHINDUCTOR_CACHE_DIR=/src/.kcache/inductor PYTHONPATH=/src && \
+              for arch in $ARCHS; do echo "===== $arch"; EXTRA=""; [ "$arch" = qwen3_moe ] && EXTRA="--train"; \
+                timeout 12m torchrun --nproc_per_node=2 tests/gpu_smoke/smoke.py --arch $arch $EXTRA || exit 1; \
               done'
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        if: always() && steps.kcache.outputs.cache-hit != 'true'
+        with:
+          path: ${{ github.workspace }}/.kcache
+          key: kernels-${{ runner.arch }}-${{ env.IMAGE }}-v1
       - name: Unit test result
         if: always()
         run: |

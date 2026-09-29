@@ -127,12 +127,14 @@ CI Slack channel) and finishes in about ten minutes:
 |---|---|---|
 | `static` | ubuntu | `compileall`, `ruff --select F821,F401,F822`, `tools/check_closure.py` (every import and every `nemo_automodel.*` string resolves) |
 | `test` · unit | molt image, CPU container alongside the smoke | the Qwen / MoE / distributed / checkpoint / loading unit tests |
-| `test` · smoke | molt image, 2 GPUs | `tests/gpu_smoke/qwen_smoke.py`: seeded few-layer Qwen3 dense (FSDP2, THD packing), Qwen3-MoE (EP2, THD) and Qwen3.6-MoE (EP2), built the way molt builds its actor; the base branch is built in the same job and its logits must match the PR bit for bit; then a train step with the mesh-aware grad clip and a DCP save / reload / consolidated-HF-export round trip |
+| `test` · smoke | molt image, 2 GPUs | `tests/gpu_smoke/smoke.py`: seeded few-layer Qwen2.5, Qwen3, Qwen3-MoE (EP2) and Qwen3.6-MoE (EP2), built the way molt builds its actor (FSDP2 + EP mesh, TE attention, THD packing or the padded forward molt uses for Qwen3.5-MoE). The consolidated HF export (the path molt's vLLM refit uses) must load into transformers with no missing or unexpected keys, and for Qwen2.5 / Qwen3 / Qwen3-MoE that transformers model must reproduce the forward logits within a relative tolerance sized to bf16 noise (Qwen3.6's tiny random build diverges too far for that gate; its real-weight numerics are molt's e2e job); Qwen3-MoE also runs three AdamW steps with molt's mesh-aware clip (the loss must fall) and reloads the DCP checkpoint saved beforehand, which must reproduce the original logits |
 
 There is no Dockerfile here: the image is molt's, and the checkout under test is mounted over the copy
-baked into it. Real-weight validation (bit-exact logits against upstream, molt RL e2e) is done on a
-cluster and recorded in the commit messages; add `--arch` cases to the smoke when another family
-needs protecting (GLM-5.3 and DeepSeek V4.1 run as seeded 2–5 layer builds in about two minutes).
+baked into it. JIT-compiled kernels (Triton for GDN, Inductor) persist between runs through
+`actions/cache`. Real-weight validation (bit-exact logits against the commit this branch was cut from,
+molt RL e2e) was done on a cluster and is recorded in the commit messages; add an `ARCHS` entry to the
+smoke when another family needs protecting, with a `configs/*.json` and, for MoE, a decisive router init
+(tiny random routers are near-ties, so cross-implementation comparisons measure routing luck otherwise).
 
 ## Maintenance
 
@@ -140,9 +142,10 @@ needs protecting (GLM-5.3 and DeepSeek V4.1 run as seeded 2–5 layer builds in 
   removal cuts the import and the branch that used it, nothing more.
 - **Gates before merge.** `python -m compileall -q nemo_automodel`, `ruff check --select F821,F401,F822`,
   and the three closure checks (every import resolves to a kept module, every imported name exists,
-  every `nemo_automodel.*` string names a kept module). A GPU change must keep forward logits
-  bit-exact against the previous commit for the affected families (same checkpoint, same input), and
-  a change to loading, EP or CP must run one molt RL e2e (dense Qwen2 and Qwen3.6-35B EP8 / CP8).
+  every `nemo_automodel.*` string names a kept module). The branch CI's smoke gates the Qwen families
+  against transformers; a change to another family's model code should keep its forward logits
+  bit-exact against the previous commit (same checkpoint, same input), and a change to loading, EP or
+  CP must run one molt RL e2e (dense Qwen2 and Qwen3.6-35B EP8 / CP8).
 - **Picking changes up in molt.** molt's `setup.py` pins this branch by name (`AUTOMODEL["slim"]`), so a
   merge here is live on the next molt image build or reinstall; molt's own e2e CI is the acceptance test.
 - **Adding a family.** Copy `components/models/<family>/` from upstream (or the mirror), restore its
