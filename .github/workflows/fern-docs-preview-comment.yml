@@ -17,8 +17,8 @@
 #
 # Triggered by workflow_run after "Preview Fern Docs: Build" completes.
 # Downloads the docs artifact, builds a preview with DOCS_FERN_TOKEN, and
-# posts a stable :herb: comment on the PR. This workflow never checks out the
-# PR branch directly, keeping secrets isolated from untrusted code.
+# posts a stable :herb: comment on the PR. PR docs are untrusted, so the CLI
+# and sanitizer must come from this workflow or a trusted checkout.
 #
 # Required configuration:
 # - Organization secret: DOCS_FERN_TOKEN (from `fern token` for the nvidia Fern org)
@@ -69,6 +69,20 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Checkout trusted Fern tooling
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.sha }}
+          path: trusted-source
+          persist-credentials: false
+          sparse-checkout: |
+            docs/fern/fern.config.json
+            docs/fern/scripts/sanitize-generated-mdx.mjs
+          sparse-checkout-cone-mode: false
+
+      - name: Install Fern CLI
+        run: npm install -g fern-api@5.50.4
+
       - name: Generate preview URL
         id: generate-docs
         env:
@@ -76,16 +90,31 @@ jobs:
           HEAD_REF: ${{ steps.metadata.outputs.head_ref }}
         working-directory: ./docs/fern
         run: |
-          FERN_VERSION=$(jq -r .version fern.config.json)
-          npx -y "fern-api@${FERN_VERSION}" docs md generate --library molt
-          npm run sanitize:generated
-          OUTPUT=$(npx -y "fern-api@${FERN_VERSION}" generate --docs --preview --id "$HEAD_REF" 2>&1)
+          cp "$GITHUB_WORKSPACE/trusted-source/docs/fern/fern.config.json" fern.config.json
+          fern docs md generate --library molt
+          node "$GITHUB_WORKSPACE/trusted-source/docs/fern/scripts/sanitize-generated-mdx.mjs"
+          OUTPUT=$(fern generate --docs --preview --id "$HEAD_REF" 2>&1)
           echo "$OUTPUT"
           URL=$(echo "$OUTPUT" | grep -oP 'Published docs to \K.*(?= \()')
           if [ -z "$URL" ]; then
             echo "::error::Failed to generate preview URL. See fern output above."
             exit 1
           fi
+          python3 - "$URL" <<'PY'
+          import re
+          import sys
+          from urllib.parse import urlsplit
+
+          value = sys.argv[1]
+          url = urlsplit(value)
+          if (
+              value != value.strip() or "\n" in value or "\r" in value
+              or url.scheme != "https"
+              or not re.fullmatch(r"nvidia-preview-[a-z0-9-]+\.docs\.buildwithfern\.com", url.hostname or "")
+              or url.port is not None or url.username or url.password
+          ):
+              raise SystemExit("Unexpected Fern preview URL")
+          PY
           echo "preview_url=$URL" >> "$GITHUB_OUTPUT"
 
       - name: Build page links for changed files
