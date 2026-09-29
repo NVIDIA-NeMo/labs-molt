@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # The review runs Claude Code inside a checkout of this repository, so it picks up the project
-# settings in .claude/settings.json: that is where the effort level (xhigh) is set.
+# settings in .claude/settings.json: that is where the effort level (high) is set.
 name: Claude Code Review
 
 on:
