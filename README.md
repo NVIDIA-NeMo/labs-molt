@@ -7,10 +7,9 @@
 molt runs RL and SFT with vLLM rollouts and an FSDP2 training actor. The actor delegates model
 construction to AutoModel: loading a Hugging Face checkpoint into a native implementation, sharding it
 with FSDP2 / tensor / expert / context parallelism, packing sequences for TransformerEngine attention,
-and saving DCP checkpoints plus consolidated HF safetensors. Upstream
-[NVIDIA-NeMo/Automodel](https://github.com/NVIDIA-NeMo/Automodel) is being discontinued, so this branch
-carries that backend for molt: upstream at commit `8f73178c` with everything molt does not use removed,
-the same package name, import path and API.
+and saving DCP checkpoints plus consolidated HF safetensors. This branch carries molt's copy of that
+backend: [NVIDIA-NeMo/Automodel](https://github.com/NVIDIA-NeMo/Automodel) at commit `8f73178c` with
+everything molt does not use removed, the same package name, import path and API.
 
 | | upstream `8f73178c` | AutoModel-Slim |
 |---|---|---|
