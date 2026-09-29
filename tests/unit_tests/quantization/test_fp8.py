@@ -246,7 +246,7 @@ class TestFP8Conversion:
         """Test verification with mock FP8 modules."""
         # This test requires torchao to work properly
         try:
-            from torchao.float8.float8_linear import Float8Linear
+            from torchao.float8.float8_linear import Float8Linear  # noqa: F401  (availability probe)
         except ImportError:
             pytest.skip("torchao not available")
 

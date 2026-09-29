@@ -1,0 +1,168 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# CICD AutoModel-Slim, this branch's one test workflow, run the same way as CICD Molt. Ways in:
+#   * Actions tab -> Run workflow: pick the branch, the molt image (hijkzzz/molt, multi-arch) and the 2-GPU runner.
+#   * On a PR against automodel-slim, fork or in-repo alike: a maintainer puts the `cicd` label on it.
+#     pull_request_target runs THIS file from the base branch with the repository's secrets and checks out the
+#     PR's head commit, so the label is the approval that lets that exact revision run on a self-hosted GPU
+#     runner: read the diff first. The label is removed as the run starts; a later push needs a fresh label.
+#   * After every push to automodel-slim; a failed one is reported to the CI Slack channel.
+# The image is molt's released one (this branch has no Dockerfile; molt bakes the pinned commit of this tree
+# into its image, and the checkout under test is mounted over that copy). Three checks, ~10 minutes:
+#   static   compileall, ruff, tools/check_closure.py (every import and every nemo_automodel.* string resolves)
+#   unit     the Qwen / MoE / distributed / checkpoint / loading unit tests, in a CPU-only container
+#            alongside the GPU smoke, so they add no wall time
+#   smoke    tests/gpu_smoke/qwen_smoke.py on 2 GPUs: seeded few-layer Qwen3 dense, Qwen3-MoE (EP2) and
+#            Qwen3.6-MoE (EP2) built the way molt builds its actor; forward logits must be bit-exact against
+#            the base branch built in the same job, then a train step and a DCP save / reload / HF-export round trip
+name: CICD AutoModel-Slim
+
+on:
+  workflow_dispatch:
+    inputs:
+      image:
+        description: Container image (molt's multi-arch tag; the runner's architecture is pulled)
+        type: string
+        default: hijkzzz/molt:latest
+      runner:
+        description: Runner label with 2 GPUs
+        type: string
+        default: nemo-ci-gcp-gpu-x2
+  pull_request_target:
+    types: [labeled]
+    branches: [automodel-slim]
+  push:
+    branches: [automodel-slim]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+jobs:
+  pre-flight:
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cicd_preflight.yml@cf5acebace78c7c339bc1f804357a991336f1c4d # v1.8.10
+    with:
+      default_runner_prefix: ${{ vars.DEFAULT_RUNNER_PREFIX }}
+      non_nvidia_runner_prefix: ${{ vars.NON_NVIDIA_RUNNER_PREFIX }}
+      default_test_data_path: ${{ vars.DEFAULT_TEST_DATA_PATH }}
+      non_nvidia_test_data_path: ${{ vars.NON_NVIDIA_TEST_DATA_PATH }}
+      sso_users_filename: ${{ vars.SSO_USERS_FILENAME }}
+    secrets:
+      NVIDIA_MANAGEMENT_ORG_PAT: ${{ secrets.NVIDIA_MANAGEMENT_ORG_PAT }}
+
+  static:
+    needs: [pre-flight]
+    if: github.event_name != 'pull_request_target' || github.event.label.name == 'cicd'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -q ruff
+      - run: python -m compileall -q nemo_automodel tests tools
+      - run: ruff check --select F821,F401,F822 nemo_automodel tests tools
+      - run: python tools/check_closure.py nemo_automodel tests
+
+  test:
+    needs: [pre-flight]
+    if: github.event_name != 'pull_request_target' || github.event.label.name == 'cicd'
+    runs-on: ${{ inputs.runner || 'nemo-ci-gcp-gpu-x2' }}
+    timeout-minutes: 40
+    env:
+      IMAGE: ${{ inputs.image || 'hijkzzz/molt:latest' }}
+    steps:
+      - name: Consume the trigger label
+        if: github.event_name == 'pull_request_target'
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            await github.rest.issues.removeLabel({
+              ...context.repo, issue_number: context.payload.pull_request.number, name: 'cicd',
+            }).catch(() => {});
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          # pull_request_target checks out the base by default; test the PR's head commit instead.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+      - name: Check out the parity reference (the base branch, or the previous commit on a push)
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          base="$BASE"
+          case "$base" in ''|0000000000000000000000000000000000000000) base="$(git rev-parse HEAD~1)" ;; esac
+          git cat-file -e "$base^{commit}" 2>/dev/null || git fetch -q origin "$base"
+          rm -rf base && mkdir base && git archive "$base" | tar -x -C base
+          echo "parity reference: $base"
+      # Authenticated pull: the ephemeral runner fetches the image every run, and anonymous Docker Hub
+      # pulls are rate-limited per IP.
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - run: docker pull -q "$IMAGE"
+      # `cd` explicitly: the image's login shell does not keep --workdir.
+      - name: Unit tests, in a CPU-only container alongside the GPU smoke
+        run: |
+          docker run -d --name unit --shm-size=8g --workdir /src --volume "$GITHUB_WORKSPACE:/src" "$IMAGE" \
+            bash -lc 'cd /src && pip install -q --target /tmp/pt pytest pytest-timeout && \
+              PYTHONPATH=/src:/tmp/pt timeout 25m python -m pytest -q -p no:cacheprovider --timeout=600 \
+                tests/unit_tests/models/qwen2 tests/unit_tests/models/qwen3 tests/unit_tests/models/qwen3_moe \
+                tests/unit_tests/models/qwen3_next tests/unit_tests/models/qwen3_5 tests/unit_tests/models/qwen3_5_moe \
+                tests/unit_tests/models/common tests/unit_tests/moe tests/unit_tests/distributed \
+                tests/unit_tests/checkpoint tests/unit_tests/_transformers'
+      - name: GPU smoke, Qwen dense / MoE / 3.6 (bit-exact vs base, train step, checkpoint round trip)
+        run: |
+          docker run --rm --gpus all --shm-size=16g --workdir /src --volume "$GITHUB_WORKSPACE:/src" "$IMAGE" \
+            bash -lc 'cd /src && export NVTE_FUSED_ATTN=1 NVTE_FLASH_ATTN=0 && mkdir -p /tmp/ref && \
+              for arch in dense moe qwen3_6; do \
+                PYTHONPATH=/src/base timeout 10m torchrun --nproc_per_node=2 base/tests/gpu_smoke/qwen_smoke.py --arch $arch --out /tmp/ref/$arch.pt && \
+                PYTHONPATH=/src      timeout 10m torchrun --nproc_per_node=2 tests/gpu_smoke/qwen_smoke.py      --arch $arch --ref /tmp/ref/$arch.pt --train; \
+              done'
+      - name: Unit test result
+        if: always()
+        run: |
+          rc=$(docker wait unit 2>/dev/null || echo 1)
+          docker logs unit 2>&1 | tail -200; docker rm -f unit >/dev/null 2>&1 || true
+          [ "$rc" = 0 ]
+      - name: Report a failed branch run to Slack
+        if: failure() && github.event_name == 'push'
+        env:
+          WEBHOOK: ${{ secrets.SLACK_CI_CHANNEL_WEBHOOK }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          [ -n "$WEBHOOK" ] || { echo "SLACK_CI_CHANNEL_WEBHOOK not set"; exit 0; }
+          curl -sS -X POST -H 'Content-type: application/json' \
+            --data "{\"text\": \"CICD AutoModel-Slim ${{ github.event_name }} run on automodel-slim FAILED: $RUN_URL\"}" "$WEBHOOK"
+
+  # The check branch protection requires. Reports only when the jobs actually ran: a PR event that did
+  # not carry the `cicd` label leaves the check at "Expected" instead of turning it green untested.
+  Nemo_CICD_Test:
+    needs: [static, test]
+    if: always() && !cancelled() && needs.test.result != 'skipped'
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "static: ${{ needs.static.result }}  test: ${{ needs.test.result }}"
+          [ "${{ needs.static.result }}" = success ] && [ "${{ needs.test.result }}" = success ]

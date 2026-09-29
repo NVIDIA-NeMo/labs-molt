@@ -196,3 +196,7 @@ docs/fern/versions/v0.4/pages/
 docs/fern/versions/v0.5/pages/
 
 training_logs/
+
+# Claude Code project settings (review effort level) are shared; other .claude state stays local.
+.claude/*
+!.claude/settings.json
