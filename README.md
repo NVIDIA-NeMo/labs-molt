@@ -83,56 +83,41 @@ rollout.
 
 ## 📦 Installation
 
-Clone the repo first: the launch scripts, agents and recipes live here, and the container mounts this
-checkout.
+Clone the repo: the launch scripts, agents and recipes live here, and the container mounts this checkout.
 
 ```bash
 git clone https://github.com/NVIDIA-NeMo/labs-molt.git
 cd labs-molt
 ```
 
-Then pick one of three ways to get the stack.
+### 🐳 Container (recommended)
 
-### 🐳 1. Container (recommended)
-
-`dockerfile/Dockerfile` bakes the full CUDA-13 stack: torch 2.13, vLLM, TransformerEngine, flash-attn,
-mamba, DeepEP and NVIDIA AutoModel, built for A100 / H100 / H200 / B200 / GB200. SFT and RL run as-is,
-with no local dependency work. Pull the prebuilt image, or build it yourself to change a pin:
+`dockerfile/Dockerfile` bakes the whole CUDA-13 stack (torch 2.13, vLLM, TransformerEngine, flash-attn,
+mamba, DeepEP, NVIDIA AutoModel) for A100 / H100 / H200 / B200 / GB200. SFT and RL run in it as-is.
 
 ```bash
 docker pull hijkzzz/molt:latest                                 # or a pinned release: hijkzzz/molt:0.1.10
-docker build -f dockerfile/Dockerfile -t hijkzzz/molt:latest .  # e.g. to change the CUDA / vLLM / AutoModel pins
+docker build -f dockerfile/Dockerfile -t hijkzzz/molt:latest .  # to change the CUDA / vLLM / AutoModel pins
 ```
 
-From 0.1.9 the Docker Hub tags are multi-arch (amd64 + arm64): the same `docker pull` works on x86 and on
-Grace-Blackwell (GB200 / GB300) hosts, and the one Dockerfile builds both. Run it on the matching host, or
-`docker buildx build --platform linux/amd64,linux/arm64 --push` to publish a tag.
+Tags from 0.1.9 are multi-arch (amd64 + arm64): the same pull works on x86 and on Grace-Blackwell hosts,
+and the one Dockerfile builds both (`docker buildx build --platform linux/amd64,linux/arm64 --push` to
+publish a tag).
 
-### 💻 2. Local editable install
+### 💻 Local install
 
 For development outside the container. It pulls the exact git-pinned AutoModel this repo is validated
-against (`setup.py`, `AUTOMODEL`), so R3 routing replay and Muon work out of the box:
+against (`setup.py`, `AUTOMODEL`), so R3 routing replay and Muon work out of the box.
 
 ```bash
 pip install -e ".[vllm]"
 ```
 
-> **Requires CUDA 13.** The git-pinned AutoModel is only compatible with the CUDA-13 torch build
-> (`torch==2.13.0+cu130`); a CUDA-12 environment will not work. If your host driver is older than 580
-> (native CUDA 13), use the container instead: it ships the CUDA forward-compatibility layer and enables
-> it automatically.
+Requires CUDA 13 (`torch==2.13.0+cu130`); a CUDA-12 environment will not work. With a host driver older
+than 580, use the container: it ships the CUDA forward-compatibility layer and enables it automatically.
 
-### 🐍 3. PyPI
-
-For checkout-free installs:
-
-```bash
-pip install "molt-rl[vllm]"
-```
-
-> **Note**: PyPI forbids git-pinned dependencies, so `molt-rl` depends on AutoModel's PyPI release
-> instead. It can lag the pin in `setup.py`, and R3 routing replay needs the newer pin (it fails fast with
-> instructions when the installed AutoModel is too old).
+The `molt-rl` package on PyPI cannot carry the git-pinned AutoModel, so it lags the pin and is not a
+supported install path right now. Use the container or the local install.
 
 ### 🪶 Optional backend: AutoModel-Slim
 
