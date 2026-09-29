@@ -1,0 +1,74 @@
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: "3e8a8703264a2f4a69428a0aa4dcb512790b2c8c"  # frozen: v6.0.0
+    hooks:
+    - id: end-of-file-fixer
+      # only include python files
+      files: \.py$
+    - id: trailing-whitespace
+      # only include python files
+      files: \.py$
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: "aab412d509121cb5f7533134b7e67f9fab59c682"  # frozen: v0.16.4
+    hooks:
+    - id: ruff-check
+      args: ["--fix"]
+    - id: ruff-format
+
+  - repo: https://github.com/PyCQA/bandit
+    rev: "92ae8b82fb422a639f0ed8d99e96cea769594e08"  # frozen: 1.9.4
+    hooks:
+    - id: bandit
+      args: ["-t", "B614"]
+      exclude: "^tests/"
+
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: "b84c4a0a90bd58c7d82ae8f0d4d5e77b1ddd3ce6"  # frozen: 0.12.5
+    hooks:
+      - id: uv-lock
+
+  - repo: local
+    hooks:
+      - id: no-underscore-md
+        name: "Disallow '_' in Markdown filenames"
+        language: system
+        # With `bash -c`, the first extra arg becomes `$0`, so `--` keeps matched filenames in `"$@"`.
+        entry: |
+          bash -c '
+            # Report the offending files
+            echo "[pre-commit] ERROR: Found Markdown files with underscores:" >&2
+            for file in "$@"; do
+              echo "  - $file (use hyphens instead)" >&2
+            done
+            exit 1
+          ' --
+        files: '.*\/[^\/]*_[^\/]*\.md$'
+        exclude: '^\.github/'
+        types: [file]
+      - id: lint-example-yamls
+        name: "Lint example YAMLs"
+        language: system
+        entry: python tools/lint_example_yamls.py
+        files: '^examples/.*\.ya?ml$'
+        types: [file]
+      - id: no-globals
+        name: "Disallow globals()"
+        language: system
+        entry: python tools/lint_no_globals.py
+        files: '^(nemo_automodel|tools|scripts|examples|tutorials)/.*\.py$|^app\.py$'
+        types: [file]

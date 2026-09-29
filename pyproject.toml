@@ -1,0 +1,539 @@
+# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+[build-system]
+requires = ["setuptools >= 80.10.2"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.packages.find]
+include = ["nemo_automodel", "nemo_automodel.*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "nemo_automodel.package_info.__version__" } # any module attribute compatible with ast.literal_eval
+readme = { file = "README.md", content-type = "text/markdown" }
+
+[project]
+description = "Slim NeMo AutoModel fork for molt: FSDP2/TP/EP/CP model backend for Qwen, DeepSeek V4.1, GLM 5.3, Gemma 4, Nemotron 3, Muse and Inkling."
+name = "nemo-automodel"
+dynamic = ["version"]
+readme = "README.md"
+authors = [{ name = "NVIDIA", email = "nemo-toolkit@nvidia.com" }]
+maintainers = [
+    { name = "Alexandros Koumparoulis", email = "akoumparouli@nvidia.com" },
+    { name = "Huiying Li", email = "huiyingl@nvidia.com" },
+    { name = "NVIDIA", email = "nemo-toolkit@nvidia.com" },
+]
+requires-python = ">=3.10"
+classifiers = [
+    # How mature is this project? Common values are
+    #  1 - Planning
+    #  2 - Pre-Alpha
+    #  3 - Alpha
+    #  4 - Beta
+    #  5 - Production/Stable
+    #  6 - Mature
+    #  7 - Inactive
+    'Development Status :: 5 - Production/Stable',
+    # Indicate who your project is intended for
+    'Intended Audience :: Developers',
+    'Intended Audience :: Science/Research',
+    'Intended Audience :: Information Technology',
+    # Indicate what your project relates to
+    'Topic :: Scientific/Engineering',
+    'Topic :: Scientific/Engineering :: Mathematics',
+    'Topic :: Scientific/Engineering :: Image Recognition',
+    'Topic :: Scientific/Engineering :: Artificial Intelligence',
+    'Topic :: Software Development :: Libraries',
+    'Topic :: Software Development :: Libraries :: Python Modules',
+    'Topic :: Utilities',
+    # Pick your license as you wish (should match "license" above)
+    'License :: OSI Approved :: Apache Software License',
+    # Supported python versions
+    'Programming Language :: Python :: 3',
+    'Programming Language :: Python :: 3.10',
+    'Programming Language :: Python :: 3.11',
+    'Programming Language :: Python :: 3.12',
+    # Additional Setting
+    'Environment :: Console',
+    'Natural Language :: English',
+    'Operating System :: OS Independent',
+]
+dependencies = [
+    "huggingface_hub",
+    "numpy",
+    "packaging",
+    "peft>=0.20.0",
+    "pyyaml",
+    "safetensors",
+    "torch>=2.6.0",
+    "transformers==5.15.1",
+    "torchao",
+    # 0.6.4 pins nvidia-cutlass-dsl==4.6.2, matching what flash_attn.cute requires at the
+    # pinned FLASH_ATTN_REF. Both import `cutlass`, so they have to agree. (0.6.1 pinned 4.6.0.)
+    "quack-kernels==0.6.4; sys_platform == 'linux'",
+]
+
+[project.optional-dependencies]
+# nvidia-cudnn-cu12 pin: This is required for GPTOSS TE support + faster cudnn attention (only on Linux where CUDA is available)
+# "nvidia-cudnn-cu12>=9.18.0.0; sys_platform == 'linux'",
+# Flash-attn version should be selected to satisfy TE requirements
+# https://github.com/NVIDIA/TransformerEngine/blob/v2.4/transformer_engine/pytorch/attention/dot_product_attention/utils.py#L108
+# "flash-attn==2.8.1",
+cuda = [
+    "causal-conv1d",
+    "mamba-ssm",
+    "nvidia-cudnn-frontend[cutedsl]>=1.27.0",
+    # This is required to prevent ONNX errors arising from TE
+    "onnxscript>=0.5.6",
+    "transformer-engine[pytorch]>=2.19.0",
+    # DeepSeek-V4 TileLang kernels (enable backend.attn="tilelang": sparse MLA
+    # attention, lightning indexer, and the external TileKernels MHC sinkhorn).
+    "tilelang>=0.1.11",
+    "tile-kernels==1.0.0",
+    # tilelang 0.1.11 does not cap its TVM ffi dependency, but 0.1.12 is
+    # incompatible with its bundled TVM. Keep pip installs on the known-good ffi.
+    # flash-attn-4 declares apache-tvm-ffi>=0.1.12,<0.2 but is installed --no-deps
+    # (docker/Dockerfile), so that bound is never resolved; the ffi actually present comes
+    # via quack-kernels (>=0.1.6,<0.2), which this cap pins to 0.1.11. FA4 does import
+    # tvm_ffi (flash_attn/cute/cache_utils.py, eagerly via flash_attn.cute.__init__), so it
+    # runs against an ffi older than it declares -- checked only as far as the symbols it
+    # references (tvm_ffi.Function, tvm_ffi.__version__), both present in 0.1.11.
+    # Do not lift this cap to satisfy FA4: 0.1.12 double-registers TVM FFI TypeAttrs and
+    # SIGABRTs the tilelang kernels.
+    "apache-tvm-ffi<=0.1.11",
+]
+fa = ["flash-attn<=2.8.3"]
+# ffpa-attn 0.2.3 first aligned on nvidia-cutlass-dsl==4.6.2 and quack-kernels==0.6.4,
+# i.e. the same cutlass-dsl flash_attn.cute (FA4) needs. 0.2.4 also fixes the persistent
+# CuTe cache callable ABI. 0.2.2 hard-pinned 4.6.0/0.6.1 and was unsatisfiable alongside
+# FA4, so do not relax this floor.
+ffpa = ["ffpa-attn>=0.2.4", "nvidia-cutlass-dsl==4.6.2"]
+fla = [
+    "flash-linear-attention>=0.4.2",
+]
+moe = [
+    "nemo-automodel[cuda]",
+    "nemo-automodel[fla]",
+    "deep_ep",
+]
+vlm = [
+    "numpy",
+    "numba",
+    "open-clip-torch",
+    "pillow",
+    "soundfile",
+    "timm<=1.0.22",
+]
+# Official MSA (Linux + SM100); the model-private patch supplies the CuTe DSL 4.6.2 fmax fix.
+
+[project.urls]
+Homepage = "https://docs.nvidia.com/deeplearning/nemo/user-guide/docs/en/stable/"
+Repository = "https://github.com/NVIDIA-NeMo/Automodel"
+Download = "https://github.com/NVIDIA-NeMo/Automodel/releases"
+
+[dependency-groups]
+build = ["setuptools", "torch<=2.10.0", "packaging", "psutil"]
+linting = [
+    "bandit~=1.9.0",
+    "pre-commit>=4.2.0",
+    "ruff~=0.12.0",
+    "import-linter~=2.4",
+    "ty>=0.0.20",
+]
+test = [
+    "coverage",
+    "pytest",
+    "pytest-shard",
+    "pytest-timeout",
+    "peft>=0.20.0",
+    "ruamel.yaml",
+]
+dev = [
+    "liger-kernel; (platform_machine == 'x86_64' and platform_system != 'Darwin')",
+    "dion @ git+https://github.com/microsoft/dion.git; platform_machine == 'x86_64' and platform_system != 'Darwin'",
+]
+
+[tool.uv]
+managed = true
+default-groups = ["build", "test"]
+no-build-isolation-package = [
+    "causal-conv1d",
+    "deep_ep",
+    "flash-attn",
+    "flash-attn-3",  # FA3: source build from Dao-AILab/flash-attention hopper/ (needs image torch)
+    "mamba-ssm",
+    "transformer-engine",
+    "transformer-engine-torch",
+]
+constraint-dependencies = [
+    "aiohttp>=3.14.3", # Address aiohttp security fixes through CVE-2026-69244
+    "cryptography>=48.0.1", # Address CVE GHSA-537c-gmf6-5ccf
+    "diffusers>=0.38.0",
+    "gitpython>=3.1.59",
+    "jaraco-context>=6.1.0", # Address CVE GHSA-58pv-8j8x-9vj2
+    "mako>=1.3.11",
+    "msgpack>=1.2.1", # Address CVE GHSA-6v7p-g79w-8964
+    "pillow>=12.3.0", # Address the Pillow 12.3.0 security fixes
+    "protobuf>=6.33.5", # Address CVE GHSA-7gcm-g887-7qv7
+    "pyarrow>=23.0.1", # Address CVE GHSA-rgxp-2hwp-jwgg
+    "pyasn1>=0.6.4", # Address GHSA-hm4w-wwcw-mr6r and GHSA-8ppf-4f7h-5ppj
+    "ray>=2.56.0", # Address CVE-2026-57516
+    "starlette>=1.3.1", # Address GHSA-wqp7-x3pw-xc5r and later Starlette security fixes
+    "setuptools>=80.10.2",
+    "soupsieve>=2.8.4", # Address GHSA-836r-79rf-4m37 and GHSA-2wc2-fm75-p42x
+    "urllib3>=2.7.0", # Address CVE GHSA-gm62-xv2j-4w53
+    "wandb>=0.28.2", # Address GO-2026-5970 in the golang.org/x/text bundled by wandb-core
+    "wheel>=0.46.2", # Address CVE GHSA-8rrh-rw8j-w5fx
+    "fonttools>=4.60.2", # Address CVE-2025-66034
+    "mlflow>=3.15.1", # No published security fix; advance past the reported 3.15.0
+    "thrift>=0.24.0", # Address CVE-2026-41608 and related Thrift 0.24.0 fixes
+    "tornado>=6.5.5",
+    "onnx>=1.21.0",
+    "onnx-ir>=0.1.16", # PyTorch 26.04 needs onnx_ir.schemas
+    "pyjwt>=2.12.0",
+    "pytest>=8.4.3",
+    "pygments>=2.20.0",
+    # tilelang 0.1.11 bundles its own TVM but leaves apache-tvm-ffi unpinned, so it
+    # resolves to 0.1.12, which double-registers TVM FFI TypeAttrs against the
+    # bundled TVM and breaks the tilelang kernels (SIGABRT/instability on the GPU
+    # paths). Upstream capped it to <=0.1.11 (tile-ai/tilelang#2373); mirror that.
+    "apache-tvm-ffi<=0.1.11",
+]
+override-dependencies = [
+    "nvidia-cublas==13.4.1.1; sys_platform == 'linux'",
+    # leptonai pins 7.0.0, which caps Starlette below its security-fixed 1.x releases
+    "prometheus-fastapi-instrumentator>=8.1.0",
+    # torchx (via nemo-run) caps urllib3<1.27; override to keep the CVE pin
+    "urllib3>=2.7.0",
+]
+prerelease = "allow"
+
+[tool.uv.extra-build-variables.deep-ep]
+CPLUS_INCLUDE_PATH = "/usr/local/cuda/include/cccl"
+
+[tool.uv.extra-build-variables.transformer-engine-torch]
+CPLUS_INCLUDE_PATH = "/usr/local/cuda/include:/usr/local/cuda/include/cccl"
+NVTE_BUILD_USE_NVIDIA_WHEELS = "1"
+NVTE_WITH_NCCL_EP = "0"
+
+[tool.uv.sources]
+megatron-fsdp = { git = "https://github.com/yuhezhang-ai/Megatron-LM.git", rev = "455389c480af6b3acdca74c7830c68b3274eb083", subdirectory = "megatron/core/distributed/fsdp/src" }
+deep_ep = { git = "https://github.com/deepseek-ai/DeepEP.git", rev = "10d4dd7377d5bce900fbb4b80cce863764892b95" }
+cut-cross-entropy = { git = "https://github.com/apple/ml-cross-entropy.git", rev = "87a86aba72cfd2f0d8abecaf81c13c4528ea07d8" }
+liger-kernel = { git = "https://github.com/linkedin/Liger-Kernel.git", rev = "1f1a4b8d6a6c3c1ddb3573a46480c41cef25bde6" }
+fmha-sm100 = { git = "https://github.com/MiniMax-AI/MSA.git", rev = "80434d7f67877c6570ca19cac444b84bc9855dac" }
+onnxruntime-gpu = { index = "onnxruntime-cuda-13" }
+torch = [
+  { index = "pytorch-cpu", marker = "sys_platform != 'linux' and sys_platform != 'darwin'" },
+  { index = "pytorch-cu130", marker = "sys_platform == 'linux'" },
+  { index = "pypi", marker = "sys_platform == 'darwin'" },
+]
+torchvision = [
+  { index = "pytorch-cpu", marker = "sys_platform != 'linux' and sys_platform != 'darwin'" },
+  { index = "pytorch-cu130", marker = "sys_platform == 'linux'" },
+  { index = "pypi", marker = "sys_platform == 'darwin'" },
+]
+
+[[tool.uv.index]]
+name = "pypi"
+url = "https://pypi.org/simple"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
+explicit = true
+
+[[tool.uv.index]]
+name = "onnxruntime-cuda-13"
+url = "https://aiinfra.pkgs.visualstudio.com/PublicPackages/_packaging/onnxruntime-cuda-13/pypi/simple/"
+explicit = true
+
+# Augment build dependencies for packages that need torch at build time
+[tool.uv.extra-build-dependencies]
+deep_ep = [{ requirement = "torch", match-runtime = true }]
+transformer-engine = [{ requirement = "torch", match-runtime = true }]
+transformer-engine-torch = [{ requirement = "torch", match-runtime = true }]
+
+# Needed when building from source
+[[tool.uv.dependency-metadata]]
+name = "deep_ep"
+# This version has to match the version in the commit/rev/tag used
+version = "v1.2.1+10d4dd7"
+requires-dist = ["torch", "packaging", "ninja"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+
+[tool.coverage.paths]
+source = ["nemo_automodel", "/opt/Automodel/nemo_automodel", "/home/runner/work/Automodel/Automodel/nemo_automodel"]
+
+[tool.coverage.run]
+source = ["nemo_automodel"]
+parallel = true
+concurrency = ["thread", "multiprocessing"]
+omit = [
+    "nemo_automodel/components/models/kimi_k3/kda_fused/chunk_kda_bwd_triton.py",
+    "nemo_automodel/components/checkpoint/_backports/*.py",
+    "tests/*",
+    "nemo_automodel/components/_peft/lora_kernel.py",
+    "nemo_automodel/components/loss/triton/te_cross_entropy.py",
+    "nemo_automodel/components/moe/megatron/*.py",
+    # Kimi-K3 Triton kernels: coverage.py cannot trace @triton.jit bodies; the Python wrappers
+    # are exercised by tests/unit_tests/models/kimi_k3/test_situ_triton.py and test_attn_res_triton.py
+    "nemo_automodel/components/models/kimi_k3/situ_triton.py",
+    "nemo_automodel/components/models/kimi_k3/attn_res_triton.py",
+    # Vendored from https://github.com/uccl-project/uccl/tree/main/ep/deep_ep_wrapper
+    "nemo_automodel/components/moe/uccl_ep/_buffer.py",
+    "nemo_automodel/components/moe/uccl_ep/_utils.py",
+    # Vendored DeepSeek V4 TileLang kernels (Miles upstream, Apache-2.0)
+    "nemo_automodel/components/models/deepseek_v4/kernels/*.py",
+    "config.py",
+    "config-3.py",
+    # transformer v5 backports
+    "nemo_automodel/_transformers/tokenization/tokenization_mistral_common.py",
+    # requires databricks
+    "nemo_automodel/components/datasets/llm/delta_lake_dataset.py",
+    # Weird file suddenly appearing in coverage
+    "_remote_module_non_scriptable",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+exclude = [
+   "tests/",
+]
+
+[tool.ruff.format]
+quote-style = "double"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+[tool.ruff.lint]
+# Enable all `pydocstyle` rules, limiting to those that adhere to the
+# Google convention via `convention = "google"`, below.
+select = [
+    "F541", # f-string without any placeholders
+    "F841", # local variable assigned but never used
+    "F401", # imported but unused
+    "E741", # ambiguous variable name
+    "F821", # undefined name
+    "E266", # too many leading '#' for block comment
+    "E722", # do not use bare except
+    "I",    # isort
+    "D101", # docstring
+    "D103",
+    "S301", # no pickle
+    "S403", # no pickle
+    "UP045", # Prefer `T | None` over `Optional[T]`
+]
+
+ignore = [
+    "E501", # Line too long - handled by formatter
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+# Section to exclude errors for different file types
+[tool.ruff.lint.per-file-ignores]
+# Ignore all directories named `tests`.
+"tests/**" = ["D"]
+# Ignore all files that end in `_test.py`.
+"*_test.py" = ["D"]
+# Ignore F401 (import but unused) in __init__.py
+"__init__.py" = ["F401"]
+# Baseline existing public APIs that still need docstrings. New files and files
+# not listed here fail D101/D103 normally.
+"nemo_automodel/components/models/baichuan/configuration.py" = ["D101"]
+"nemo_automodel/components/models/baichuan/model.py" = ["D101"]
+"nemo_automodel/components/models/deepseek_v3/layers.py" = ["D101"]
+"nemo_automodel/components/models/deepseek_v3/model.py" = ["D101"]
+"nemo_automodel/components/models/deepseek_v3/rope_utils.py" = ["D103"]
+"nemo_automodel/components/models/deepseek_v3/state_dict_adapter.py" = ["D101", "D103"]
+"nemo_automodel/components/models/deepseek_v32/config.py" = ["D101"]
+"nemo_automodel/components/models/deepseek_v4/model.py" = ["D101"]
+"nemo_automodel/components/models/gemma4_moe/model.py" = ["D101"]
+"nemo_automodel/components/models/glm4_moe/model.py" = ["D101"]
+"nemo_automodel/components/models/glm4_moe_lite/model.py" = ["D101"]
+"nemo_automodel/components/models/glm_moe_dsa/model.py" = ["D101"]
+"nemo_automodel/components/models/gpt_oss/layers.py" = ["D101"]
+"nemo_automodel/components/models/gpt_oss/model.py" = ["D101"]
+"nemo_automodel/components/models/gpt_oss/rope_utils.py" = ["D101", "D103"]
+"nemo_automodel/components/models/gpt_oss/state_dict_adapter.py" = ["D101"]
+"nemo_automodel/components/models/hy_v3/model.py" = ["D101"]
+"nemo_automodel/components/models/kimivl/model.py" = ["D101"]
+"nemo_automodel/components/models/llama_bidirectional/export_onnx.py" = ["D103"]
+"nemo_automodel/components/models/llava_onevision/rice_vit.py" = ["D101", "D103"]
+"nemo_automodel/components/models/llava_onevision/state_dict_adapter.py" = ["D101"]
+"nemo_automodel/components/models/mimo_v25/model.py" = ["D101", "D103"]
+"nemo_automodel/components/models/mimo_v25/state_dict_adapter.py" = ["D101"]
+"nemo_automodel/components/models/minimax_m2/model.py" = ["D101"]
+"nemo_automodel/components/models/minimax_m2/state_dict_adapter.py" = ["D103"]
+"nemo_automodel/components/models/mistral3/model.py" = ["D101", "D103"]
+"nemo_automodel/components/models/mistral4/configuration.py" = ["D101"]
+"nemo_automodel/components/models/mistral4/model.py" = ["D101"]
+"nemo_automodel/components/models/qwen3_moe/model.py" = ["D101"]
+"nemo_automodel/components/models/qwen3_next/layers.py" = ["D101"]
+"nemo_automodel/components/models/qwen3_next/model.py" = ["D101"]
+"nemo_automodel/components/models/qwen3_vl_moe/model.py" = ["D101"]
+"nemo_automodel/recipes/retrieval/train_bi_encoder.py" = ["D103"]
+"nemo_automodel/recipes/retrieval/train_cross_encoder.py" = ["D101", "D103"]
+"nemo_automodel/components/speculative/dspark/common.py" = ["D101", "D103"]
+"nemo_automodel/components/speculative/dspark/config.py" = ["D103"]
+"nemo_automodel/components/speculative/dspark/loss.py" = ["D103"]
+"nemo_automodel/components/speculative/dspark/markov_head.py" = ["D101", "D103"]
+"nemo_automodel/components/speculative/dspark/draft_qwen3.py" = ["D101"]
+"nemo_automodel/components/speculative/dspark/draft_gemma4.py" = ["D101"]
+
+
+[tool.ruff.lint.isort]
+known-third-party = ["datasets", "transformers", "wandb"]
+
+[tool.importlinter]
+root_package = "nemo_automodel"
+exclude_type_checking_imports = true
+
+[[tool.importlinter.contracts]]
+name = "Components must not import each other"
+type = "independence"
+modules = [
+    "nemo_automodel.components.checkpoint",
+    "nemo_automodel.components.config",
+    "nemo_automodel.components.datasets",
+    "nemo_automodel.components.distributed",
+    "nemo_automodel.components.flow_matching",
+    "nemo_automodel.components.launcher",
+    "nemo_automodel.components.loggers",
+    "nemo_automodel.components.loss",
+    "nemo_automodel.components.optim",
+    "nemo_automodel.components.training",
+    "nemo_automodel.components.utils",
+]
+ignore_imports = [
+    # Dion needs the FSDP DP mesh resolver so its optimizer mesh matches parameter sharding.
+    "nemo_automodel.components.optim.dion -> nemo_automodel.components.distributed.mesh_utils",
+]
+
+# ty: type checking (https://github.com/astral-sh/ty)
+# Default: permissive. Strict checks are opt-in per-file via overrides below.
+# Phase 1 modules: launcher, attention, config, optim, loggers
+# To advance to the next phase, move module paths from the "Phase 2" comment
+# into the active overrides list and fix any new errors.
+[tool.ty.environment]
+python-version = "3.10"
+
+[tool.ty.src]
+include = ["nemo_automodel", "examples"]
+exclude = [
+    "tests/**",
+    "nemo_automodel/components/checkpoint/_backports/**",
+]
+
+[tool.ty.analysis]
+# Optional dependencies that ty cannot resolve in this env but are legitimately
+# imported under try/except or feature gates. Keep this list narrow so that
+# accidental stale imports (e.g. after a package reorg) are still surfaced.
+allowed-unresolved-imports = [
+    "bitsandbytes",
+    "causal_conv1d",
+    "comet_ml",
+    "cut_cross_entropy",
+    "cut_cross_entropy.**",
+    "databricks",
+    "databricks.**",
+    "deep_ep",
+    "deep_ep.**",
+    "dion",
+    "fast_hadamard_transform",
+    "ffpa_attn",
+    "ffpa_attn.**",
+    "fla.**",
+    "flash_attn",
+    "liger_kernel.**",
+    "lmdb",
+    "mamba_ssm.**",
+    "megatron.**",
+    "mlflow",
+    "mlflow.**",
+    "nemo_automodel.components.datasets.llm.megatron.helpers_cpp",
+    "nemo_run",
+    "pynvml",
+    "sky",
+    "torch.distributed._mesh_layout",
+    "transformer_engine",
+    "transformer_engine.**",
+    "transformer_engine_torch",
+    "transformers.tokenization_utils",
+    "uccl",
+    "uccl.**",
+    "wandb",
+    "wandb.**",
+]
+
+[tool.ty.rules]
+unused-ignore-comment = "warn"
+possibly-missing-attribute = "ignore"
+
+# Phase 1: small, well-typed, leaf-dependency modules
+[[tool.ty.overrides]]
+include = [
+    "nemo_automodel/components/attention/**",
+    "nemo_automodel/components/config/**",
+    "nemo_automodel/components/launcher/**",
+    "nemo_automodel/components/loggers/**",
+    "nemo_automodel/components/optim/**",
+]
+
+[tool.ty.overrides.rules]
+# Stricter checking for Phase 1 modules
+possibly-unresolved-reference = "error"
+unresolved-import = "error"
+
+# Phase 2 (uncomment when ready):
+# [[tool.ty.overrides]]
+# include = [
+#     "nemo_automodel/components/loss/**",
+#     "nemo_automodel/components/quantization/**",
+# ]
+#
+# [tool.ty.overrides.rules]
+# possibly-unresolved-reference = "error"
+# unresolved-import = "error"
+
+# Phase 3 (uncomment when ready):
+# [[tool.ty.overrides]]
+# include = [
+#     "nemo_automodel/components/training/**",
+#     "nemo_automodel/components/distributed/**",
+#     "nemo_automodel/components/utils/**",
+# ]
+#
+# [tool.ty.overrides.rules]
+# possibly-unresolved-reference = "error"
+# unresolved-import = "error"
