@@ -14,7 +14,7 @@
 # limitations under the License.
 
 # The review runs Claude Code inside a checkout of this repository, so it picks up the project
-# settings in .claude/settings.json: that is where the effort level (xhigh) is set.
+# settings in .claude/settings.json: that is where the effort level (high) is set.
 # GitHub runs issue_comment workflows from the default branch, so molt's copy of this file is the one
 # that fires for PRs against automodel-slim; this copy documents the review contract for this branch.
 name: Claude Code Review
