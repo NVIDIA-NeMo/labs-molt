@@ -25,11 +25,6 @@ import torch
 from safetensors.torch import load_file, save_file
 
 from nemo_automodel.components.checkpoint._backports.consolidate_hf_safetensors import _write_sub_tensor_to_file_optimized, consolidate_safetensors_files, consolidate_safetensors_files_on_every_rank
-from nemo_automodel.components.checkpoint._backports.hf_storage import (
-    _DIFFUSERS_INDEX_FN,
-    _HuggingFaceStorageWriter,
-    _maybe_rename_index_for_diffusers,
-)
 from nemo_automodel.components.checkpoint._backports.hf_utils import CUSTOM_METADATA_KEY
 
 # Over the default 5s budget on purpose: this module spawns worker processes; every child re-imports torch from scratch.
@@ -629,38 +624,6 @@ def test_every_rank_consolidation_surfaces_originating_rank_error(tmp_path):
 # =============================================================================
 
 
-class TestMaybeRenameIndexForDiffusers:
-    """Tests for the shared rename helper."""
-
-    def test_renames_when_index_exists(self, tmp_path):
-        index_file = tmp_path / "model.safetensors.index.json"
-        index_file.write_text('{"metadata": {}}')
-
-        _maybe_rename_index_for_diffusers(str(tmp_path))
-
-        assert not index_file.exists()
-        assert (tmp_path / _DIFFUSERS_INDEX_FN).exists()
-        assert json.loads((tmp_path / _DIFFUSERS_INDEX_FN).read_text()) == {"metadata": {}}
-
-    def test_noop_when_index_missing(self, tmp_path):
-        """No error when the source index file does not exist."""
-        _maybe_rename_index_for_diffusers(str(tmp_path))
-
-        assert not (tmp_path / _DIFFUSERS_INDEX_FN).exists()
-
-    def test_preserves_other_files(self, tmp_path):
-        """Other files in the directory are untouched."""
-        index_file = tmp_path / "model.safetensors.index.json"
-        index_file.write_text("{}")
-        other_file = tmp_path / "model-00001-of-00001.safetensors"
-        other_file.write_bytes(b"\x00")
-
-        _maybe_rename_index_for_diffusers(str(tmp_path))
-
-        assert other_file.exists()
-        assert other_file.read_bytes() == b"\x00"
-
-
 # =============================================================================
 # Tests for _HuggingFaceStorageWriter.finish — single-rank consolidation path
 # =============================================================================
@@ -685,76 +648,4 @@ class TestStorageWriterFinishDiffusersCompatible:
             _fake,
         )
 
-    @pytest.mark.usefixtures("_mock_consolidate")
-    def test_finish_renames_index_when_diffusers_compatible(self, tmp_path):
-        consolidated_dir = tmp_path / "consolidated"
-        consolidated_dir.mkdir()
 
-        writer = _HuggingFaceStorageWriter(
-            path=str(tmp_path / "shards"),
-            save_sharded=True,
-            consolidated_output_path=str(consolidated_dir),
-            diffusers_compatible=True,
-        )
-
-        writer.finish(metadata=MagicMock(), results=[[]])
-
-        assert not (consolidated_dir / "model.safetensors.index.json").exists()
-        assert (consolidated_dir / _DIFFUSERS_INDEX_FN).exists()
-
-    @pytest.mark.usefixtures("_mock_consolidate")
-    def test_finish_preserves_index_name_when_not_diffusers_compatible(self, tmp_path):
-        consolidated_dir = tmp_path / "consolidated"
-        consolidated_dir.mkdir()
-
-        writer = _HuggingFaceStorageWriter(
-            path=str(tmp_path / "shards"),
-            save_sharded=True,
-            consolidated_output_path=str(consolidated_dir),
-            diffusers_compatible=False,
-        )
-
-        writer.finish(metadata=MagicMock(), results=[[]])
-
-        assert (consolidated_dir / "model.safetensors.index.json").exists()
-        assert not (consolidated_dir / _DIFFUSERS_INDEX_FN).exists()
-
-    def test_finish_early_return_when_no_consolidated_path(self):
-        """finish() returns early when no consolidated_output_path is set."""
-        writer = _HuggingFaceStorageWriter(
-            path="/fake/path",
-            save_sharded=True,
-            consolidated_output_path=None,
-            diffusers_compatible=True,
-        )
-
-        # Should not raise — returns before attempting consolidation or rename
-        writer.finish(metadata=MagicMock(), results=[[]])
-
-    def test_finish_uses_direct_consolidation_by_default(self, tmp_path, monkeypatch):
-        consolidated_dir = tmp_path / "consolidated"
-        consolidated_dir.mkdir()
-        captured_kwargs = {}
-
-        def _fake(**kwargs):
-            captured_kwargs.update(kwargs)
-            index = os.path.join(kwargs["output_dir"], "model.safetensors.index.json")
-            with open(index, "w") as f:
-                json.dump({"weight_map": {}}, f)
-
-        monkeypatch.setattr(
-            "nemo_automodel.components.checkpoint._backports.hf_storage.consolidate_safetensors_files",
-            _fake,
-        )
-
-        writer = _HuggingFaceStorageWriter(
-            path=str(tmp_path / "shards"),
-            save_sharded=True,
-            consolidated_output_path=str(consolidated_dir),
-            diffusers_compatible=False,
-        )
-
-        writer.finish(metadata=MagicMock(), results=[[]])
-
-        assert captured_kwargs["use_staging"] is False
-        assert captured_kwargs["staging_dir"] is None

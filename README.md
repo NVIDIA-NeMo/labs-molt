@@ -113,3 +113,16 @@ image already contains all of them. The same tree with full upstream history is 
 
 Base: NVIDIA-NeMo/Automodel `8f73178ca51d4c1e55ccf05df5da6540a9e24f7e` (the commit molt pinned
 before this branch existed). Apache-2.0, unchanged; upstream copyright notices are kept in every file.
+
+## CI
+
+`.github/workflows/automodel-slim-ci.yml` runs on pushes and PRs to this branch and finishes in about
+ten minutes. A CPU job runs `compileall`, `ruff` and `tools/check_closure.py` (every import and every
+`nemo_automodel.*` string resolves). A job on molt's two-GPU runner, inside molt's public image,
+runs the unit tests of the Qwen / MoE / distributed / checkpoint / loading areas and then
+`tests/gpu_smoke/qwen_smoke.py`: seeded few-layer builds of Qwen3 dense (FSDP2, THD packing),
+Qwen3-MoE (EP2, THD packing) and Qwen3.6-MoE (EP2), constructed the way molt builds its actor.
+The base branch is built in the same job and its forward logits must match the PR bit for bit;
+the PR tree then runs a train step with the mesh-aware grad clip and a DCP save / reload /
+consolidated-HF-export round trip. Real-weight validation (bit-exact logits against upstream,
+molt RL e2e) is done on a cluster and recorded in the commit messages.

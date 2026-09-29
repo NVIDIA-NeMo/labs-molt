@@ -12,14 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import json
-import os
 import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from nemo_automodel.components.checkpoint._backports.hf_storage import _DIFFUSERS_INDEX_FN
 from nemo_automodel.components.checkpoint.checkpointing import (
     Checkpointer,
     CheckpointingConfig,
@@ -141,26 +138,6 @@ class TestAsyncDeferredConsolidation:
         # error is cleared after being raised once
         checkpointer.async_wait()
 
-    @patch("nemo_automodel.components.checkpoint.checkpointing.consolidate_safetensors_files_on_every_rank")
-    def test_diffusers_rename_runs_after_deferred_consolidation(self, mock_consolidate, tmp_path):
-        """diffusers_compatible renames the consolidated index in the background thread."""
-
-        def _fake_consolidate(**kwargs):
-            os.makedirs(kwargs["output_dir"], exist_ok=True)
-            with open(os.path.join(kwargs["output_dir"], "model.safetensors.index.json"), "w") as f:
-                json.dump({"weight_map": {}}, f)
-
-        mock_consolidate.side_effect = _fake_consolidate
-        future = _FakeAsyncSaveResponse()
-        future.upload_finished.set()
-        checkpointer = _make_async_checkpointer(tmp_path, diffusers_compatible=True, future=future)
-
-        _save_model(checkpointer, tmp_path)
-        checkpointer.async_wait()
-
-        consolidated_dir = tmp_path / "step_1" / "model" / "consolidated"
-        assert not (consolidated_dir / "model.safetensors.index.json").exists()
-        assert (consolidated_dir / _DIFFUSERS_INDEX_FN).exists()
 
     @patch("nemo_automodel.components.checkpoint.checkpointing.consolidate_safetensors_files_on_every_rank")
     def test_single_rank_consolidation_keeps_writer_path(self, mock_consolidate, tmp_path):

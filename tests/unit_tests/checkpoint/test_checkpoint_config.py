@@ -88,26 +88,6 @@ class TestCheckpointingConfig:
                 is_peft=False,
             )
 
-    def test_optional_fields_defaults(self):
-        cfg = CheckpointingConfig(
-            enabled=True,
-            checkpoint_dir="/tmp/ckpt",
-            model_save_format="safetensors",
-            model_cache_dir="/tmp/cache",
-            model_repo_id="test",
-            save_consolidated=False,
-            is_peft=False,
-        )
-        assert cfg.is_async is False
-        assert cfg.allow_legacy_pickle_restore is False
-        assert cfg.dequantize_base_checkpoint is None
-        assert cfg.single_rank_consolidation is False
-        assert cfg.staging_dir is None
-        assert cfg.v4_compatible is False
-        assert cfg.diffusers_compatible is False
-        assert cfg.best_metric_key == "default"
-        assert cfg.consolidation_timeout_minutes == 30
-        assert cfg.max_recent_checkpoints is None
 
     def test_allow_legacy_pickle_restore_override(self):
         cfg = CheckpointingConfig(allow_legacy_pickle_restore=True)

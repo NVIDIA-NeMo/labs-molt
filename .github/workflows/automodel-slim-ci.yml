@@ -1,0 +1,77 @@
+name: AutoModel-Slim CI
+
+# CI for the automodel-slim orphan branch, sized to finish in ~10 minutes and to protect the Qwen
+# dense / MoE paths molt runs:
+#   static  (ubuntu)      compileall, ruff, import-closure checks                      ~1 min
+#   gpu     (2-GPU runner, molt image)
+#           unit tests of the Qwen / MoE / distributed / checkpoint areas               ~4 min
+#           qwen_smoke.py: seeded few-layer Qwen3 dense, Qwen3-MoE (EP2) and Qwen3.6
+#           builds the way molt builds its actor; forward logits must be bit-exact
+#           against the base branch built in the same job, then a train step and a
+#           DCP save / reload / HF-export round trip                                   ~3 min
+# Real-weight validation (bit-exact logits vs upstream, molt RL e2e) is done on a cluster; see README.
+on:
+  push:
+    branches: [automodel-slim]
+  pull_request:
+    branches: [automodel-slim]
+  workflow_dispatch:
+    inputs:
+      image:
+        description: molt image to test in
+        default: hijkzzz/molt:latest
+        type: string
+
+concurrency:
+  group: automodel-slim-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: ${{ inputs.image || 'hijkzzz/molt:latest' }}
+  BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before }}
+
+jobs:
+  static:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -q ruff
+      - run: python -m compileall -q nemo_automodel tests tools
+      - run: ruff check --select F821,F401,F822 nemo_automodel tests tools
+      - run: python tools/check_closure.py nemo_automodel tests
+
+  gpu:
+    runs-on: nemo-ci-gcp-gpu-x2
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check out the base branch for the logits parity reference
+        run: |
+          set -eu
+          base="$BASE_SHA"
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then base="$(git rev-parse HEAD~1)"; fi
+          git fetch -q --depth 1 origin "$base" || git fetch -q origin automodel-slim
+          rm -rf base && mkdir base && git archive "$base" | tar -x -C base
+          echo "parity reference: $base"
+      - run: docker pull -q "$IMAGE"
+      - name: Unit tests (Qwen, MoE, distributed, checkpoint, loading)
+        run: |
+          docker run --rm --shm-size=16g --workdir /src --volume "$GITHUB_WORKSPACE:/src" "$IMAGE" \
+            bash -lc 'pip install -q --target /tmp/pt pytest pytest-timeout && \
+              PYTHONPATH=/src:/tmp/pt timeout 15m python -m pytest -q -p no:cacheprovider --timeout=600 \
+                tests/unit_tests/models/qwen2 tests/unit_tests/models/qwen3 tests/unit_tests/models/qwen3_moe \
+                tests/unit_tests/models/qwen3_next tests/unit_tests/models/qwen3_5 tests/unit_tests/models/qwen3_5_moe \
+                tests/unit_tests/models/common tests/unit_tests/moe tests/unit_tests/distributed \
+                tests/unit_tests/checkpoint tests/unit_tests/_transformers'
+      - name: GPU smoke, base tree then PR tree (bit-exact logits, train step, checkpoint round trip)
+        run: |
+          docker run --rm --gpus all --shm-size=16g --workdir /src --volume "$GITHUB_WORKSPACE:/src" "$IMAGE" \
+            bash -lc 'export NVTE_FUSED_ATTN=1 NVTE_FLASH_ATTN=0 && mkdir -p /tmp/ref && \
+              for arch in dense moe qwen3_6; do \
+                PYTHONPATH=/src/base timeout 10m torchrun --nproc_per_node=2 /src/base/tests/gpu_smoke/qwen_smoke.py --arch $arch --out /tmp/ref/$arch.pt && \
+                PYTHONPATH=/src      timeout 10m torchrun --nproc_per_node=2 /src/tests/gpu_smoke/qwen_smoke.py      --arch $arch --ref /tmp/ref/$arch.pt --train; \
+              done'
