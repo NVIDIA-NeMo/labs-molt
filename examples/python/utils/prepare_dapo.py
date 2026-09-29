@@ -92,6 +92,18 @@ def main():
     print(f"deduped to {len(train_ds)} unique train rows")
 
     eval_ds = load_dataset(args.eval_source, split=args.eval_split)
+    seen.clear()
+    keep_indices = []
+    for idx, row in enumerate(eval_ds):
+        try:
+            key = row["prompt"][0]["content"]
+        except (KeyError, IndexError, TypeError):
+            key = str(row.get("prompt"))
+        if key not in seen:
+            seen.add(key)
+            keep_indices.append(idx)
+    eval_ds = eval_ds.select(keep_indices)
+    print(f"deduped to {len(eval_ds)} unique eval rows")
     if args.max_eval is not None:
         eval_ds = eval_ds.select(range(min(args.max_eval, len(eval_ds))))
 
