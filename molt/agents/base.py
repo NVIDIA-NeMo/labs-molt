@@ -424,6 +424,8 @@ class StepEnvRunner(Runner):
                 feedback_tokens = _tokenize_feedback(
                     hf_tokenizer, result.observation, result.images, trajectory, max_length
                 )
+                feedback_budget = max(0, max_length - len(trajectory.observation_tokens) - trajectory.image_budget)
+                feedback_tokens = feedback_tokens[:feedback_budget]
                 trajectory.append_feedback(action_text, result.observation, feedback_tokens)
 
                 if result.sampling_params is not None:

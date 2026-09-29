@@ -140,3 +140,9 @@ def test_env_close_failure_keeps_the_trajectory():
     trajectory = _execute(_CloseRaisesEnv)
     assert trajectory.reward == 1.0
     assert _CloseRaisesEnv.closes == 1
+
+
+def test_step_env_runner_caps_feedback_at_max_length():
+    trajectory = _execute(_NeverEndsEnv, max_length=32)
+    assert len(trajectory.observation_tokens) == 32
+    assert trajectory.truncated is True
