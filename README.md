@@ -93,7 +93,7 @@ cd labs-molt
 
 Then pick one of three ways to get the stack.
 
-### 1. Container (recommended)
+### 🐳 1. Container (recommended)
 
 `dockerfile/Dockerfile` bakes the full CUDA-13 stack: torch 2.13, vLLM, TransformerEngine, flash-attn,
 mamba, DeepEP and NVIDIA AutoModel, built for A100 / H100 / H200 / B200 / GB200. SFT and RL run as-is,
@@ -108,7 +108,7 @@ From 0.1.9 the Docker Hub tags are multi-arch (amd64 + arm64): the same `docker 
 Grace-Blackwell (GB200 / GB300) hosts, and the one Dockerfile builds both. Run it on the matching host, or
 `docker buildx build --platform linux/amd64,linux/arm64 --push` to publish a tag.
 
-### 2. Local editable install
+### 💻 2. Local editable install
 
 For development outside the container. It pulls the exact git-pinned AutoModel this repo is validated
 against (`setup.py`, `AUTOMODEL`), so R3 routing replay and Muon work out of the box:
@@ -122,7 +122,7 @@ pip install -e ".[vllm]"
 > (native CUDA 13), use the container instead: it ships the CUDA forward-compatibility layer and enables
 > it automatically.
 
-### 3. PyPI
+### 🐍 3. PyPI
 
 For checkout-free installs:
 
@@ -134,7 +134,7 @@ pip install "molt-rl[vllm]"
 > instead. It can lag the pin in `setup.py`, and R3 routing replay needs the newer pin (it fails fast with
 > instructions when the installed AutoModel is too old).
 
-### Optional backend: AutoModel-Slim
+### 🪶 Optional backend: AutoModel-Slim
 
 **The default is upstream NVIDIA AutoModel**, pinned in `setup.py`; every command above installs it, and
 nothing in this subsection applies unless you opt in.
@@ -165,7 +165,7 @@ the same `cicd` label check and `/claude review` as this repo.
 
 ## 🚀 Quick Start
 
-### SFT
+### 📘 SFT
 
 ```bash
 torchrun --standalone --nproc_per_node=8 -m molt.cli.train_sft \
@@ -179,7 +179,7 @@ torchrun --standalone --nproc_per_node=8 -m molt.cli.train_sft \
 
 SFT uses the same AutoModel/FSDP2 model-loading path as RL.
 
-### RL
+### 🎮 RL
 
 ```bash
 python3 -m molt.cli.train_rl_ray \
@@ -256,27 +256,27 @@ RL on vLLM. Read every line that touches your gradients, in plain PyTorch.
 > (verl `86e8123`, slime `243773c`, OpenRLHF `b3d2927`).
 
 ## 🎯 Supported Scope
-### Training & runtime
+### ⚙️ Training & runtime
 - **SFT** — `molt.cli.train_sft`
 - **RL** — vLLM-backed online RL via `molt.cli.train_rl_ray`
 - **Runtime** — Ray placement, async rollout queues, vLLM engines, partial rollout sync
 - **Model scale** — AutoModel + FSDP2 with TP / EP / CP, MoE-native — e.g. DeepSeek-V3 at `--fsdp.ep_size 256`
 - **Model backend** — **NVIDIA AutoModel is the primary path** — native CP / EP / TP, custom MoE+EP parallelizer, TE fused attention; everything model-side aligns with AutoModel's own recipes. The HF transformers path is a **non-preferred fallback** (AutoModel drops to it only when a model has no native class) supporting **text + flash_attention_2 + packing only — no CP / EP / TP**
 - **Optimizer** — `adam` (default), with CPU offload for the largest actors (`--fsdp.offload optimizer`). `muon` (Newton–Schulz via Dion: Muon for 2D weights and grouped MoE experts, AdamW for embeddings / head / norms) is **experimental** — runs distributed (FSDP / EP) but has shown no consistent win over `adam` yet, which stays the recommended default
-### Agents & rewards
+### 🤖 Agents & rewards
 | Area | Support |
 |---|---|
 | Agent interface | `--train.agent_path` with `Env` or `ChatAgent` subclass + an `AgentRunner` |
 | Reward source | `Result(reward=...)` returned from `Env.step` or `ChatAgent.run` |
 | Modalities | Text and VLM prompts, including image payloads |
 | Chat templates | Assistant spans (SFT loss mask + multi-turn rollout stitching) are derived from the model's own chat template — no hard-coded markers. Verified on ChatML (Qwen3.x, Nemotron-Omni), Kimi-K2.6, GLM, Gemma, and DeepSeek |
-### Algorithms
+### 🧮 Algorithms
 - **Estimators** — `reinforce`, `reinforce_baseline`, `rloo`, `grpo`, `dr_grpo`, `gae` (PPO), `on_policy_distill`
 - **PPO critic** — `--algo.advantage.estimator gae` adds a value model: its own Ray group (`CriticModelActor`), colocated on the actor's GPUs by default or disaggregatable, GAE advantages (`--algo.advantage.lam`) + clipped value loss (`--critic.value_clip`), own optimizer/LR (`--critic.adam.lr`) and resumable `_critic` checkpoint. Built on `NeMoAutoModelForCausalLM` + a scalar value head, so it keeps the native TP / EP / CP path
 - **Distillation** — On-policy distillation — per-token reverse KL to a frozen teacher, via `--algo.advantage.estimator on_policy_distill` + `--ref.model_name_or_path`
 - **IS correction** — Train/rollout logprob-mismatch correction for off-policy / async rollout: `is_correction_level {off,token,seq,geo}` × `is_correction_mode {mask,clip,trunc}` (covers TIS, IcePop, seq-mask-tis; see *IS correction* below)
 - **KL** — Optional reference workers when `--algo.kl.init_coef > 0` (the reference doubles as the distillation teacher)
-### MoE routing stability
+### 🎯 MoE routing stability
 | Area | Support |
 |---|---|
 | Router replay (R3) | `--train.routing_replay` — vLLM's per-token top-k selection replayed in the training forward; details in the *MoE routing stability* section under Scaling Knobs |
@@ -294,7 +294,7 @@ Every RL run points at one Python module:
 
 The module must export `AgentRunner`. Choose **one** of two paths:
 
-### 1. `Env` — framework owns the LLM loop *(Gymnasium-style step/reset)*
+### 🧭 1. `Env` — framework owns the LLM loop *(Gymnasium-style step/reset)*
 
 ```python
 from molt.agents import Env, Result, StepEnvRunner
@@ -314,7 +314,7 @@ The framework drives vLLM, tokenization, multimodal accounting, and
 per-turn budgets. Your `step()` returns a `Result`; the framework chains
 turns until `terminated` or `truncated`.
 
-### 2. `ChatAgent` — you own the loop via the OpenAI **or** Anthropic SDK
+### 💬 2. `ChatAgent` — you own the loop via the OpenAI **or** Anthropic SDK
 
 ```python
 from openai import AsyncOpenAI
@@ -384,7 +384,7 @@ to the policy gradient (the same step-sample contract multi-turn agents use). No
 agent-side change is needed — it works on both wires, including external harnesses
 (Claude Code, opencode, AgentScope, …) whose compaction is opaque to us.
 
-### `Result` fields
+### 📋 `Result` fields
 
 | Field | Meaning |
 |---|---|
@@ -450,7 +450,7 @@ sbatch examples/scripts/slurm/rl_qwen3_6_35b.sh
 sbatch --nodes=4 examples/scripts/slurm/rl_qwen3_6_35b.sh
 ```
 
-### Multi-turn Python tool env
+### 🔧 Multi-turn Python tool env
 
 `examples/python/agents/geo3k.py` is the VLM multi-turn recipe used by the
 Qwen3.6 RL script. The model emits a `<tool_call>` invoking
@@ -461,7 +461,7 @@ recipes set 4 for the quick start and 10 on Slurm); the final
 `<answer>ANSWER</answer>` (or `\boxed{ANSWER}` for legacy distributions) is
 graded against the ground truth and becomes the reward.
 
-### OpenAI- / Anthropic-compatible server agent
+### 🌐 OpenAI- / Anthropic-compatible server agent
 
 For agents that already speak OpenAI Chat Completions or the Anthropic Messages
 API, subclass `ChatAgent` (see `examples/python/agents/chat_minimal.py`). The
@@ -470,7 +470,7 @@ against the rolling vLLM engines, so any external loop (browser automation, eval
 harness, OSWorld, …) can drive the policy through a stock OpenAI or Anthropic SDK
 — both wires decode to the same token-exact trajectory capture.
 
-### On-policy distillation
+### 🎓 On-policy distillation
 
 Distill a student toward a frozen teacher on the student's *own* on-policy
 samples. A single switch —
@@ -540,7 +540,7 @@ and off by default; under CP it takes the THD path.
 
 The long-form notes behind the knobs above.
 
-### IS correction — train/rollout logprob mismatch
+### ⚖️ IS correction — train/rollout logprob mismatch
 
 Async and partial rollout make the FSDP actor's recomputed `pi_train` diverge from
 vLLM's gen-time `pi_rollout` (different kernels, plus a mid-request weight swap the
@@ -572,7 +572,7 @@ References: **TIS** (truncated importance sampling of the train/infer ratio), **
 (token-level masking of out-of-band ratios), and **MIS** (masked importance sampling, Yingru Li —
 sequence-level masked IS, which motivates the `seq`/`geo` rejection filter).
 
-### MTP rollout — speculative decoding
+### ⚡ MTP rollout — speculative decoding
 
 Checkpoints that ship a multi-token-prediction (MTP) head — e.g. **Qwen3.6-MoE**
 (`mtp_num_hidden_layers: 1`) — can use it to **speed up generation** via vLLM
@@ -600,7 +600,7 @@ Notes:
   unavailable until upstream adds it; vLLM errors at engine init if enabled on an
   unsupported checkpoint.
 
-### MoE routing stability — Router Replay (R3) and router freeze
+### 🎯 MoE routing stability — Router Replay (R3) and router freeze
 
 MoE RL is unstable because the rollout (vLLM) and training (FSDP) routers pick
 experts **independently** — even at identical weights, numerical differences
@@ -643,7 +643,7 @@ fixed router is acceptable.
 --actor.freeze_moe_router   # off by default; redundant with R3
 ```
 
-### LoRA fine-tuning
+### 🧩 LoRA fine-tuning
 
 Both paths take the same three flags (`--model.lora_*` for SFT, `--actor.lora_*` for RL);
 `--*.lora_dim 0` (the default) is plain full fine-tuning:
