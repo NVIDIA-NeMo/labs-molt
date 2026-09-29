@@ -3,7 +3,7 @@
 This is a trimmed fork of NVIDIA-NeMo/Automodel that serves as molt's training-side model
 backend. See README.md for the kept model families and the removed feature list.
 
-Rules:
+Rules (details: `.claude/skills/simplicity-first`, invoke before any code change):
 
 - Do not add recipes, datasets, launchers or training loops here; molt owns the training loop.
 - Keep upstream file layout and names so upstream model directories can be dropped in
