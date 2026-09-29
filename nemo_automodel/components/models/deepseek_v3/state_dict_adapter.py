@@ -13,17 +13,9 @@
 # limitations under the License.
 
 import logging
-import re
-from typing import Any, Optional
 
 import torch
-from torch.distributed.device_mesh import DeviceMesh
-from transformers import DeepseekV3Config
 
-from nemo_automodel.components.checkpoint.state_dict_adapter import StateDictAdapter
-from nemo_automodel.components.models.common import BackendConfig
-from nemo_automodel.components.moe.config import MoEConfig
-from nemo_automodel.components.moe.state_dict_mixin import MoESplitExpertsStateDictMixin
 from nemo_automodel.components.moe.state_dict_utils import is_dtensor
 
 try:
@@ -116,117 +108,6 @@ if _TRITON_AVAILABLE:
         s = tl.load(s_ptr + pid_m * stride_sm + pid_n * stride_sn)
         y = x * s
         tl.store(y_ptr + offs_m[:, None] * stride_ym + offs_n[None, :] * stride_yn, y, mask=mask)
-
-
-class DeepSeekV3StateDictAdapter(MoESplitExpertsStateDictMixin, StateDictAdapter):
-    def __init__(
-        self,
-        config: DeepseekV3Config,
-        moe_config: MoEConfig,
-        backend: BackendConfig,
-        dtype: torch.dtype = torch.float32,
-    ):
-        self.config = config
-        self.moe_config = moe_config
-        self.backend = backend
-        self.dtype = dtype
-        self._uses_model_prefix = True
-        self.from_hf_map = {
-            "model.layers.{}.mlp.experts.{}.gate_proj.weight": "model.layers.{}.mlp.experts.gate_projs",
-            "model.layers.{}.mlp.experts.{}.up_proj.weight": "model.layers.{}.mlp.experts.up_projs",
-            "model.layers.{}.mlp.experts.{}.down_proj.weight": "model.layers.{}.mlp.experts.down_projs",
-        }
-
-    def _dequantize(self, state_dict: dict[str, Any]) -> dict[str, Any]:
-        scale_inv_keys = []
-        dequantized_count = 0
-        for key, weight in state_dict.items():
-            if key.endswith(".weight") and key + "_scale_inv" in state_dict:
-                scale_inv = state_dict[key + "_scale_inv"]
-                dequantized_weight = dequantize_from_fp8(weight, scale_inv, dtype=self.dtype, name=key)
-                state_dict[key] = dequantized_weight
-                scale_inv_keys.append(key + "_scale_inv")
-                dequantized_count += 1
-
-        for key in scale_inv_keys:
-            state_dict.pop(key)
-
-        logger.debug(
-            f"[FP8 Dequant] Dequantized {dequantized_count} weights, removed {len(scale_inv_keys)} scale_inv keys"
-        )
-        return state_dict
-
-    def to_hf(
-        self, state_dict: dict[str, Any], exclude_key_regex: str | None = None, quantization: bool = False, **kwargs
-    ) -> dict[str, Any]:
-        """Convert from native model state dict to HuggingFace format.
-        Automatically detects format based on backend.dispatcher configuration.
-        """
-        hf_state_dict = {}
-        for fqn, tensor in state_dict.items():
-            converted_tensors = self.convert_single_tensor_to_hf(
-                fqn, tensor, exclude_key_regex=exclude_key_regex, quantization=quantization, **kwargs
-            )
-            for key, value in converted_tensors:
-                hf_state_dict[key] = value
-
-        return hf_state_dict
-
-    def from_hf(
-        self,
-        hf_state_dict: dict[str, Any],
-        device_mesh: Optional["DeviceMesh"] = None,
-        **kwargs,
-    ) -> dict[str, Any]:
-        """Convert HF checkpoint to native format.
-        - Dequantize FP8 tensors if scale_inv buffers are provided
-        - Aggregate per-expert weights into grouped tensors
-        - If device_mesh is provided, only load experts needed for the current rank
-        """
-        for key in hf_state_dict.keys():
-            if ".mlp.experts." in key and key.endswith(".weight"):
-                self._uses_model_prefix = key.startswith("model.")
-
-        hf_state_dict = self._dequantize(hf_state_dict)
-        return self._from_hf_w_merged_experts(hf_state_dict, device_mesh)
-
-    def convert_single_tensor_to_hf(self, fqn: str, tensor: Any, **kwargs) -> list[tuple[str, Any]]:
-        """Convert a single tensor from native format to HuggingFace format.
-
-        Args:
-            fqn: Fully qualified name of the tensor in native format
-            tensor: The tensor to convert
-            **kwargs: Additional arguments for conversion
-
-        Returns:
-            List of (fqn, tensor) tuples in HuggingFace format
-        """
-        quantization = kwargs.get("quantization", False)
-        exclude_key_regex = kwargs.get("exclude_key_regex", None)
-
-        expert_result = self._convert_single_merged_expert_to_hf_split_experts(fqn, tensor, **kwargs)
-        if expert_result is not None:
-            result = expert_result
-        else:
-            result = [(fqn, tensor)]
-
-        if exclude_key_regex:
-            result = [(k, v) for k, v in result if not re.match(exclude_key_regex, k)]
-
-        if quantization:
-            quantized_result = []
-            for key, value in result:
-                if should_quantize_key(key):
-                    value = value.to(dtype=torch.float8_e4m3fn)
-                    # Create scale_inv with matching DTensor placements if applicable
-                    weight_scale_inv = create_scale_inv_for_weight(value)
-                    quantized_result.append((key, value))
-                    quantized_result.append((key + "_scale_inv", weight_scale_inv))
-                else:
-                    quantized_result.append((key, value))
-            return quantized_result
-
-        return result
 
 
 def _slice_scale_for_dtensor(

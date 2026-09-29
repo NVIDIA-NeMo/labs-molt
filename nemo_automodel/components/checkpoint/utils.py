@@ -14,7 +14,6 @@
 
 import json
 import logging
-import math
 import os
 import re
 import stat
@@ -120,11 +119,6 @@ def _list_existing_checkpoints(ckpt_root: Path) -> list[Path]:
     return sorted((path for path in checkpoints if _checkpoint_step_num(path) >= 0), key=_checkpoint_step_num)
 
 
-def list_automodel_checkpoints(ckpt_root: Path) -> list[Path]:
-    """Return canonical AutoModel ``epoch_<E>_step_<S>`` checkpoint directories."""
-    return [path for path in _list_existing_checkpoints(ckpt_root) if _AUTOMODEL_CHECKPOINT_RE.fullmatch(path.name)]
-
-
 def is_cloud_path(path: str | Path) -> bool:
     """Check if path is a cloud storage path (MSC)."""
     return os.fspath(path).startswith("msc://")
@@ -154,18 +148,6 @@ def clear_checkpoint_incomplete(checkpoint_dir: str | Path) -> None:
     (Path(checkpoint_dir) / _INCOMPLETE_CHECKPOINT_MARKER).unlink(missing_ok=True)
 
 
-def is_checkpoint_incomplete(checkpoint_dir: str | Path) -> bool:
-    """Return whether a checkpoint directory was left behind by an interrupted save.
-
-    Args:
-        checkpoint_dir: Directory to inspect.
-
-    Returns:
-        True when the in-progress marker is still present.
-    """
-    return (Path(checkpoint_dir) / _INCOMPLETE_CHECKPOINT_MARKER).exists()
-
-
 def _resolve_checkpoint_pointer_target(ckpt_root: Path, raw_target: str) -> Path | None:
     """Resolve a checkpoint pointer target relative to ckpt_root."""
     if not raw_target:
@@ -176,26 +158,6 @@ def _resolve_checkpoint_pointer_target(ckpt_root: Path, raw_target: str) -> Path
     return Path(os.path.abspath(target))
 
 
-def read_checkpoint_pointer(ckpt_root: str | Path, link_name: str) -> Path | None:
-    """Resolve a checkpoint pointer symlink or fallback text file."""
-    root = Path(ckpt_root)
-    link_path = root / link_name
-    raw_target = None
-    if os.path.islink(link_path):
-        try:
-            raw_target = os.readlink(link_path)
-        except OSError:
-            pass
-    elif os.path.isfile(f"{link_path}.txt"):
-        try:
-            with open(f"{link_path}.txt", "r") as f:
-                raw_target = f.read().strip()
-        except (OSError, UnicodeError):
-            pass
-
-    return _resolve_checkpoint_pointer_target(root, raw_target) if raw_target else None
-
-
 def _checkpoint_contains_target(checkpoint: Path, target: Path) -> bool:
     """Return whether target points at or inside checkpoint."""
     checkpoint_abs = Path(os.path.abspath(checkpoint))
@@ -203,92 +165,9 @@ def _checkpoint_contains_target(checkpoint: Path, target: Path) -> bool:
     return target_abs == checkpoint_abs or checkpoint_abs in target_abs.parents
 
 
-def read_checkpoint_metric(checkpoint: Path, metric_key: str | None) -> float | None:
-    """Read a validation metric from checkpoint loss metadata."""
-    try:
-        with open(checkpoint / "losses.json", "r") as f:
-            losses = json.load(f)
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return None
-    if not isinstance(losses, Mapping):
-        return None
-
-    candidate_keys = []
-    if metric_key is not None:
-        candidate_keys.append(metric_key)
-    candidate_keys.extend(["val_loss", "default"])
-
-    for key in candidate_keys:
-        if key not in losses:
-            continue
-        try:
-            value = float(losses[key])
-        except (TypeError, ValueError, OverflowError):
-            continue
-        if math.isfinite(value):
-            return value
-    return None
-
-
 def _is_checkpoint_pointer_text_file(path: Path, mode: int) -> bool:
     """Return whether path looks like a symlink fallback checkpoint pointer."""
     return stat.S_ISREG(mode) and path.suffix == ".txt" and path.stem.isupper()
-
-
-def find_pointer_protected_checkpoints(ckpt_root: Path, checkpoints: list[Path]) -> set[Path]:
-    """Return checkpoints targeted by top-level symlinks or symlink fallback text files."""
-    protected = set()
-    if not ckpt_root.exists():
-        return protected
-
-    entries = list(ckpt_root.iterdir())
-
-    for entry in entries:
-        raw_target = None
-        entry_mode = entry.lstat().st_mode
-        if stat.S_ISLNK(entry_mode):
-            raw_target = os.readlink(entry)
-        elif _is_checkpoint_pointer_text_file(entry, entry_mode):
-            raw_target = entry.read_text().strip()
-
-        target = _resolve_checkpoint_pointer_target(ckpt_root, raw_target) if raw_target else None
-        if target is None:
-            continue
-        for checkpoint in checkpoints:
-            if _checkpoint_contains_target(checkpoint, target):
-                protected.add(checkpoint)
-                break
-    return protected
-
-
-def format_missing_checkpoint_dir_error(checkpoint_dir: str, restore_from: str, resolved_ckpt_dir: str) -> str:
-    """Format a helpful error message for a missing checkpoint directory."""
-    error_msg = [
-        f"\n{'=' * 80}",
-        "ERROR: Checkpoint directory does not exist",
-        f"{'=' * 80}",
-        f"Specified: checkpoint.restore_from: '{restore_from}'",
-        f"Resolved to: {resolved_ckpt_dir}",
-        "",
-        "Please check:",
-        "  1. The checkpoint directory exists",
-        f"  2. The path is correct (restore_from: '{restore_from}')",
-        f"  3. Available checkpoints in {checkpoint_dir}:",
-    ]
-
-    ckpt_root = Path(checkpoint_dir)
-    available_ckpts = _list_existing_checkpoints(ckpt_root)
-    if available_ckpts:
-        error_msg += [f"       {', '.join([p.name for p in available_ckpts[:5]])}"]
-        if len(available_ckpts) > 5:
-            error_msg += [f"       ... and {len(available_ckpts) - 5} more"]
-    else:
-        error_msg += (
-            ["       (no checkpoints found)"] if ckpt_root.exists() else ["       (checkpoint_dir does not exist)"]
-        )
-
-    error_msg += [f"{'=' * 80}"]
-    return "\n".join(error_msg)
 
 
 def resolve_trust_remote_code(pretrained_model_name_or_path):
