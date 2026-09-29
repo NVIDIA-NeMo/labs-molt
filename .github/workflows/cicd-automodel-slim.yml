@@ -25,11 +25,11 @@
 #   static   compileall, ruff, tools/check_closure.py (every import and every nemo_automodel.* string resolves)
 #   unit     the Qwen / MoE / distributed / checkpoint / loading unit tests, in a CPU-only container
 #            alongside the GPU smoke, so they add no wall time
-#   smoke    tests/gpu_smoke/smoke.py on 2 GPUs: seeded few-layer Qwen2.5, Qwen3, Qwen3-MoE (EP2) and
-#            Qwen3.6-MoE (EP2) built the way molt builds its actor. The consolidated HF export must load cleanly
-#            into transformers, and for Qwen2.5 / Qwen3 / Qwen3-MoE that transformers model must reproduce the
-#            forward logits within bf16 tolerance. Qwen3-MoE also runs a short training descent and a DCP
-#            save / reload round trip.
+#   smoke    tests/gpu_smoke/smoke.py on 2 GPUs: seeded few-layer Qwen2.5, Qwen3, Qwen3-MoE, Qwen3.6-MoE,
+#            Inkling and Nemotron 3 (MoE families on EP2) built the way molt builds its actor. The consolidated
+#            HF export must load cleanly into transformers, and except for Qwen3.6 and Inkling that transformers
+#            model must reproduce the forward logits within bf16 tolerance. Qwen3.6 also runs a short training
+#            descent and a DCP save / reload round trip.
 name: CICD AutoModel-Slim
 
 on:
@@ -133,10 +133,10 @@ jobs:
           key: kernels-${{ runner.arch }}-${{ env.IMAGE }}-v1
       # CUDNN_PATH / LD_LIBRARY_PATH pin TE to the bundled cuDNN, as molt's launch scripts do: the login shell
       # can shadow the image's ENV with the apt cuDNN, which breaks the fused-attention kernel.
-      # Only qwen3_moe trains.
-      - name: GPU smoke, reference parity on Qwen2.5 / Qwen3 / Qwen3-MoE / Qwen3.6; Qwen3-MoE trains + checkpoint round trip
+      # Only qwen3_6 trains.
+      - name: GPU smoke, export + transformers parity per family; Qwen3.6 trains + checkpoint round trip
         env:
-          ARCHS: qwen2_5 qwen3 qwen3_moe qwen3_6
+          ARCHS: qwen2_5 qwen3 qwen3_moe qwen3_6 inkling nemotron3
         run: |
           mkdir -p .kcache
           docker run --rm --gpus all --shm-size=16g --workdir /src --volume "$GITHUB_WORKSPACE:/src" -e ARCHS "$IMAGE" \
@@ -144,7 +144,7 @@ jobs:
               export NVTE_FUSED_ATTN=1 NVTE_FLASH_ATTN=0 CUDNN_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/cudnn \
                      LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/nvidia/cudnn/lib:${LD_LIBRARY_PATH:-} \
                      TRITON_CACHE_DIR=/src/.kcache/triton TORCHINDUCTOR_CACHE_DIR=/src/.kcache/inductor PYTHONPATH=/src && \
-              for arch in $ARCHS; do echo "===== $arch"; EXTRA=""; [ "$arch" = qwen3_moe ] && EXTRA="--train"; \
+              for arch in $ARCHS; do echo "===== $arch"; EXTRA=""; [ "$arch" = qwen3_6 ] && EXTRA="--train"; \
                 timeout 12m torchrun --nproc_per_node=2 tests/gpu_smoke/smoke.py --arch $arch $EXTRA || exit 1; \
               done'
       - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0

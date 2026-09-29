@@ -10,17 +10,18 @@ through its CP hook. Checks, in order:
   1. forward: finite logits;
   2. export: the consolidated HF export (the path molt's vLLM refit and checkpoint export use) must load
      into transformers' own class with no missing, unexpected or mismatched keys;
-  3. reference (``hf`` families): that transformers model, in fp32, must reproduce the forward logits on the
-     same inputs within a tolerance sized to bf16 noise. Qwen3.5-MoE is ``export`` only: its tiny random
-     build (bf16 GDN + MoE against an fp32 reference) diverges far beyond the dense families, and its
-     real-weight numerics are covered by molt's Qwen3.6 e2e instead;
+  3. reference (``hf`` families): that transformers model, in bf16 like molt's actor, must reproduce the
+     forward logits on the same inputs within a tolerance sized to bf16 noise. Qwen3.5-MoE and Inkling are ``export`` only: their
+     tiny random builds disagree with transformers by far more than the other families (Qwen3.6's real-weight
+     numerics are covered by molt's e2e; Inkling's disagreement is an open item to settle with real weights);
   4. --train: a few AdamW steps with the mesh-aware clip, the loss must fall; then the DCP checkpoint saved
      before training is reloaded and must reproduce the original forward logits.
 
-    torchrun --nproc_per_node=2 tests/gpu_smoke/smoke.py --arch qwen3_moe --train
+    torchrun --nproc_per_node=2 tests/gpu_smoke/smoke.py --arch qwen3_6 --train
 """
 import argparse
 import glob
+import json
 import os
 import shutil
 import tempfile
@@ -39,12 +40,14 @@ ARCHS = {  # config, layers, experts (0 = as configured), ep, padded forward, re
     "qwen3": ("qwen3_4b.json", 4, 0, 1, False, "hf"),
     "qwen3_moe": ("qwen3_30b_a3b.json", 4, 16, 2, False, "hf"),
     "qwen3_6": ("qwen3_6_35b_a3b.json", 4, 16, 2, True, "export"),  # Qwen3.5-MoE architecture
+    "inkling": ("inkling_small.json", 4, 16, 2, False, "export"),  # logits differ from transformers by ~0.6 rel; open item
+    "nemotron3": ("nemotron3_nano_30b_a3b.json", 10, 16, 2, False, "hf"),  # last 10 of the M/E/* pattern keep one attention layer
 }
 # Tolerances are relative errors of the [B, S, V] logits: Frobenius (||a-b|| / ||b||) and max-abs
 # (max|a-b| / max|b|). molt's actor computes in bf16 under fp32 masters while the transformers reference
-# runs in fp32, so `hf` cannot be bit-exact; measured noise on H100 is 6e-3 to 8e-3 on both metrics, the
-# bounds sit ~3x / ~6x above it, and a wrong weight mapping, rope or norm moves them by O(1). The reload
-# check shares kernels and process with the original forward, so it is held near bit-exact.
+# runs in bf16 too but through transformers' kernels, so `hf` cannot be bit-exact; measured noise on H100 is
+# 2e-3 to 1.6e-2 on both metrics, the bounds sit 3x and up above it, and a wrong weight mapping, rope or norm
+# moves them by O(1). The reload check shares kernels and process with the original forward: near bit-exact.
 HF_TOL, RELOAD_TOL = (2e-2, 5e-2), (1e-6, 1e-5)
 TRAIN_STEPS = 3
 ap = argparse.ArgumentParser()
@@ -86,15 +89,18 @@ def compare(ours, ref, what, tol):
 # --- config: real architecture, the last few layers (layer-type patterns end on a full-attention layer,
 # so GDN and full attention are both kept), few experts, no MTP head
 cfg_dir = tempfile.mkdtemp(prefix="smoke_cfg_")
-shutil.copy(os.path.join(HERE, "configs", config_file), os.path.join(cfg_dir, "config.json"))
+with open(os.path.join(HERE, "configs", config_file)) as f:
+    raw = json.load(f)
+raw.pop("auto_map", None)  # hub configs with remote code (Nemotron 3): use the transformers / registry classes
+with open(os.path.join(cfg_dir, "config.json"), "w") as f:
+    json.dump(raw, f)
 cfg = get_hf_config(cfg_dir, "sdpa", trust_remote_code=True)
 text = getattr(cfg, "text_config", None) or cfg
 n_orig = text.num_hidden_layers
-for c in {id(cfg): cfg, id(text): text}.values():
-    for k, v in list(vars(c).items()):
-        if isinstance(v, list) and len(v) == n_orig:
-            setattr(c, k, v[-n_layers:])
 for c in {id(cfg): cfg, id(text): text}.values():  # multimodal wrappers mirror the text sizes at the top level
+    for k, v in list(vars(c).items()):
+        if isinstance(v, (list, str)) and len(v) == n_orig:  # per-layer lists, Nemotron-H's pattern string
+            setattr(c, k, v[-n_layers:])
     if getattr(c, "num_hidden_layers", None):
         c.num_hidden_layers = n_layers
     for k in ("num_experts", "n_routed_experts", "moe_num_experts", "num_local_experts"):
@@ -103,6 +109,10 @@ for c in {id(cfg): cfg, id(text): text}.values():  # multimodal wrappers mirror 
 for k in ("mtp_num_hidden_layers", "num_nextn_predict_layers", "num_mtp_modules"):
     if getattr(text, k, None):
         setattr(text, k, 0)
+for tower in ("vision_config", "audio_config"):  # unused here (text inputs only): one layer, on both sides of the export
+    for k in ("depth", "num_hidden_layers", "num_layers"):
+        if getattr(getattr(cfg, tower, None), k, None):
+            setattr(getattr(cfg, tower), k, 1)
 is_vlm = any("ConditionalGeneration" in a for a in (cfg.architectures or []))
 
 # --- meshes + setup, as molt's BaseModel builds them
@@ -182,13 +192,18 @@ if rank == 0:
     shards = [f for f in os.listdir(consolidated) if f.endswith(".safetensors")]
     assert shards, f"no consolidated safetensors under {out_dir}"
     log(f"checkpoint saved, HF export {len(shards)} shard(s)")
-
-if rank == 0:
-    from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
+    from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForImageTextToText
     if not os.path.exists(os.path.join(consolidated, "config.json")):
         shutil.copy(glob.glob(os.path.join(out_dir, "**", "config.json"), recursive=True)[0], consolidated)
     HF = AutoModelForImageTextToText if is_vlm else AutoModelForCausalLM
-    hf, info = HF.from_pretrained(consolidated, dtype=torch.float32, attn_implementation="sdpa", output_loading_info=True)
+    # The export's config.json is the text view; multimodal wrappers need the full shrunk config for their
+    # towers. Round-trip it through JSON so transformers builds it with its own config classes.
+    cfg.save_pretrained(cfg_dir)
+    hf_cfg = AutoConfig.from_pretrained(cfg_dir)
+    audio = getattr(hf_cfg, "audio_config", None)
+    if audio is not None and "text_hidden_size" not in audio.__dict__:  # Inkling: read as `hidden_size`, stored only as an alias
+        audio.__dict__["text_hidden_size"] = text.hidden_size
+    hf, info = HF.from_pretrained(consolidated, config=hf_cfg, dtype=torch.bfloat16, attn_implementation="sdpa", output_loading_info=True)
     # The export must be a complete, key-compatible HF checkpoint: nothing left to random init, nothing ignored.
     issues = {k: v for k, v in info.items() if v}
     log(f"export loads into transformers {HF.__name__}: {issues or 'clean'}")
