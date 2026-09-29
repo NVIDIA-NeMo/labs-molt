@@ -14,8 +14,7 @@
 # limitations under the License.
 
 # Runs after the PR head is mirrored to pull-request/<number> for CI. The
-# documentation is preview input; Fern configuration and sanitizer come from
-# the main branch, and the CLI version is pinned here.
+# approved mirror supplies the docs and Fern config; the CLI is pinned here.
 
 name: Preview Fern Docs
 
@@ -69,14 +68,6 @@ jobs:
     timeout-minutes: 20
     if: vars.PUBLISH_FERN_PREVIEWS == 'true' && needs.changed-files.outputs.docs == 'true'
     steps:
-      - name: Checkout trusted repository
-        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-        with:
-          ref: main
-          path: trusted-source
-          fetch-depth: 0
-          persist-credentials: false
-
       - name: Read changed Markdown files
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -86,29 +77,23 @@ jobs:
             --jq '.[] | select(.filename | startswith("docs/") and endswith(".md")) | .filename' \
             > changed_md_files
 
-      - name: Checkout PR documentation as data
+      - name: Checkout approved PR mirror
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           path: pr-source
-          sparse-checkout: docs
+          fetch-depth: 0
           persist-credentials: false
 
-      - name: Prepare documentation sources
+      - name: Prepare archived version pages
         run: |
           set -euo pipefail
-          if [ -n "$(find pr-source/docs -type l -print -quit)" ]; then
-            echo "::error::Documentation symlinks are not supported in hosted previews"
-            exit 1
-          fi
-          cp trusted-source/docs/fern/fern.config.json pr-source/docs/fern/fern.config.json
-          cp trusted-source/docs/fern/docs.yml pr-source/docs/fern/docs.yml
           for version_file in pr-source/docs/fern/versions/v*.yml; do
             [ -f "$version_file" ] || continue
             version=$(basename "$version_file" .yml)
-            if git -C trusted-source show-ref --verify --quiet "refs/tags/${version}"; then
+            if git -C pr-source show-ref --verify --quiet "refs/tags/${version}"; then
               target="pr-source/docs/fern/versions/${version}-content"
               mkdir -p "$target"
-              git -C trusted-source archive "refs/tags/${version}" -- docs/ | tar -x --strip-components=1 -C "$target"
+              git -C pr-source archive "refs/tags/${version}" -- docs/ | tar -x --strip-components=1 -C "$target"
               find "$target" -name '*.md' -print0 | xargs -0 -r sed -i \
                 -e 's/{/\\{/g' \
                 -e 's/}/\\}/g' \
@@ -135,7 +120,7 @@ jobs:
         run: |
           set -euo pipefail
           fern docs md generate --library molt
-          node "$GITHUB_WORKSPACE/trusted-source/docs/fern/scripts/sanitize-generated-mdx.mjs"
+          node scripts/sanitize-generated-mdx.mjs
           OUTPUT=$(fern generate --docs --preview --id "pull-request-${PR_NUMBER}" 2>&1)
           echo "$OUTPUT"
           URL=$(echo "$OUTPUT" | grep -oP 'Published docs to \K.*(?= \()' || true)
