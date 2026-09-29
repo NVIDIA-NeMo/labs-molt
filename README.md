@@ -196,8 +196,7 @@ AutoModel this repo is validated against (`setup.py`, `AUTOMODEL`), so R3 routin
 ```bash
 git clone https://github.com/NVIDIA-NeMo/labs-molt.git
 cd labs-molt
-pip install -e ".[vllm]"                       # local development only — the container bakes everything in
-MOLT_AUTOMODEL=slim pip install -e ".[vllm]"   # ...with AutoModel-Slim, the lightweight backend (see below)
+pip install -e ".[vllm]"          # local development only — the container bakes everything in
 ```
 
 > **Requires CUDA 13.** The git-pinned AutoModel is only compatible with the CUDA-13 torch
@@ -218,7 +217,6 @@ docker pull hijkzzz/molt:latest   # or a pinned release: hijkzzz/molt:0.1.10
 
 ```bash
 docker build -f dockerfile/Dockerfile -t hijkzzz/molt:latest .
-docker build --build-arg MOLT_AUTOMODEL=slim -f dockerfile/Dockerfile -t molt:slim .   # ...with AutoModel-Slim
 ```
 
 From 0.1.9 the Docker Hub tags are multi-arch (amd64 + arm64), so the same `docker pull` works on
@@ -235,17 +233,24 @@ pip install "molt-rl[vllm]"
 > release instead — it can lag the pin in `setup.py`, and R3 routing replay needs
 > the newer pin (it fails fast with instructions when the installed AutoModel is too old).
 
-### 🪶 AutoModel-Slim, the lightweight backend
+### 🪶 Optional: AutoModel-Slim, a lightweight backend
 
-This repo's [`automodel-slim`](https://github.com/NVIDIA-NeMo/labs-molt/tree/automodel-slim) branch
-carries a lightweight version of the pinned AutoModel commit: same package name and API, trimmed to the
+**The default stays upstream NVIDIA AutoModel**, pinned in `setup.py`; every command above installs it, and
+nothing below applies unless you opt in. This repo's
+[`automodel-slim`](https://github.com/NVIDIA-NeMo/labs-molt/tree/automodel-slim) branch
+carries a lightweight version of that same pinned commit: same package name and API, trimmed to the
 model families and the parallel stack molt uses (Qwen2 / Qwen3 / 3.5 / 3.6 / 3.8, DeepSeek V4.1,
 GLM 5.3, Gemma 4, Nemotron 3, Muse, Inkling; FSDP2 / TP / EP / CP, TE + THD packing, DeepEP / HybridEP
 MoE, router replay, LoRA, FP8, Dion, DCP checkpointing with HF export). 758 files / 282k lines down to
 252 / ~97k; forward logits are bit-exact with upstream on every kept family and the molt RL e2e
-metrics match. `setup.py` holds both pins (`AUTOMODEL`); `MOLT_AUTOMODEL=slim` picks it at install or image
-build time (commands above), and the slurm recipes take `EXTRA_PYTHONPATH=/path/to/automodel-slim` to put a
-checkout ahead of the baked-in package.
+metrics match. `setup.py` holds both pins (`AUTOMODEL`); opt in with `MOLT_AUTOMODEL=slim` at install or
+image-build time, or point the slurm recipes at a checkout:
+
+```bash
+MOLT_AUTOMODEL=slim pip install -e ".[vllm]"                                          # local install
+docker build --build-arg MOLT_AUTOMODEL=slim -f dockerfile/Dockerfile -t molt:slim .   # image
+EXTRA_PYTHONPATH=/path/to/automodel-slim ...                                          # slurm recipes: a checkout wins over the baked-in package
+```
 
 Model and parallel-stack changes go to that branch; its PRs get the same `cicd` label check and
 `/claude review` as this repo. The slim install follows that branch's head: merge there, then rebuild the
