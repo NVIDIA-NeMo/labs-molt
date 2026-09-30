@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import itertools
+import math
 from typing import TYPE_CHECKING, List
 
 import ray
@@ -89,10 +90,87 @@ class RemoteExperienceMaker:
         base_action_log_probs (KL recipes), old action_log_probs, and the per-token kl, ready for
         advantage estimation."""
         args = self.args
+        forward_batches = None
+        if args.train.dynamic_batch_enable and not args.fsdp.packing_samples:
+            groups = [
+                group
+                for group in (self.actor_model_group, self.initial_model_group, self.critic_model_group)
+                if group is not None
+            ]
+            actor_counts = {group.effective_actors for group in groups}
+            if len(actor_counts) != 1:
+                raise ValueError(
+                    "Padded dynamic batching requires actor, reference, and critic groups "
+                    "to have the same effective DP actor count."
+                )
+            effective_actors = actor_counts.pop()
+            if len(experiences) % effective_actors:
+                raise ValueError(
+                    f"Padded dynamic batching cannot split {len(experiences)} samples evenly across "
+                    f"{effective_actors} effective actors."
+                )
+
+            lengths = [int(experience.total_length.item()) for experience in experiences]
+            cp_multiple = 2 * args.fsdp.cp_size if args.fsdp.cp_size > 1 else 1
+            pad_to_multiple = math.lcm(cp_multiple, args.train.dynamic_batch_pad_to_multiple)
+            token_budget = args.rollout.max_tokens_per_gpu * args.fsdp.cp_size * args.fsdp.tp_size
+
+            def padded_cost(indices):
+                max_length = max(lengths[index] for index in indices)
+                aligned_length = (max_length + pad_to_multiple - 1) // pad_to_multiple * pad_to_multiple
+                return len(indices) * aligned_length
+
+            # balance_experiences already produced equal contiguous rank blocks. Bucket
+            # within each block, then equalize bucket counts so FSDP collectives align.
+            rank_partitions = []
+            over_budget = set()
+            samples_per_actor = len(experiences) // effective_actors
+            for rank in range(effective_actors):
+                start = rank * samples_per_actor
+                end = start + samples_per_actor
+                partitions = []
+                for index in sorted(range(start, end), key=lambda i: (-lengths[i], i)):
+                    if partitions and padded_cost(partitions[-1] + [index]) <= token_budget:
+                        partitions[-1].append(index)
+                    else:
+                        partitions.append([index])
+                    if padded_cost([index]) > token_budget:
+                        over_budget.add(index)
+                rank_partitions.append(partitions)
+
+            target_count = max(len(partitions) for partitions in rank_partitions)
+            forward_batches = []
+            for partitions in rank_partitions:
+                while len(partitions) < target_count:
+                    candidates = [index for index, partition in enumerate(partitions) if len(partition) > 1]
+                    split_index = min(
+                        candidates,
+                        key=lambda index: (-padded_cost(partitions[index]), min(partitions[index])),
+                    )
+                    partition = partitions[split_index]
+                    midpoint = len(partition) // 2
+                    partitions[split_index : split_index + 1] = [
+                        partition[:midpoint],
+                        partition[midpoint:],
+                    ]
+                partitions.sort(key=lambda partition: (-padded_cost(partition), min(partition)))
+                forward_batches.extend([[experiences[index] for index in partition] for partition in partitions])
+
+            if over_budget:
+                logger.warning(
+                    f"{len(over_budget)} rollout sample(s) exceed the padded dynamic-batch token budget "
+                    "and remain singleton microbatches; they may OOM."
+                )
+
         if self.critic_model_group is not None:
-            self._dispatch_forward(experiences, self.critic_model_group, "values")
+            self._dispatch_forward(experiences, self.critic_model_group, "values", forward_batches)
         if self.initial_model_group is not None:
-            self._dispatch_forward(experiences, self.initial_model_group, "base_action_log_probs")
+            self._dispatch_forward(
+                experiences,
+                self.initial_model_group,
+                "base_action_log_probs",
+                forward_batches,
+            )
 
         # Old actor log-probs. Force-on-policy with no KL reward (kl_coef==0): old == the training
         # forward, so the PPO ratio is 1 (REINFORCE) and policy_train recomputes old itself — skip
@@ -100,7 +178,7 @@ class RemoteExperienceMaker:
         # ref) run the actor forward here.
         skip_actor_old = args.train.force_on_policy and args.algo.kl.init_coef == 0
         if not skip_actor_old:
-            self._dispatch_forward(experiences, self.actor_model_group, "action_log_probs")
+            self._dispatch_forward(experiences, self.actor_model_group, "action_log_probs", forward_batches)
 
         for i, experience in enumerate(experiences):
             experience.index = [i]
@@ -129,16 +207,28 @@ class RemoteExperienceMaker:
                 experience.base_action_log_probs = None
         return experiences
 
-    def _dispatch_forward(self, experiences: List[Experience], group: "RayActorGroup", result_attr: str) -> None:
-        """Run ``group``'s forward on every sample — distributed across its DP ranks, each reloading its
-        own heavy tensors so they never reach the controller — and store the per-sample result on the
-        Experience under ``result_attr`` ("values" / "base_action_log_probs" / "action_log_probs"). Every
-        cp/tp rank in a DP group returned the same per-sample results, so keep one copy per group (drop
-        the duplicates) and flatten to one result per sample, in ``experiences`` order. Frees the
-        forward's cache before the colocated actor trains on the same GPUs."""
-        refs = group.async_run_method_batch(method_name="forward", experience=experiences)
-        outputs = list(itertools.chain.from_iterable(ray.get(refs)[:: group.duplicate_actors]))
-        for experience, output in zip(experiences, outputs):
+    def _dispatch_forward(
+        self,
+        experiences: List[Experience],
+        group: "RayActorGroup",
+        result_attr: str,
+        forward_batches=None,
+    ) -> None:
+        """Run ``group`` forwards and attach each result to its source Experience.
+
+        Padded dynamic batches remain lists of lazy samples until their worker reloads
+        and batches them. CP/TP duplicates return the same outputs, so keep one copy
+        per DP group. Free the cache before a colocated actor trains."""
+        if forward_batches is None:
+            refs = group.async_run_method_batch(method_name="forward", experience=experiences)
+            outputs = list(itertools.chain.from_iterable(ray.get(refs)[:: group.duplicate_actors]))
+            output_experiences = experiences
+        else:
+            refs = group.async_run_method_batch(method_name="forward_batch", experiences=forward_batches)
+            batch_outputs = itertools.chain.from_iterable(ray.get(refs)[:: group.duplicate_actors])
+            outputs = list(itertools.chain.from_iterable(batch_outputs))
+            output_experiences = list(itertools.chain.from_iterable(forward_batches))
+        for experience, output in zip(output_experiences, outputs):
             setattr(experience, result_attr, output)
         ray.get(group.async_run_method(method_name="empty_cache"))
 
