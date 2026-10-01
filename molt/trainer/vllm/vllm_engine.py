@@ -20,6 +20,7 @@ import asyncio
 import dataclasses
 import inspect
 import os
+import warnings
 from typing import Any, List, Optional
 
 import ray
@@ -97,6 +98,41 @@ def _filter_vllm_engine_kwargs(kwargs: dict) -> dict:
     return filtered
 
 
+def _fast_tokens_logprobs(self, token_ids, top_logprobs, num_output_top_logprobs=None):
+    """Drop-in for vLLM's ``ServingTokens._create_tokens_logprobs`` that builds the same payload
+    from plain dicts. The stock version constructs one pydantic model per top-k entry on the
+    engine's event loop: ~1.2 s per 6k-token response at top-32, during which the engine answers
+    no RPC — every pause/refit waits behind it. Dicts take ~0.25 s and dump to identical JSON."""
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionLogProbs
+
+    n = max(num_output_top_logprobs or 1, 1)
+    content = []
+    for i, token_id in enumerate(token_ids):
+        step = top_logprobs[i]
+        token = f"token_id:{token_id}"
+        sampled = step.get(token_id) if step is not None else None
+        if sampled is None:
+            content.append({"token": token, "logprob": -9999.0, "bytes": None, "top_logprobs": []})
+            continue
+        tops = [
+            {"token": f"token_id:{tid}", "logprob": max(lp.logprob, -9999.0), "bytes": None}
+            for _, (tid, lp) in zip(range(n), step.items())
+        ]
+        content.append({"token": token, "logprob": max(sampled.logprob, -9999.0), "bytes": None, "top_logprobs": tops})
+    return ChatCompletionLogProbs.model_construct(content=content)
+
+
+def _install_fast_tokens_logprobs() -> None:
+    """Swap vLLM's per-entry pydantic logprobs builder for ``_fast_tokens_logprobs`` (see there)."""
+    try:
+        from vllm.entrypoints.scale_out.token_in_token_out import serving as tito_serving
+    except ImportError:  # older vLLM without the token-in/token-out server
+        return
+    tito_serving.ServingTokens._create_tokens_logprobs = _fast_tokens_logprobs
+    # model_dump() of a typed field holding dicts warns once per response; the payload is identical.
+    warnings.filterwarnings("ignore", message="Pydantic serializer warnings")
+
+
 @ray.remote
 class RolloutRayActor:
     """Async vLLM-backed actor that exposes generation utilities."""
@@ -143,6 +179,7 @@ class RolloutRayActor:
         except ImportError:
             from vllm.entrypoints.utils import FlexibleArgumentParser
 
+        _install_fast_tokens_logprobs()
         args = make_arg_parser(FlexibleArgumentParser()).parse_args([])
         args.model = self.kwargs.get("model")
         args.served_model_name = ["policy"]  # clients request model="policy"
