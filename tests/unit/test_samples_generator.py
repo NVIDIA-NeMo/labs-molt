@@ -19,6 +19,7 @@ from collections import defaultdict
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 import torch
 
@@ -541,3 +542,34 @@ def test_without_partial_rollout_the_pool_holds_one_batch_and_drains(monkeypatch
     assert [sample.group_ids[0] for sample in samples] == ["p0", "p1", "p2"]
     assert prompts_dispatched == 3  # capacity 5, but only the batch's 3 prompts go out
     assert generator._inflight_rollouts == []  # pool drained: the refit sees no in-flight rollout
+
+
+def test_process_response_scatters_the_sampler_top_k_onto_the_step_axis():
+    top = (np.array([[5, 6], [7, 8]]), np.array([[-0.5, -1.5], [-0.2, -2.2]], dtype=np.float32))
+    experience, drop_reason = SamplesGenerator._process_response_into_experience(
+        Trajectory(
+            prompt="p",
+            label="l",
+            images=None,
+            observation_text="",
+            observation_tokens=[0, 1, 2, 3, 4],
+            action_ranges=[(2, 4)],
+            rollout_log_probs=[0.0] * 5,
+            rollout_top_logprobs=[top],
+            reward=1.0,
+            scores=1.0,
+        ),
+        media_ids=set(),
+        truncate_length=8,
+    )
+
+    assert drop_reason is None
+    # Tokens 2 and 3 were generated: their candidates sit at steps 1 and 2 (step = token - 1), seq last.
+    torch.testing.assert_close(experience.rollout_top_ids, torch.tensor([[[0, 5, 7, 0], [0, 6, 8, 0]]]))
+    torch.testing.assert_close(
+        experience.rollout_top_log_probs, torch.tensor([[[0.0, -0.5, -0.2, 0.0], [0.0, -1.5, -2.2, 0.0]]])
+    )
+    # Rides the replay-buffer split / unpad like every other step tensor.
+    replay_buffer = NaiveReplayBuffer(sample_batch_size=1, cpu_offload=False)
+    replay_buffer.append(experience)
+    assert replay_buffer.items[0].rollout_top_ids.shape == (2, 4)

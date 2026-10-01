@@ -311,6 +311,7 @@ def create_vllm_engines(
     enable_return_routed_experts: bool = False,
     pipeline_parallel_size: int = 1,
     data_parallel_size: int = 1,
+    max_logprobs: int = 0,
 ):
     """Spin up a set of vLLM Ray actors on a dedicated placement group.
 
@@ -514,6 +515,8 @@ def create_vllm_engines(
             # the OAI server may serve external top_logprobs>1; vLLM's default
             # (20) covers both. Capping at 1 would reject those requests.
             actor_kwargs["logprobs_mode"] = logprobs_mode
+        if max_logprobs > 20:  # score centering asks for --rollout.top_logprobs per token; raise vLLM's default cap
+            actor_kwargs["max_logprobs"] = max_logprobs
 
         # MTP speculative decoding (rollout-side). method="mtp" is required: vLLM
         # then resolves the per-architecture MTP draft from the served target's

@@ -31,7 +31,8 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from molt.models import Actor, PolicyLoss, agg_loss
-from molt.models.utils import compute_approx_kl, masked_mean, split_moe_aux_loss
+from molt.models.score_centering import head_mass
+from molt.models.utils import compute_approx_kl, masked_mean, sampled_binary_kl, split_moe_aux_loss
 from molt.trainer.algorithm.experience import Experience, get_model_parallel_size
 from molt.trainer.fsdp import FsdpStrategy
 from molt.trainer.fsdp.refit import gather_full_param
@@ -141,6 +142,7 @@ class PolicyTrainer:
             ),
             loss_agg_mode=self.args.actor.loss_agg_mode,
             is_correction_gating=self.args.algo.advantage.is_correction_gating,
+            score_centering=self.args.actor.score_centering,
         )
 
         # Add the MoE router load-balancing aux loss only when its coefficient is set.
@@ -433,6 +435,8 @@ class PolicyTrainer:
             return_entropy=bool(self.args.actor.entropy_coef),
             # R3: replay the rollout's expert selection (None when routing replay off).
             routed_experts=experience.routed_experts,
+            # Score centering: also score the sampler's top-k ids in the same pass (None otherwise).
+            top_ids=experience.rollout_top_ids,
             **multimodal_inputs,
         )
         action_log_probs = model_output["action_log_probs"]
@@ -466,6 +470,12 @@ class PolicyTrainer:
                         f.write(f"{j}\t{t}\t{v:.6f}\t{a:.6f}\t{m}\n")
                 logger.info(f"MOLT_DUMP_ROLLOUT_LOGPROBS: wrote token-level logprob dump to {dump_path}")
 
+        # Score centering stores the sampler head seq-last (B, k, T-1) like routed_experts; the loss
+        # wants it step-major (B, T-1, k) next to the log-probs.
+        rollout_top_log_probs = experience.rollout_top_log_probs
+        if rollout_top_log_probs is not None:
+            rollout_top_log_probs = rollout_top_log_probs.permute(0, 2, 1)
+
         # Stage 3: compute policy loss and metric-only policy diagnostics.
         # reported_actor_loss is a plain per-token mean for logging, decoupled
         # from the global token-mean used for the gradient (actor_loss).
@@ -478,6 +488,8 @@ class PolicyTrainer:
             dp_size=loss_data_parallel_size,
             batch_num_tokens=batch_num_tokens,
             global_batch_size=batch_num_seqs,
+            top_log_probs=model_output.get("action_top_log_probs"),
+            rollout_top_log_probs=rollout_top_log_probs,
         )
         experience.info["policy_clip_ratio"] = clip_ratio.detach()
         experience.info["policy_kl"] = policy_kl.detach()
@@ -485,6 +497,23 @@ class PolicyTrainer:
             experience.info["vllm_kl"] = vllm_kl.detach()
         if is_filter_ratio is not None:
             experience.info["is_filter_ratio"] = is_filter_ratio.detach()
+        if rollout_log_probs is not None and vllm_kl is None:
+            # Train/rollout mismatch is still worth watching when the IS correction is off (score
+            # centering, strictly on-policy runs): the same k1 log-ratio mean the correction path
+            # reports, plus the sampled-token binary KL the binary_kl trust region would gate on.
+            train_log_probs = action_log_probs.detach().float()
+            diff = torch.nan_to_num(rollout_log_probs.float() - train_log_probs, nan=0.0, posinf=30.0, neginf=-30.0)
+            experience.info["vllm_kl"] = masked_mean(diff, action_mask)
+            experience.info["rollout_binary_kl"] = masked_mean(
+                sampled_binary_kl(rollout_log_probs, train_log_probs), action_mask
+            )
+        if rollout_top_log_probs is not None:
+            # How much of each distribution the top-k head covers; 1 - sampler mass is what the
+            # tail reconstruction has to model (the paper's k ablation).
+            experience.info["sc_sampler_head_mass"] = masked_mean(head_mass(rollout_top_log_probs), action_mask)
+            experience.info["sc_policy_head_mass"] = masked_mean(
+                head_mass(model_output["action_top_log_probs"].detach()), action_mask
+            )
 
         # Stage 4: add optional KL-as-loss, MoE aux loss, and entropy regularization.
         if self.args.algo.kl.use_loss:
