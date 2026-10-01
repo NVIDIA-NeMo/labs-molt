@@ -20,8 +20,8 @@ across multiple configs, the loaded `default` config materializes ~1.79M
 rows). Eval: BytedTsinghua-SIA/AIME-2024 (30 problems).
 
 Both sources already ship `prompt` (chat-style list) and `reward_model`
-(`{ground_truth, style}`), so this script only deduplicates the train
-split, optionally subsamples, and writes to disk in load_from_disk format.
+(`{ground_truth, style}`), so this script deduplicates both splits,
+optionally subsamples, and writes to disk in load_from_disk format.
 
 Any dataset with that schema converts the same way, e.g. the FP16 sanity test
 (sail/Sanity-Test-R1D-1.5B: 1,460 MATH problems, AIME 2024 + 2025 as `test`):
