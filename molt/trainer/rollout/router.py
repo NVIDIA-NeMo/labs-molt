@@ -117,6 +117,11 @@ def _decode_routed_experts(blob):
     return np.asarray(blob)
 
 
+def _token_id(token: str) -> int:
+    """``/inference/v1/generate`` names tokens ``token_id:<id>``."""
+    return int(token.rsplit(":", 1)[1])
+
+
 def _inference_sampling_params(sp) -> dict:
     """The ``sampling_params`` object for vLLM's ``/inference/v1/generate`` (vime's shape). Forward
     every knob set on the rollout SamplingParams so nothing is silently dropped over HTTP (only
@@ -124,7 +129,7 @@ def _inference_sampling_params(sp) -> dict:
     want raw action text)."""
     fields = {
         "max_tokens": sp.max_tokens,
-        "logprobs": 1,
+        "logprobs": getattr(sp, "logprobs", None) or 1,
         "temperature": sp.temperature,
         "top_p": sp.top_p,
         "skip_special_tokens": getattr(sp, "skip_special_tokens", True),
@@ -153,6 +158,14 @@ def _inference_sampling_params(sp) -> dict:
         v = getattr(sp, name, None)
         if v:
             fields[name] = list(v)
+    # The runner decodes the action text from the ids itself, so skip vLLM's frontend detokenizer
+    # (with top-k logprobs it re-decodes every candidate of every token and pins that process at
+    # 100% CPU; stop STRINGS are the one thing that needs it). Top-k logprobs go to vLLM's flat
+    # per-request storage instead of one dict of Logprob objects per token.
+    if "stop" not in fields:
+        fields["detokenize"] = False
+    if fields["logprobs"] > 1:
+        fields["flat_logprobs"] = True
     return fields
 
 
@@ -276,7 +289,16 @@ class RouterGenerateClient:
             raise RuntimeError(f"logprobs.content count {len(content)} != completion tokens {len(ids)}.")
         if any("logprob" not in item for item in content):
             raise RuntimeError("/inference/v1/generate returned a logprobs.content entry without a logprob field.")
-        logprobs = [{t: SimpleNamespace(logprob=float(item["logprob"]))} for t, item in zip(ids, content)]
+        # One vLLM-shaped dict per token: the sampled token first, then the engine's top_logprobs
+        # (present when sampling_params.logprobs > 1; the sampled token is among them and dedups).
+        logprobs = [
+            {t: SimpleNamespace(logprob=float(item["logprob"]))}
+            | {
+                _token_id(e["token"]): SimpleNamespace(logprob=float(e["logprob"]))
+                for e in item.get("top_logprobs") or []
+            }
+            for t, item in zip(ids, content)
+        ]
         fr = c.get("finish_reason")
         finish_reason = fr.get("type") if isinstance(fr, dict) else (fr or "stop")
         # routed_experts is the UNIFIED full-sequence [tokens,layer,topk] npy (prompt+gen); absorb_routing

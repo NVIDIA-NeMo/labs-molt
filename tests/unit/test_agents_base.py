@@ -19,7 +19,13 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from molt.agents.base import Env, Result, StepEnvRunner, _extract_generation_logprobs
+from molt.agents.base import (
+    Env,
+    Result,
+    StepEnvRunner,
+    _extract_generation_logprobs,
+    _extract_generation_top_logprobs,
+)
 
 
 class _Tokenizer:
@@ -146,3 +152,15 @@ def test_step_env_runner_caps_feedback_at_max_length():
     trajectory = _execute(_NeverEndsEnv, max_length=32)
     assert len(trajectory.observation_tokens) == 32
     assert trajectory.truncated is True
+
+
+def test_extract_generation_top_logprobs_keeps_the_engine_order_and_checks_the_count():
+    entries = [
+        {3: SimpleNamespace(logprob=-0.1), 9: SimpleNamespace(logprob=-2.0)},
+        {4: SimpleNamespace(logprob=-0.3), 1: SimpleNamespace(logprob=-1.0)},
+    ]
+    ids, log_probs = _extract_generation_top_logprobs(entries, 2)
+    assert ids.tolist() == [[3, 9], [4, 1]]
+    assert log_probs.reshape(-1).tolist() == pytest.approx([-0.1, -2.0, -0.3, -1.0])
+    with pytest.raises(RuntimeError, match="expected 2"):
+        _extract_generation_top_logprobs([{3: SimpleNamespace(logprob=-0.1)}], 2)

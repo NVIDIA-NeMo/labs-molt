@@ -42,6 +42,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
 
+import numpy as np
 import torch
 
 from molt.utils.logging_utils import init_logger
@@ -96,6 +97,20 @@ def _extract_generation_logprobs(action_token_ids, generation_logprobs):
     return out
 
 
+def _extract_generation_top_logprobs(generation_logprobs, k):
+    """The sampler's top-k per generated token -> ``(ids [n, k], log_probs [n, k])`` for score
+    centering. Each entry dict is the engine's: the sampled token first, then the remaining
+    candidates by rank, exactly ``k`` in total."""
+    ids = np.zeros((len(generation_logprobs), k), dtype=np.int64)
+    log_probs = np.zeros((len(generation_logprobs), k), dtype=np.float32)
+    for i, entries in enumerate(generation_logprobs):
+        if len(entries) != k:
+            raise RuntimeError(f"vLLM returned {len(entries)} top logprobs at position {i}, expected {k}.")
+        ids[i] = list(entries)
+        log_probs[i] = [entry.logprob for entry in entries.values()]
+    return ids, log_probs
+
+
 # ---------------------------------------------------------------------------
 # Result — Gymnasium-style return type from Env.step() and ChatAgent.run().
 # Fields mirror gymnasium.Env.step return:
@@ -138,6 +153,9 @@ class Trajectory:
     # denominator (slime's mask_offpolicy_in_partial_rollout). 0 when on-policy.
     off_policy_action_lens: list = field(default_factory=list)
     rollout_log_probs: list | None = None
+    # Score centering: one ``(ids [n, k], log_probs [n, k])`` pair per action range — the sampler's
+    # top-k per generated token. None unless top-k logprobs were requested (sampling_params.logprobs > 1).
+    rollout_top_logprobs: list | None = None
     # R3 rollout routing replay: per-token MoE expert selection captured from the rollout
     # engine, aligned 1:1 with `observation_tokens` by absolute position (filled by
     # absorb_routing). Each entry is a ``[num_moe_layers, topk]`` int16 row, or None where
@@ -154,13 +172,15 @@ class Trajectory:
     group_id: str | None = None  # one per prompt group (N rollouts); GRPO baseline averaging
     rollout_id: str | None = None  # one per rollout; multi-turn step-samples dedup
 
-    def append_action(self, action_tokens, action_logprobs=None, off_policy_len=0):
+    def append_action(self, action_tokens, action_logprobs=None, off_policy_len=0, action_top_logprobs=None):
         start = len(self.observation_tokens)
         self.observation_tokens.extend(action_tokens)
         self.action_ranges.append((start, len(self.observation_tokens)))
         self.off_policy_action_lens.append(int(off_policy_len))
         if self.rollout_log_probs is not None:
             self.rollout_log_probs.extend(action_logprobs or [0.0] * len(action_tokens))
+        if self.rollout_top_logprobs is not None:
+            self.rollout_top_logprobs.append(action_top_logprobs)
         if self.routed_experts is not None:
             # placeholders; absorb_routing() fills them by absolute position (R3)
             self.routed_experts.extend([None] * len(action_tokens))
@@ -363,6 +383,7 @@ class StepEnvRunner(Runner):
                 pil_images=pil_images,
                 image_budget=image_budget,
                 rollout_log_probs=[0.0] * len(obs_tokens) if sampling_params.logprobs is not None else None,
+                rollout_top_logprobs=[] if (sampling_params.logprobs or 0) > 1 else None,
             )
 
             # Per-turn cap; remaining context dominates if smaller.
@@ -415,10 +436,17 @@ class StepEnvRunner(Runner):
                 trajectory.scores = score_val
                 trajectory.extra_logs = result.info or {}
 
-                action_logprobs = None
+                action_logprobs = action_top_logprobs = None
                 if trajectory.rollout_log_probs is not None:
                     action_logprobs = _extract_generation_logprobs(action_tokens, generation.logprobs)
-                trajectory.append_action(action_tokens, action_logprobs, off_policy_len=off_policy_len)
+                if trajectory.rollout_top_logprobs is not None:
+                    action_top_logprobs = _extract_generation_top_logprobs(generation.logprobs, turn_sp.logprobs)
+                trajectory.append_action(
+                    action_tokens,
+                    action_logprobs,
+                    off_policy_len=off_policy_len,
+                    action_top_logprobs=action_top_logprobs,
+                )
                 trajectory.absorb_routing(request_output)  # fills routing by absolute position (R3)
 
                 feedback_tokens = _tokenize_feedback(

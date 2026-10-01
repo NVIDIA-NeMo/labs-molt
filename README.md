@@ -195,6 +195,7 @@ Common RL switches:
 | Filter by agent scores | `--algo.dynamic_filtering_enable --algo.dynamic_filtering_range 0.0 1.0` |
 | Correct async rollout logprobs | `--algo.advantage.is_correction_level geo` (seq-mask-tis; token-level adds `--algo.advantage.is_correction_mode clip/trunc/mask`) |
 | FlashREINFORCE (critic-free, single-rollout) | `--train.force_on_policy --algo.advantage.estimator flash_reinforce --algo.advantage.is_correction_level seq --algo.advantage.is_correction_gating binary_kl --algo.advantage.is_correction_threshold 5e-3 --actor.loss_agg_mode seq-mean-token-mean` — see [the quick start](examples/scripts/quick_start/rl_flash_reinforce_r1d_1p5b.sh) |
+| Score centering (off-policy REINFORCE without IS) | `--actor.loss_mode reinforce --actor.score_centering` (head size `--actor.score_centering_top_k 32`) — subtracts the rollout sampler's expected score over its top-k ([paper](https://arxiv.org/abs/2609.20807)); works with `--train.force_on_policy` and any group baseline with no `is_correction_*`, or add `--algo.advantage.is_correction_level token --algo.advantage.is_correction_mode trunc` for the paper's TIS variant |
 | Freeze MoE routing (stabilize MoE RL) | `--actor.freeze_moe_router` |
 | On-policy distillation | `--algo.advantage.estimator on_policy_distill --ref.model_name_or_path /path/to/teacher` |
 | Independent eval sampling | `--eval.temperature`, `--eval.top_p`, `--eval.max_new_tokens`, `--eval.n_samples_per_prompt` (unset ones fall back to rollout) |

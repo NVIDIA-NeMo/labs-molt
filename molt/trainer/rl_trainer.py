@@ -813,7 +813,7 @@ class GenerateSamplesActor:
         eval_n = self.args.eval.n_samples_per_prompt
         if eval_n is None:
             eval_n = self.args.rollout.n_samples_per_prompt
-        eval_kwargs = {**self.generate_kwargs, "n_samples_per_prompt": eval_n}
+        eval_kwargs = {**self.generate_kwargs, "n_samples_per_prompt": eval_n, "top_logprobs": 0}  # eval never trains
         for key in ("temperature", "top_p", "max_new_tokens"):
             override = getattr(self.args.eval, key)
             if override is not None:

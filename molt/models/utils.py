@@ -90,10 +90,12 @@ def compute_approx_kl(
 
 
 def log_probs_from_logits(logits: torch.Tensor, labels: torch.Tensor, temperature: float = 1.0) -> torch.Tensor:
+    """Log-probs of ``labels`` under ``logits``: one target per position (``labels`` shaped like
+    ``logits[..., 0]``) or several (a trailing ``k`` dim, e.g. the sampler's top-k ids)."""
     batch_dim = logits.shape[:-1]
     last_dim = logits.shape[-1]
     flat_logits = logits.reshape(-1, last_dim)
-    flat_labels = labels.reshape(-1)
+    flat_labels = labels.reshape(flat_logits.shape[0], -1)
 
     # Both paths below scale at fp32, never on a bf16 input: rounding the quotient back to bf16
     # costs ~1 ULP per logit on top of the logits' own quantization. Non-inplace — callers keep
@@ -101,12 +103,12 @@ def log_probs_from_logits(logits: torch.Tensor, labels: torch.Tensor, temperatur
     #
     # Fast path: fused triton CE kernel only supports fp32/fp64.
     # https://github.com/OpenRLHF/OpenRLHF/pull/718#issuecomment-2641081881
-    if logits.dtype in [torch.float32, torch.float64]:
+    if logits.dtype in [torch.float32, torch.float64] and labels.shape == batch_dim:
         try:
             from flash_attn.ops.triton.cross_entropy import cross_entropy_loss
 
             scaled = flat_logits / temperature if temperature != 1.0 else flat_logits
-            output = cross_entropy_loss(scaled, flat_labels)
+            output = cross_entropy_loss(scaled, flat_labels.squeeze(-1))
             return (-output[0]).view(*batch_dim)
         except ImportError:
             pass
@@ -122,7 +124,7 @@ def log_probs_from_logits(logits: torch.Tensor, labels: torch.Tensor, temperatur
         chunk = chunk_logits.float()
         if temperature != 1.0:
             chunk = chunk / temperature
-        return chunk.gather(dim=-1, index=chunk_labels.unsqueeze(-1)).squeeze(-1) - torch.logsumexp(chunk, dim=-1)
+        return chunk.gather(dim=-1, index=chunk_labels) - torch.logsumexp(chunk, dim=-1, keepdim=True)
 
     chunk_size = 256
     out = []
@@ -130,7 +132,16 @@ def log_probs_from_logits(logits: torch.Tensor, labels: torch.Tensor, temperatur
         chunk_logits = flat_logits[start : start + chunk_size]
         chunk_labels = flat_labels[start : start + chunk_size]
         out.append(torch.utils.checkpoint.checkpoint(chunk_log_probs, chunk_logits, chunk_labels, use_reentrant=False))
-    return torch.cat(out).view(*batch_dim)
+    return torch.cat(out).view(*labels.shape)
+
+
+def sampled_binary_kl(rollout_log_probs: torch.Tensor, log_probs: torch.Tensor) -> torch.Tensor:
+    """Per-token binary KL between the rollout and the training probability of the SAMPLED token,
+    KL(Bernoulli(p_rollout) || Bernoulli(p_train)): the train/rollout mismatch statistic the
+    binary_kl trust region gates on, here as a diagnostic."""
+    p = rollout_log_probs.float().exp().clamp(1e-6, 1 - 1e-6)
+    q = log_probs.float().exp().clamp(1e-6, 1 - 1e-6)
+    return p * (p.log() - q.log()) + (1 - p) * ((1 - p).log() - (1 - q).log())
 
 
 def masked_mean(tensor: torch.Tensor, mask: Optional[torch.Tensor], dim: int = None) -> torch.Tensor:

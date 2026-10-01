@@ -92,7 +92,9 @@ def train(args):
             args.vllm.enforce_eager,
             max_len,
             args.vllm.gpu_memory_utilization,
-            "processed_logprobs" if args.algo.advantage.is_correction_level != "off" else None,
+            "processed_logprobs"
+            if args.algo.advantage.is_correction_level != "off" or args.actor.score_centering
+            else None,
             max_images_per_prompt=getattr(args.data, "max_images_per_prompt", 0),
             mm_encoder_attn_backend=args.vllm.mm_encoder_attn_backend,
             gdn_prefill_backend=args.vllm.gdn_prefill_backend,
@@ -112,6 +114,7 @@ def train(args):
             enable_return_routed_experts=args.train.routing_replay,
             pipeline_parallel_size=getattr(args.vllm, "pipeline_parallel_size", 1),
             data_parallel_size=getattr(args.vllm, "data_parallel_size", 1),
+            max_logprobs=args.actor.score_centering_top_k if args.actor.score_centering else 0,
         )
 
     # Rollout gateway: serve each engine's OpenAI API + the real vllm-router in front of them.
@@ -137,6 +140,8 @@ def train(args):
         "max_new_tokens": args.rollout.max_new_tokens,
         "temperature": args.rollout.temperature,
         "top_p": args.rollout.top_p,
+        # Score centering trains on the sampler's top-k per token; 0 = sampled-token log-prob only.
+        "top_logprobs": args.actor.score_centering_top_k if args.actor.score_centering else 0,
     }
 
     # Eval-only: score --eval.dataset once and exit, with NO training. vLLM already holds the HF
@@ -571,7 +576,7 @@ if __name__ == "__main__":
         "--actor.loss_mode",
         type=str,
         default="ppo",
-        choices=["ppo", "cispo", "gspo"],
+        choices=["ppo", "cispo", "gspo", "reinforce"],
         help="Policy-gradient surrogate: ppo (clipped min(surr1,surr2), optionally --actor.dual_clip) or "
         "cispo (https://arxiv.org/abs/2506.13585 — clips only the upper side of the IS ratio, "
         "stop-gradient through that weight, gradient flows through log-probs only; pass "
@@ -579,7 +584,26 @@ if __name__ == "__main__":
         "--actor.dual_clip is unused in this mode) or "
         "gspo (https://arxiv.org/abs/2507.18071 — clips ONE ratio per sequence, its geometric mean, "
         "so a single outlier token cannot clip the whole update; aggregated with molt's global "
-        "token-mean denominator, not the paper's per-sequence 1/|y|; --actor.dual_clip is unused).",
+        "token-mean denominator, not the paper's per-sequence 1/|y|; --actor.dual_clip is unused) or "
+        "reinforce (plain -A log p, no ratio or clipping; the surrogate --actor.score_centering corrects — "
+        "meant for --train.force_on_policy, where PPO's ratio is 1 anyway).",
+    )
+    parser.add_argument(
+        "--actor.score_centering",
+        action="store_true",
+        help="Score centering (https://arxiv.org/abs/2609.20807): subtract the rollout sampler's expected score "
+        "over its top-k tokens from the REINFORCE loss, so the drift between vLLM and the trainer cancels "
+        "without an importance ratio or trust region. Needs --actor.loss_mode reinforce, --rollout.top_p 1.0 "
+        "and fsdp.cp_size == tp_size == 1. Composes with the per-token IS weight "
+        "(--algo.advantage.is_correction_level token, mode trunc/clip/mask = the paper's TIS/MIS variants); "
+        "with the correction off it is itself the off-policy correction.",
+    )
+    parser.add_argument(
+        "--actor.score_centering_top_k",
+        type=int,
+        default=32,
+        help="Sampler head size for --actor.score_centering: top-k log-probs recorded per generated token. "
+        "The paper uses 128 and reports 32 within noise of it at a quarter of the payload.",
     )
     parser.add_argument(
         "--actor.entropy_coef",
@@ -1019,7 +1043,30 @@ if __name__ == "__main__":
             "n_samples_per_prompt must be greater than 1 when using dynamic filtering"
         )
 
-    if args.algo.advantage.is_correction_level == "off":
+    if args.actor.score_centering:
+        if args.actor.loss_mode != "reinforce":
+            raise ValueError(
+                "--actor.score_centering corrects the REINFORCE surrogate: set --actor.loss_mode reinforce"
+            )
+        if args.actor.score_centering_top_k < 1:
+            raise ValueError("--actor.score_centering_top_k must be positive")
+        if args.rollout.top_p != 1.0 or args.rollout.temperature <= 0:
+            # The head plus the reconstructed tail must be the distribution the engine actually sampled
+            # from; a top-p nucleus truncates the tail and greedy decoding has no distribution at all.
+            raise ValueError("--actor.score_centering needs --rollout.top_p 1.0 and --rollout.temperature > 0")
+        if args.fsdp.cp_size > 1 or args.fsdp.tp_size > 1:
+            raise ValueError("--actor.score_centering requires --fsdp.cp_size 1 --fsdp.tp_size 1")
+        if args.algo.advantage.is_correction_level not in ("off", "token") or (
+            args.algo.advantage.is_correction_gating != "ratio"
+        ):
+            raise ValueError(
+                "--actor.score_centering composes with the per-token ratio weight only: "
+                "--algo.advantage.is_correction_level off|token with --algo.advantage.is_correction_gating ratio"
+            )
+
+    # Score centering is itself the off-policy correction (the centered score is unbiased under the
+    # rollout policy), so it may train async / partial rollouts without an importance ratio.
+    if args.algo.advantage.is_correction_level == "off" and not args.actor.score_centering:
         # The HTTP router path can't observe a mid-request weight swap, so off_policy_len is always 0
         # (no slime-style masking of stale-weight tokens). Async rollout (crosses broadcasts between
         # requests) and partial rollout (preempts mid-request at every weight sync) both then feed

@@ -56,6 +56,7 @@ from molt.agents.base import (
     _TOKENIZE_EXECUTOR,
     Trajectory,
     _extract_generation_logprobs,
+    _extract_generation_top_logprobs,
     _tokenize_feedback,
     _tokenize_observation,
 )
@@ -316,6 +317,7 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
             pil_images=pil_images,
             image_budget=image_budget,
             rollout_log_probs=[0.0] * len(prompt_ids),
+            rollout_top_logprobs=[] if (sp.logprobs or 0) > 1 else None,
         )
         gen_tokens = traj.observation_tokens
     else:
@@ -357,6 +359,9 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
     finish_reason = generation.finish_reason or "stop"
     # a non-empty completion MUST carry aligned per-token logprobs — fails fast otherwise (IS correction).
     action_logprobs = _extract_generation_logprobs(action_ids, generation.logprobs) if action_ids else []
+    action_top_logprobs = None
+    if traj.rollout_top_logprobs is not None:
+        action_top_logprobs = _extract_generation_top_logprobs(generation.logprobs if action_ids else [], sp.logprobs)
 
     # Commit the turn only now that generate succeeded. A failed generate above left the session
     # untouched, so the stock client's retry (same messages) re-runs this turn cleanly — no
@@ -369,7 +374,9 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
     traj.truncated = traj.truncated or finish_reason == "length"
     # off_policy_len: leading tokens generated under stale weights when a broadcast landed
     # mid-request (per-token IS still corrects them); the transport reports it, same as the step runner.
-    traj.append_action(action_ids, action_logprobs, off_policy_len=off_policy_len)
+    traj.append_action(
+        action_ids, action_logprobs, off_policy_len=off_policy_len, action_top_logprobs=action_top_logprobs
+    )
     # R3: absorb this turn's prefill+gen routing by absolute position (first-writer-wins). The full
     # prefill covers the prior action's trailing token too, so the turn-boundary backfills naturally.
     traj.absorb_routing(request_output)

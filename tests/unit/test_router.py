@@ -307,3 +307,37 @@ def test_agent_runner_drops_unconvertible_trajectory(monkeypatch):
 
     # The conversion error is reported per rollout instead of failing the whole group task.
     assert results == [(None, "convert_error"), (None, "convert_error")]
+
+
+def test_generate_forwards_logprobs_k_and_parses_top_logprobs_into_the_token_dict():
+    content = [
+        {
+            "token": "token_id:90",
+            "logprob": -0.1,
+            "top_logprobs": [{"token": "token_id:90", "logprob": -0.1}, {"token": "token_id:7", "logprob": -2.0}],
+        }
+    ]
+    resp = {"choices": [{"token_ids": [90], "finish_reason": "stop", "logprobs": {"content": content}}]}
+    http = _FakeHttp({GEN: resp})
+    sp = SimpleNamespace(max_tokens=8, temperature=1.0, top_p=1.0, logprobs=2)
+
+    ro, _ = asyncio.run(RouterGenerateClient(http).generate([1, 2], sp))
+
+    assert http.calls[0][1]["sampling_params"]["logprobs"] == 2
+    entries = ro.outputs[0].logprobs[0]  # sampled token first, then the engine's remaining candidates
+    assert list(entries) == [90, 7]
+    assert entries[7].logprob == pytest.approx(-2.0)
+
+
+def test_generate_skips_frontend_detokenization_unless_stop_strings_need_it():
+    http = _FakeHttp({GEN: _gen_resp([9])})
+    sp = SimpleNamespace(max_tokens=8, temperature=1.0, top_p=1.0, logprobs=32)
+    asyncio.run(RouterGenerateClient(http).generate([1, 2], sp))
+    spp = http.calls[0][1]["sampling_params"]
+    assert spp["detokenize"] is False and spp["flat_logprobs"] is True
+
+    http = _FakeHttp({GEN: _gen_resp([9])})
+    sp = SimpleNamespace(max_tokens=8, temperature=1.0, top_p=1.0, stop=["</answer>"])
+    asyncio.run(RouterGenerateClient(http).generate([1, 2], sp))
+    spp = http.calls[0][1]["sampling_params"]
+    assert "detokenize" not in spp and "flat_logprobs" not in spp and spp["stop"] == ["</answer>"]

@@ -471,7 +471,10 @@ class SamplesGenerator:
             max_tokens=generate_kwargs.get("max_new_tokens"),  # None = dynamic per-prompt
             min_tokens=generate_kwargs.get("min_new_tokens", 1),
             skip_special_tokens=generate_kwargs.get("skip_special_tokens", False),
-            logprobs=1 if self.args.algo.advantage.is_correction_level != "off" else None,
+            # Score centering trains on the sampler's top-k (rollout only, see _run_eval); the IS
+            # correction needs just the sampled token's logprob.
+            logprobs=generate_kwargs.get("top_logprobs")
+            or (1 if self.args.algo.advantage.is_correction_level != "off" else None),
         )
         truncate_length = generate_kwargs.get("max_len", 2048)
         n_samples = generate_kwargs.get("n_samples_per_prompt", self.args.rollout.n_samples_per_prompt)
@@ -571,6 +574,17 @@ class SamplesGenerator:
         if response_length == 0:
             logger.warning("Skipping rollout response with no trainable action tokens.")
             return None, "no_action_tokens"
+        # Score centering: scatter each action range's sampler top-k onto the token axis (zeros
+        # elsewhere), then shift to the step axis like rollout_log_probs and store seq-last (k, T-1).
+        rollout_top_ids = rollout_top_log_probs = None
+        if response.rollout_top_logprobs is not None:
+            k = response.rollout_top_logprobs[0][0].shape[1]
+            top_ids = np.zeros((len(trajectory_tokens), k), dtype=np.int64)
+            top_log_probs = np.zeros((len(trajectory_tokens), k), dtype=np.float32)
+            for (start, end), (ids, log_probs) in zip(response.action_ranges, response.rollout_top_logprobs):
+                top_ids[start:end], top_log_probs[start:end] = ids, log_probs
+            rollout_top_ids = torch.from_numpy(top_ids[step_slice].T.copy()).unsqueeze(0)
+            rollout_top_log_probs = torch.from_numpy(top_log_probs[step_slice].T.copy()).unsqueeze(0)
         total_length = attention_mask.float().sum()
         is_clipped = total_length >= truncate_length
 
@@ -619,6 +633,8 @@ class SamplesGenerator:
             attention_mask=attention_mask.unsqueeze(0),
             action_mask=action_mask.unsqueeze(0),
             rollout_log_probs=rollout_log_probs.unsqueeze(0) if rollout_log_probs is not None else None,
+            rollout_top_ids=rollout_top_ids,
+            rollout_top_log_probs=rollout_top_log_probs,
             routed_experts=routed_experts,
             prompts=[response.prompt],
             labels=[response.label],

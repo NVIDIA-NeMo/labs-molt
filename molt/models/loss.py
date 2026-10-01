@@ -21,7 +21,8 @@ from typing import Callable, Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from .utils import masked_mean
+from .score_centering import score_centering_correction
+from .utils import masked_mean, sampled_binary_kl
 
 
 def masked_sum(values: torch.Tensor, mask: torch.Tensor, dim: int | tuple[int, ...] | None = None) -> torch.Tensor:
@@ -250,6 +251,14 @@ def cispo_policy_loss(ratio, advantages, log_probs, action_mask, *, clip_eps_hig
     return loss, clip_ratio
 
 
+@register_policy_loss("reinforce")
+def reinforce_policy_loss(ratio, advantages, log_probs, action_mask, **_):
+    """Plain REINFORCE `-A log p`: no ratio, no clipping. The per-token IS weight / divergence gate
+    still applies in forward; score centering (`PolicyLoss(score_centering=True)`) adds its correction
+    on top. Nothing is clipped, so the clip fraction is 0."""
+    return -advantages * log_probs, torch.zeros((), device=log_probs.device)
+
+
 class PolicyLoss(nn.Module):
     """
     Clipped policy-gradient loss for non-critic RL.
@@ -271,6 +280,7 @@ class PolicyLoss(nn.Module):
         loss_agg_mode: str = "token-mean",
         loss_mode: str = "ppo",
         is_correction_gating: str = "ratio",
+        score_centering: bool = False,
     ) -> None:
         super().__init__()
         self.clip_eps_low = clip_eps_low
@@ -309,6 +319,19 @@ class PolicyLoss(nn.Module):
             )
 
         self.is_correction_gating = is_correction_gating
+        # Score centering (https://arxiv.org/abs/2609.20807): subtract the sampler's expected score
+        # over its top-k so off-policy drift cancels without a ratio. It is a correction to REINFORCE,
+        # and the paper's Eq. 14 composes it with a PER-TOKEN importance weight only, so the sequence
+        # gates (seq/geo) and the divergence gates (binary_kl/tv) cannot be applied to the head.
+        self.score_centering = score_centering
+        if score_centering:
+            if self.loss_mode != "reinforce":
+                raise ValueError(f"score_centering corrects the REINFORCE surrogate; got loss_mode={self.loss_mode!r}")
+            if self.is_correction_level not in {"off", "token"} or self.is_correction_gating != "ratio":
+                raise ValueError(
+                    "score_centering composes with the per-token ratio weight only: "
+                    "is_correction_level off|token with is_correction_gating ratio"
+                )
 
         if self.is_correction_level not in {"off", "token", "seq", "geo"}:
             raise ValueError(f"is_correction_level must be off/token/seq/geo, got {self.is_correction_level}")
@@ -341,7 +364,11 @@ class PolicyLoss(nn.Module):
         dp_size: int = 1,
         batch_num_tokens: Optional[torch.Tensor] = None,
         global_batch_size: Optional[torch.Tensor] = None,
+        top_log_probs: Optional[torch.Tensor] = None,
+        rollout_top_log_probs: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        """``top_log_probs`` / ``rollout_top_log_probs`` are ``[B, T-1, k]``: the trained policy's and
+        the sampler's log-probs of the sampler's top-k ids per step (score centering only)."""
         log_ratio_limit = 30.0
         policy_log_ratio = torch.nan_to_num(
             log_probs.float() - old_log_probs.float(),
@@ -387,9 +414,7 @@ class PolicyLoss(nn.Module):
             if self.is_correction_gating == "ratio":
                 gating_stat = token_ratio
             elif self.is_correction_gating == "binary_kl":
-                p = rollout_log_probs.float().exp().clamp(1e-6, 1 - 1e-6)
-                q = old_log_probs.float().exp().clamp(1e-6, 1 - 1e-6)
-                gating_stat = p * (p.log() - q.log()) + (1 - p) * ((1 - p).log() - (1 - q).log())
+                gating_stat = sampled_binary_kl(rollout_log_probs, old_log_probs)
             elif self.is_correction_gating == "tv":
                 gating_stat = (rollout_log_probs.float().exp() - old_log_probs.float().exp()).abs()
             else:
@@ -438,6 +463,19 @@ class PolicyLoss(nn.Module):
                 neginf=-log_ratio_limit,
             )
             vllm_kl = masked_mean(vllm_logprob_diff, action_mask, dim=None)
+
+        if self.score_centering:
+            if top_log_probs is None or rollout_top_log_probs is None:
+                raise ValueError("score_centering needs the sampler's top-k log-probs (--actor.score_centering_top_k)")
+            # The same weight f that multiplied the sampled token above (1 when the IS correction is
+            # off) weights every head candidate, so E_q[grad] stays 0 (paper Eq. 14).
+            weight = ("none", None, None)
+            if self.is_correction_level != "off":
+                weight = (self.is_correction_mode, *self.is_correction_threshold)
+            correction, _, _ = score_centering_correction(
+                top_log_probs, rollout_top_log_probs, mode=weight[0], low=weight[1], high=weight[2]
+            )
+            loss = loss + advantages * correction
 
         # Reported loss is a plain per-token mean, decoupled from the gradient
         # normalization below. With the slime "global token-mean" denominator
