@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+
 import torch
 
 from molt.models.utils import log_probs_from_logits
@@ -33,3 +34,19 @@ def test_chunked_log_probs_match_log_softmax_in_value_and_gradient():
 
     torch.testing.assert_close(log_probs, reference.detach(), atol=1e-5, rtol=1e-5)
     torch.testing.assert_close(logits.grad.float(), ref_logits.grad.to(torch.bfloat16).float(), atol=1e-2, rtol=1e-2)
+
+
+def test_log_probs_from_logits_gathers_several_targets_per_position():
+    torch.manual_seed(0)
+    logits = torch.randn(2, 5, 50, dtype=torch.bfloat16)
+    ids = torch.randint(0, 50, (2, 5, 4))
+    out = log_probs_from_logits(logits, ids, temperature=0.7)
+    reference = torch.log_softmax(logits.float() / 0.7, dim=-1).gather(-1, ids)
+    assert out.shape == (2, 5, 4)
+    torch.testing.assert_close(out, reference, atol=1e-5, rtol=1e-5)
+    # The single-target call is the k == 1 case of the same path.
+    torch.testing.assert_close(log_probs_from_logits(logits, ids[..., 0], temperature=0.7), out[..., 0])
+    # CP THD hands the labels as a flat token stream next to (1, local, V) logits: the result still
+    # follows the logits' leading dims, with or without the k axis.
+    assert log_probs_from_logits(logits[:1], ids[0, :, 0]).shape == (1, 5)
+    assert log_probs_from_logits(logits[:1], ids[0]).shape == (1, 5, 4)

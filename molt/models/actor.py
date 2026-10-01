@@ -19,6 +19,7 @@
 from typing import Optional
 
 import torch
+import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 
 from molt.trainer.fsdp.packing import log_probs_from_vocab_parallel_logits, unshard_dtensor
@@ -44,6 +45,7 @@ class Actor(BaseModel):
         cp_context_stack=None,
         return_entropy=False,
         routed_experts: Optional[torch.Tensor] = None,
+        top_ids: Optional[torch.Tensor] = None,
         **mm_inputs,
     ) -> _AttrDict:
         """Run the policy forward and return one named output dict.
@@ -55,6 +57,9 @@ class Actor(BaseModel):
         - ``action_log_probs``: ``[B, num_actions]`` masked to the generated span —
                                 only when ``action_mask`` is given (RL / reference).
         - ``entropy``:          ``[B, S-1]`` — only when ``return_entropy`` (RL).
+        - ``action_top_log_probs``: ``[B, num_actions, k]`` log-probs of the sampler's top-k
+                                candidate ids ``top_ids`` (``[B, S-1, k]``, caller coordinates)
+                                — only when given (score centering).
         - ``aux_loss``:         MoE load-balancing loss — only for NeMo custom MoE.
         """
         output, rolled_sequences, cp_forward, indices, batch, seqlen = self._forward_backbone(
@@ -85,18 +90,41 @@ class Actor(BaseModel):
             )
             output["entropy"] = entropy[:, :-1]
 
+        # Score centering: the sampler's top-k ids ride along as extra targets of the SAME log-prob
+        # pass (one log-softmax per row). They arrive step-major (B, S-1, k) in the caller's
+        # coordinates and take the labels' seq-axis transform: the CP shard, or real-token packing.
+        # Padded to (B, S, k) like rolled_sequences: row t holds the candidates for token t+1.
+        targets = rolled_sequences
+        if top_ids is not None:
+            if isinstance(logits, DTensor):
+                raise NotImplementedError("top-k log-probs (score centering) need fsdp.tp_size == 1")
+            ids = F.pad(top_ids, (0, 0, 0, 1))
+            if cp_forward:
+                # Same verb as the R3 routing ids: THD layouts shard the flattened [B*S] stream
+                # (token axes leading) after _forward_backbone padded it to a multiple of 2 * cp_size,
+                # so the ids get the same tail; padded layouts shard the seq dim (the sharder pads).
+                if self.packing_samples:
+                    ids = F.pad(ids, (0, 0, 0, -ids.shape[1] % (2 * self.cp_size)))
+                    ids = self._cp_sharder.shard_token_tensor(ids, fill=0)
+                else:
+                    ids = self._cp_sharder.shard_token_tensor(ids, seq_dim=1, fill=0)
+            elif indices is not None:  # packed forward: same real-token order (and pad) as the labels
+                ids = ids.reshape(-1, ids.shape[-1]).index_select(0, indices).unsqueeze(0)
+                ids = F.pad(ids, (0, 0, 0, rolled_sequences.shape[1] - ids.shape[1]))
+            targets = torch.cat([rolled_sequences.unsqueeze(-1), ids.reshape(*rolled_sequences.shape, -1)], dim=-1)
         if isinstance(logits, DTensor):
-            log_probs = log_probs_from_vocab_parallel_logits(
-                logits,
-                rolled_sequences,
-                temperature=self.temperature,
-            )
+            all_log_probs = log_probs_from_vocab_parallel_logits(logits, targets, temperature=self.temperature)
         else:
             # Pass bf16 directly: log_probs_from_logits chunks the fp32 upcast
             # internally to avoid the [B*S, V] memory spike that OOMs on
             # large-vocab models (Qwen3.6: 152K vocab × 65K tokens = 37 GiB).
             log_probs_input = logits if (cp_forward or full_logits is None) else full_logits
-            log_probs = log_probs_from_logits(log_probs_input, rolled_sequences, temperature=self.temperature)
+            all_log_probs = log_probs_from_logits(log_probs_input, targets, temperature=self.temperature)
+        top_log_probs = None
+        if top_ids is not None:
+            log_probs, top_log_probs = all_log_probs[..., 0], all_log_probs[..., 1:]
+        else:
+            log_probs = all_log_probs
 
         log_probs = self._restore_full_sequence(
             log_probs, cp_forward=cp_forward, batch=batch, seqlen=seqlen, indices=indices
@@ -111,5 +139,10 @@ class Actor(BaseModel):
         # log-probs, zeroed outside the generated tokens.
         if action_mask is not None:
             output["action_log_probs"] = output["log_probs"][:, -action_mask.shape[1] :] * action_mask.float()
+            if top_log_probs is not None:
+                top_log_probs = self._restore_full_sequence(
+                    top_log_probs, cp_forward=cp_forward, batch=batch, seqlen=seqlen, indices=indices
+                )
+                output["action_top_log_probs"] = top_log_probs[:, :-1][:, -action_mask.shape[1] :]
 
         return output

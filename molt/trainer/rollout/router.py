@@ -134,7 +134,7 @@ def _inference_sampling_params(sp) -> dict:
     want raw action text)."""
     fields = {
         "max_tokens": sp.max_tokens,
-        "logprobs": 1,
+        "logprobs": getattr(sp, "logprobs", None) or 1,
         "temperature": sp.temperature,
         "top_p": sp.top_p,
         "skip_special_tokens": getattr(sp, "skip_special_tokens", True),
@@ -163,6 +163,18 @@ def _inference_sampling_params(sp) -> dict:
         v = getattr(sp, name, None)
         if v:
             fields[name] = list(v)
+    # The runner decodes the action text from the ids itself, so skip vLLM's frontend detokenizer
+    # (with top-k logprobs it re-decodes every candidate of every token and pins that process at
+    # 100% CPU; stop STRINGS are the one thing that needs it). Top-k logprobs go to vLLM's flat
+    # per-request storage instead of one dict of Logprob objects per token.
+    if "stop" not in fields:
+        fields["detokenize"] = False
+    if fields["logprobs"] > 1:
+        fields["flat_logprobs"] = True
+        if "stop" in fields:
+            # Under the detokenizer vLLM 0.31.0 names a top_logprobs entry by its text only, so the
+            # candidate id is lost; stop_token_ids keep the ids.
+            raise ValueError("score centering (top-k logprobs) does not support stop strings; use stop_token_ids")
     return fields
 
 
@@ -287,6 +299,20 @@ class RouterGenerateClient:
         if any("logprob" not in item for item in content):
             raise RuntimeError("/inference/v1/generate returned a logprobs.content entry without a logprob field.")
         logprobs = [{t: SimpleNamespace(logprob=float(item["logprob"]))} for t, item in zip(ids, content)]
+        # Score centering (sampling_params.logprobs = k > 1): the sampler's top-k per token as two
+        # [n, k] arrays, the sampled token leading each row. vLLM >= 0.31.1 names the candidate with
+        # a `token_id` field, 0.31.0 only as the "token_id:<id>" string.
+        top_logprobs = None
+        if (getattr(sampling_params, "logprobs", None) or 1) > 1:
+            k = sampling_params.logprobs
+            heads = [item.get("top_logprobs") or [] for item in content]
+            if any(len(h) != k for h in heads):
+                raise RuntimeError(f"/inference/v1/generate returned a top_logprobs row without exactly {k} entries.")
+            top_logprobs = (
+                np.array([e.get("token_id", e["token"].rsplit(":", 1)[-1]) for h in heads for e in h], dtype=np.int64),
+                np.array([e["logprob"] for h in heads for e in h], dtype=np.float32),
+            )
+            top_logprobs = tuple(a.reshape(len(heads), k) for a in top_logprobs)
         fr = c.get("finish_reason")
         finish_reason = fr.get("type") if isinstance(fr, dict) else (fr or "stop")
         # routed_experts is the UNIFIED full-sequence [tokens,layer,topk] npy (prompt+gen); absorb_routing
@@ -300,6 +326,7 @@ class RouterGenerateClient:
             text="",  # /inference/v1/generate is token-only; the runner decodes text from token_ids
             finish_reason=finish_reason,
             logprobs=logprobs,
+            top_logprobs=top_logprobs,
             routed_experts=routed_experts,
         )
         # off_policy_len=0: the HTTP transport can't observe a mid-request weight-swap boundary and

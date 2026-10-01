@@ -93,7 +93,9 @@ def train(args):
             args.vllm.enforce_eager,
             max_len,
             args.vllm.gpu_memory_utilization,
-            "processed_logprobs" if args.algo.advantage.is_correction_level != "off" else None,
+            "processed_logprobs"
+            if args.algo.advantage.is_correction_level != "off" or args.algo.advantage.score_centering_top_k
+            else None,
             max_images_per_prompt=getattr(args.data, "max_images_per_prompt", 0),
             mm_encoder_attn_backend=args.vllm.mm_encoder_attn_backend,
             gdn_prefill_backend=args.vllm.gdn_prefill_backend,
@@ -113,6 +115,7 @@ def train(args):
             enable_return_routed_experts=args.train.routing_replay,
             pipeline_parallel_size=getattr(args.vllm, "pipeline_parallel_size", 1),
             data_parallel_size=getattr(args.vllm, "data_parallel_size", 1),
+            max_logprobs=args.algo.advantage.score_centering_top_k,
         )
 
     # Rollout gateway: serve each engine's OpenAI API + the real vllm-router in front of them.
@@ -140,6 +143,8 @@ def train(args):
         "max_new_tokens": args.rollout.max_new_tokens,
         "temperature": args.rollout.temperature,
         "top_p": args.rollout.top_p,
+        # Score centering trains on the sampler's top-k per token; 0 = sampled-token log-prob only.
+        "top_logprobs": args.algo.advantage.score_centering_top_k,
     }
 
     # Eval-only: score --eval.dataset once and exit, with NO training. vLLM already holds the HF
@@ -514,6 +519,16 @@ if __name__ == "__main__":
         choices=["mask", "clip", "trunc"],
         help="Bound treatment (token level only for clip/trunc): mask (drop out-of-band units, zero "
         "gradient), clip (clamp the weight into [low, high]), trunc (clamp only the upper tail).",
+    )
+    parser.add_argument(
+        "--algo.advantage.score_centering_top_k",
+        type=int,
+        default=0,
+        help="Score centering (https://arxiv.org/abs/2609.20807): record the rollout sampler's top-k log-probs per "
+        "generated token and subtract its expected score from the policy loss, so vLLM/trainer drift cancels "
+        "without an importance ratio. 0 = off; the paper uses 128 and reports 32 within noise at a quarter of the "
+        "payload. Needs one update per batch (--train.max_epochs 1), --rollout.top_p 1.0 and fsdp tp_size 1; "
+        "composes with is_correction_level token (mode trunc/clip/mask = the paper's TIS/MIS variants).",
     )
     parser.add_argument(
         "--algo.advantage.is_correction_threshold",
@@ -1081,7 +1096,23 @@ if __name__ == "__main__":
             "n_samples_per_prompt must be greater than 1 when using dynamic filtering"
         )
 
-    if args.algo.advantage.is_correction_level == "off":
+    if args.algo.advantage.score_centering_top_k:  # the IS-composition constraint is PolicyLoss's
+        if args.train.max_epochs != 1:
+            # The centered term is the REINFORCE score; a second epoch over the same batch moves the
+            # policy ratio off 1 and the clipped surrogate no longer is that score.
+            raise ValueError(
+                "--algo.advantage.score_centering_top_k needs one update per batch (--train.max_epochs 1)"
+            )
+        if args.rollout.top_p != 1.0 or args.rollout.temperature <= 0:
+            # The head plus the reconstructed tail must be the distribution the engine actually sampled
+            # from; a top-p nucleus truncates the tail and greedy decoding has no distribution at all.
+            raise ValueError("score centering needs --rollout.top_p 1.0 and --rollout.temperature > 0")
+        if args.fsdp.tp_size > 1:
+            raise ValueError("score centering requires --fsdp.tp_size 1 (the head is not vocab-parallel yet)")
+
+    # Score centering is itself the off-policy correction (the centered score is unbiased under the
+    # rollout policy), so it may train async / partial rollouts without an importance ratio.
+    if args.algo.advantage.is_correction_level == "off" and not args.algo.advantage.score_centering_top_k:
         # The HTTP router path can't observe a mid-request weight swap, so off_policy_len is always 0
         # (no slime-style masking of stale-weight tokens). Async rollout (crosses broadcasts between
         # requests) and partial rollout (preempts mid-request at every weight sync) both then feed
