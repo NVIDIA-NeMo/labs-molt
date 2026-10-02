@@ -22,6 +22,7 @@ per-microbatch ``agg_loss`` over the window therefore yields slime's
 ``calculate_per_token_loss=True`` objective: ``Σ (loss*mask).sum() / Σ mask.sum()``.
 """
 
+import pytest
 import torch
 
 from molt.models import PolicyLoss
@@ -114,3 +115,60 @@ def test_policy_loss_reports_per_token_mean_independent_of_denominator():
     )
     torch.testing.assert_close(reported, torch.tensor(-1.0))
     torch.testing.assert_close(agg, torch.tensor(-3.0 / 100.0))
+
+
+def _prompt_mean_window(losses, masks, prompt_ids, dp_size=1):
+    # Mirror policy_train for prompt-mean-token-mean: per-prompt token counts and the
+    # prompt count come from the whole window, each microbatch is aggregated with them.
+    counts = {}
+    for mask, ids in zip(masks, prompt_ids):
+        for pid, n in zip(ids, mask.sum(dim=-1).tolist()):
+            counts[pid] = counts.get(pid, 0.0) + n
+    return sum(
+        agg_loss(
+            loss,
+            mask,
+            "prompt-mean-token-mean",
+            dp_size=dp_size,
+            global_batch_size=sum(n > 0 for n in counts.values()),
+            prompt_token_counts=torch.tensor([counts[pid] for pid in ids]),
+        )
+        for loss, mask, ids in zip(losses, masks, prompt_ids)
+    )
+
+
+def test_prompt_mean_token_mean_weighs_every_prompt_the_same():
+    # Prompt "a": two rollouts, 3 action tokens in all; prompt "b": one rollout of 1 token.
+    # The rollouts of "a" are split over two microbatches.
+    losses = [torch.tensor([[1.0, 2.0, 9.0], [10.0, 9.0, 9.0]]), torch.tensor([[4.0, 9.0]])]
+    masks = [torch.tensor([[1.0, 1.0, 0.0], [1.0, 0.0, 0.0]]), torch.tensor([[1.0, 0.0]])]
+    prompt_ids = [["a", "b"], ["a"]]
+
+    got = _prompt_mean_window(losses, masks, prompt_ids)
+    want = ((1.0 + 2.0 + 4.0) / 3 + 10.0 / 1) / 2  # token-mean inside "a" and "b", then prompt mean
+    torch.testing.assert_close(got, torch.tensor(want))
+
+
+def test_prompt_mean_token_mean_reduces_to_token_mean_for_uniform_prompts():
+    # Equal rollouts per prompt and equal lengths: every token already weighs the same,
+    # so the mode coincides with the global token-mean (regression-safe default case).
+    losses = [torch.tensor([[1.0, 3.0], [5.0, 7.0]]), torch.tensor([[2.0, 4.0], [6.0, 8.0]])]
+    masks = [torch.ones(2, 2), torch.ones(2, 2)]
+    prompt_ids = [["a", "a"], ["b", "b"]]
+
+    got = _prompt_mean_window(losses, masks, prompt_ids)
+    want = _window_loss(losses, masks, sum(m.sum() for m in masks))
+    torch.testing.assert_close(got, want)
+
+
+def test_prompt_mean_token_mean_scales_by_dp_size_and_needs_prompt_counts():
+    loss, mask = torch.tensor([[1.0, 3.0]]), torch.ones(1, 2)
+    single = agg_loss(
+        loss, mask, "prompt-mean-token-mean", global_batch_size=1, prompt_token_counts=torch.tensor([2.0])
+    )
+    doubled = agg_loss(
+        loss, mask, "prompt-mean-token-mean", dp_size=2, global_batch_size=1, prompt_token_counts=torch.tensor([2.0])
+    )
+    torch.testing.assert_close(doubled, single * 2)
+    with pytest.raises(ValueError, match="prompt_token_counts"):
+        agg_loss(loss, mask, "prompt-mean-token-mean", global_batch_size=1)

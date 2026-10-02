@@ -42,12 +42,17 @@ def agg_loss(
     batch_num_tokens: Optional[torch.Tensor | int] = None,
     global_batch_size: Optional[torch.Tensor | int] = None,
     loss_scale_factor: Optional[int] = None,
+    prompt_token_counts: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Aggregate token/sequence losses following the ``agg_loss`` contract.
 
     The returned scalar is invariant to DP/FSDP averaging when callers provide
     global batch metadata. For ``token-mean`` this is exactly:
     ``masked_sum(loss_mat, loss_mask) / batch_num_tokens * dp_size``.
+
+    ``prompt-mean-token-mean`` (token-mean inside each prompt, plain mean over prompts)
+    needs ``prompt_token_counts`` — per sequence, the action tokens of its prompt in the
+    whole optimizer-step batch — and ``global_batch_size`` = that batch's prompt count.
     """
     if loss_agg_mode == "token-mean":
         if batch_num_tokens is None:
@@ -89,6 +94,12 @@ def agg_loss(
         if denom.item() == 0:
             return loss_sum * 0.0
         return loss_sum / denom * dp_size
+
+    if loss_agg_mode == "prompt-mean-token-mean":
+        if prompt_token_counts is None or global_batch_size is None:
+            raise ValueError("prompt-mean-token-mean needs prompt_token_counts and global_batch_size (prompt count)")
+        seq_losses = masked_sum(loss_mat, loss_mask, dim=-1) / prompt_token_counts.clamp(min=1)
+        return seq_losses.sum() / global_batch_size * dp_size
 
     raise ValueError(f"Invalid loss_agg_mode: {loss_agg_mode}")
 
@@ -341,6 +352,7 @@ class PolicyLoss(nn.Module):
         dp_size: int = 1,
         batch_num_tokens: Optional[torch.Tensor] = None,
         global_batch_size: Optional[torch.Tensor] = None,
+        prompt_token_counts: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         log_ratio_limit = 30.0
         policy_log_ratio = torch.nan_to_num(
@@ -454,6 +466,7 @@ class PolicyLoss(nn.Module):
                 dp_size=dp_size,
                 batch_num_tokens=batch_num_tokens,
                 global_batch_size=global_batch_size,
+                prompt_token_counts=prompt_token_counts,
             )
         else:
             loss = agg_loss(

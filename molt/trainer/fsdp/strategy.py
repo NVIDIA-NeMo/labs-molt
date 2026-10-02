@@ -599,6 +599,16 @@ class FsdpStrategy:
             dist.all_reduce(local, op=dist.ReduceOp.SUM, group=dp_group)
         return local
 
+    def global_prompt_token_counts(self, counts: dict) -> dict:
+        """Sum per-prompt action-token counts over the DP data mesh (the reduction of
+        ``global_token_count``, keyed by prompt: a prompt's rollouts may sit on several ranks)."""
+        dp_group = self._get_dp_group(include_cp=False)
+        if not (dist.is_initialized() and dp_group is not None):
+            return counts
+        parts = [None] * dist.get_world_size(group=dp_group)
+        dist.all_gather_object(parts, counts, group=dp_group)
+        return {key: sum(part.get(key, 0.0) for part in parts) for key in set().union(*parts)}
+
     def compute_perf_metrics(
         self, mfu, local_seq_count: float, local_token_sum: float, seconds: float, prefix: str = "perf/"
     ) -> dict:

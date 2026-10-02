@@ -345,6 +345,20 @@ class PolicyTrainer:
                 if self.actor_loss_fn.loss_agg_mode != "token-mean":
                     local_seqs = torch.tensor(sum(exp.action_mask.shape[0] for exp in window))
                     batch_num_seqs = self.strategy.global_token_count(local_seqs)
+                # prompt-mean-token-mean divides every sequence by its PROMPT's action tokens in
+                # the whole window (all microbatches, all DP ranks; prompts = group ids) and the
+                # window by its prompt count, which here takes the place of the sequence count.
+                prompt_token_counts = [None] * len(window)
+                if self.actor_loss_fn.loss_agg_mode == "prompt-mean-token-mean":
+                    local_counts: Dict[str, float] = {}
+                    for exp in window:
+                        for key, n in zip(exp.group_ids, exp.action_mask.sum(dim=-1).tolist(), strict=True):
+                            local_counts[key] = local_counts.get(key, 0.0) + n
+                    counts = self.strategy.global_prompt_token_counts(local_counts)
+                    batch_num_seqs = torch.tensor(float(sum(n > 0 for n in counts.values())))
+                    prompt_token_counts = [
+                        torch.tensor([counts[key] for key in exp.group_ids], device=device) for exp in window
+                    ]
                 for idx, exp in enumerate(window):
                     exp.to_device(device)
                     # Full per-sequence lengths drive the FLOP estimate (forward
@@ -354,7 +368,13 @@ class PolicyTrainer:
                     local_token_sum += float(seqlens.sum())
                     is_optimizer_step = idx == len(window) - 1
                     status = self.training_step(
-                        exp, kl_ctl, batch_num_tokens, len(window), is_optimizer_step, batch_num_seqs
+                        exp,
+                        kl_ctl,
+                        batch_num_tokens,
+                        len(window),
+                        is_optimizer_step,
+                        batch_num_seqs,
+                        prompt_token_counts[idx],
                     )
                     self._record_status(status, status_list, pbar)
                     if force_on_policy and self.replay_buffer.cpu_offload:
@@ -395,6 +415,7 @@ class PolicyTrainer:
         num_microbatches: int,
         is_optimizer_step: bool,
         batch_num_seqs: Optional[torch.Tensor] = None,
+        prompt_token_counts: Optional[torch.Tensor] = None,
     ) -> Dict[str, object]:
         self.actor.train()
 
@@ -478,6 +499,7 @@ class PolicyTrainer:
             dp_size=loss_data_parallel_size,
             batch_num_tokens=batch_num_tokens,
             global_batch_size=batch_num_seqs,
+            prompt_token_counts=prompt_token_counts,
         )
         experience.info["policy_clip_ratio"] = clip_ratio.detach()
         experience.info["policy_kl"] = policy_kl.detach()

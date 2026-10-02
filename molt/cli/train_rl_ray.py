@@ -595,9 +595,10 @@ if __name__ == "__main__":
         "--actor.loss_agg_mode",
         type=str,
         default="token-mean",
-        choices=["token-mean", "seq-mean-token-mean"],
-        help="Policy-loss aggregation: token-mean (global token mean) or seq-mean-token-mean (sample mean: every "
-        "sequence weighs the same).",
+        choices=["token-mean", "seq-mean-token-mean", "prompt-mean-token-mean"],
+        help="Policy-loss aggregation: token-mean (global token mean), seq-mean-token-mean (every sequence weighs "
+        "the same) or prompt-mean-token-mean (token mean inside each prompt's rollouts, then every prompt weighs "
+        "the same).",
     )
     parser.add_argument("--reward.clip_range", type=float, nargs=2, default=(-10, 10), help="Reward clip range")
 
