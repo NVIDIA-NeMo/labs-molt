@@ -146,7 +146,8 @@ EXTRA_PYTHONPATH=/path/to/automodel-slim ...                                    
 
 `setup.py` holds both pins (`AUTOMODEL`); the slim install follows the branch head, so a merge there is
 live on the next image build or reinstall. Model and parallel-stack changes go to that branch as PRs, with
-the same `cicd` label check and `/claude review` as this repo.
+the same `cicd` label check as this repo. Request reviews with `/review`; legacy
+`/claude review` comments only receive migration guidance.
 
 ## 🚀 Quick Start
 
