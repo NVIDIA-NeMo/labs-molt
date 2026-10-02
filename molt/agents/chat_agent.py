@@ -249,7 +249,7 @@ class ChatAgentRunner(Runner):
     ):
         await self._ensure_server(llm_engine, hf_tokenizer, max_length, sampling_params)
         session_id = uuid4().hex
-        messages = _wire_messages(prompt, images)
+        messages = await asyncio.to_thread(_wire_messages, prompt, images)
         # Scalar view of the task for grading/logging (and Trajectory.prompt): the last user
         # turn's text — taken from the RAW row (wire messages may have inlined its images).
         prompt_text = _extract_prompt_text(prompt)

@@ -15,6 +15,10 @@
 
 """Unit tests for chat-agent prompt helpers."""
 
+import asyncio
+import threading
+from types import SimpleNamespace
+
 import pytest
 
 
@@ -76,3 +80,40 @@ def test_extract_prompt_text_follows_last_user_turn_over_earlier_string():
         },
     ]
     assert _extract_prompt_text(prompt) == "final"
+
+
+def test_runner_prepares_images_without_blocking_event_loop(monkeypatch):
+    from molt.agents import chat_agent
+
+    class Agent(chat_agent.ChatAgent):
+        async def run(self, ctx):
+            return chat_agent.Result(reward=1.0)
+
+    started = threading.Event()
+    release = threading.Event()
+    timed_out = threading.Event()
+
+    def slow_wire_messages(prompt, images):
+        started.set()
+        if not release.wait(timeout=1):
+            timed_out.set()
+        return [{"role": "user", "content": "prompt"}]
+
+    monkeypatch.setattr(chat_agent, "_wire_messages", slow_wire_messages)
+    monkeypatch.setattr(chat_agent, "stitch_session", lambda *args: [])
+    runner = chat_agent.ChatAgentRunner(Agent)
+    runner._state = SimpleNamespace(model_name="policy", open=lambda *args: None, discard=lambda *args: None)
+    runner._server_root = "http://localhost"
+
+    async def run_execute():
+        task = asyncio.create_task(runner.execute("prompt", "label", SimpleNamespace(), 128, None, None, images=["u"]))
+        while not started.is_set():
+            await asyncio.sleep(0)
+        loop_remained_responsive = not timed_out.is_set()
+        release.set()
+        return await task, loop_remained_responsive
+
+    result, loop_remained_responsive = asyncio.run(run_execute())
+
+    assert result == []
+    assert loop_remained_responsive

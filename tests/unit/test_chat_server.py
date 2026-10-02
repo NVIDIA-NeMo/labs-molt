@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import threading
 from types import SimpleNamespace
 
 import numpy as np
@@ -443,6 +444,37 @@ def test_run_turn_vlm_carries_pixel_values(monkeypatch):
     assert traj.observation_tokens[:3] == [999, 999, 7]
     assert traj.mm_train_inputs["pixel_values"].shape[0] == 1 and traj.image_budget == 5
     assert tp.calls[0][1] == {"image": ["PIL"]}  # images forwarded to generate as multi_modal_data
+
+
+def test_run_turn_loads_images_without_blocking_event_loop(monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+    timed_out = threading.Event()
+
+    def slow_load_images(url):
+        started.set()
+        if not release.wait(timeout=1):
+            timed_out.set()
+        return ["PIL"]
+
+    monkeypatch.setattr(cs, "load_images", slow_load_images)
+    _patch_prompts(monkeypatch, [[1, 2, 3]])
+    state, _ = _state([_act([90], [-0.1])])
+    state.open("sid", "P", "l", None)
+    body = {"messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "u"}}]}]}
+
+    async def run_turn():
+        task = asyncio.create_task(_run_turn(state, state.sessions["sid"], body))
+        while not started.is_set():
+            await asyncio.sleep(0)
+        loop_remained_responsive = not timed_out.is_set()
+        release.set()
+        return await task, loop_remained_responsive
+
+    result, loop_remained_responsive = asyncio.run(run_turn())
+
+    assert result == ("ACT", "stop")
+    assert loop_remained_responsive
 
 
 def test_multiturn_vlm_carries_image_and_absorbs_a_new_one(monkeypatch):
