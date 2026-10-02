@@ -24,6 +24,8 @@ import importlib.util
 import threading
 from pathlib import Path
 
+import pytest
+
 _MG = Path(__file__).resolve().parents[2] / "examples" / "python" / "utils" / "math_grader.py"
 _spec = importlib.util.spec_from_file_location("math_grader", _MG)
 mg = importlib.util.module_from_spec(_spec)
@@ -70,6 +72,28 @@ NOMATCH = [
     ("36", "360"),
     ("1/3", "2/6"),  # unreduced fractions must match exactly
 ]
+
+
+@pytest.mark.parametrize("prompt", ["What is 1 * 7?", r"Check \boxed{7}."])
+@pytest.mark.parametrize("response", ["", "I do not know."])
+def test_score_response_does_not_extract_an_answer_from_the_prompt(prompt, response):
+    result = mg.score_response(prompt + response, prompt, {"ground_truth": "7"})
+
+    assert result["reward"] == 0.0
+    assert result["prediction"] == ""
+    assert result["missing_answer"] == 1.0
+
+
+@pytest.mark.parametrize("prompt", ["", "What is 1 * 7?"])
+@pytest.mark.parametrize(
+    "response,target,reward",
+    [(r"\boxed{7}", "7", 1.0), (r"\boxed{8}", "7", 0.0), (r"\boxed{\frac{1}{2}}", "0.5", 1.0), ("7", "7", 1.0)],
+)
+def test_score_response_grades_the_response_with_or_without_a_prompt(prompt, response, target, reward):
+    result = mg.score_response(prompt + response, prompt, {"ground_truth": target})
+
+    assert result["reward"] == reward
+    assert result["missing_answer"] == 0.0
 
 
 def test_math_env_grading_keeps_event_loop_responsive(monkeypatch):

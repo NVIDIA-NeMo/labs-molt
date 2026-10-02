@@ -50,7 +50,7 @@ def _ground_truth_from_label(label: Any):
 
 
 def _strip_prompt(query: str, prompt: Any) -> str:
-    if isinstance(prompt, str):
+    if isinstance(prompt, str) and prompt:
         idx = query.rfind(prompt)
         if idx >= 0:
             return query[idx + len(prompt) :]
@@ -464,7 +464,7 @@ def answers_match(prediction: Any, target: Any) -> bool:
 def score_response(query: str, prompt: Any, label: Any) -> dict[str, Any]:
     target = _ground_truth_from_label(label)
     response = _strip_prompt(query, prompt)
-    prediction = extract_answer(response) or extract_answer(query)
+    prediction = extract_answer(response)
     correct = answers_match(prediction, target)
     return {
         "reward": 1.0 if correct else 0.0,
