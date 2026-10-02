@@ -19,7 +19,9 @@ Covers the two-tier equivalence (string normalization + symbolic) and guards
 against over-counting. Run: python3 tests/unit/test_math_grader.py
 """
 
+import asyncio
 import importlib.util
+import threading
 from pathlib import Path
 
 _MG = Path(__file__).resolve().parents[2] / "examples" / "python" / "utils" / "math_grader.py"
@@ -68,6 +70,25 @@ NOMATCH = [
     ("36", "360"),
     ("1/3", "2/6"),  # unreduced fractions must match exactly
 ]
+
+
+def test_math_env_grades_off_the_event_loop(monkeypatch):
+    agent_path = Path(__file__).resolve().parents[2] / "examples" / "python" / "agents" / "math.py"
+    spec = importlib.util.spec_from_file_location("math_agent", agent_path)
+    agent = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(agent)
+    event_loop_thread = threading.get_ident()
+    grader_threads = []
+    monkeypatch.setattr(
+        agent._GRADER,
+        "score_response",
+        lambda *args: grader_threads.append(threading.get_ident()) or {"reward": 1.0, "missing_answer": 0.0},
+    )
+
+    result = asyncio.run(agent.MathEnv().step({"action_text": "answer", "label": "1"}))
+
+    assert result.reward.item() == 1.0
+    assert grader_threads and grader_threads[0] != event_loop_thread
 
 
 def main() -> None:

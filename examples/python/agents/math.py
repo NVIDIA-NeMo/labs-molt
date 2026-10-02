@@ -22,6 +22,7 @@ turns — for that see `geo3k.py`.
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 from pathlib import Path
 
@@ -40,7 +41,7 @@ _GRADER_SPEC.loader.exec_module(_GRADER)
 class MathEnv(Env):
     async def step(self, state) -> Result:
         prompt, action, label = state.get("observation_text", ""), state["action_text"], state.get("label") or ""
-        result = _GRADER.score_response(prompt + action, prompt, label)
+        result = await asyncio.to_thread(_GRADER.score_response, prompt + action, prompt, label)
         reward = torch.tensor(float(result.get("reward", 0.0)), dtype=torch.float32)
         return Result(
             reward=reward,
