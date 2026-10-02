@@ -72,23 +72,36 @@ NOMATCH = [
 ]
 
 
-def test_math_env_grades_off_the_event_loop(monkeypatch):
+def test_math_env_grading_keeps_event_loop_responsive(monkeypatch):
     agent_path = Path(__file__).resolve().parents[2] / "examples" / "python" / "agents" / "math.py"
     spec = importlib.util.spec_from_file_location("math_agent", agent_path)
     agent = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(agent)
-    event_loop_thread = threading.get_ident()
-    grader_threads = []
-    monkeypatch.setattr(
-        agent._GRADER,
-        "score_response",
-        lambda *args: grader_threads.append(threading.get_ident()) or {"reward": 1.0, "missing_answer": 0.0},
-    )
 
-    result = asyncio.run(agent.MathEnv().step({"action_text": "answer", "label": "1"}))
+    started = threading.Event()
+    release = threading.Event()
+    timed_out = threading.Event()
+
+    def slow_grader(*args):
+        started.set()
+        if not release.wait(timeout=1):
+            timed_out.set()
+        return {"reward": 1.0, "missing_answer": 0.0}
+
+    monkeypatch.setattr(agent._GRADER, "score_response", slow_grader)
+
+    async def run_step():
+        task = asyncio.create_task(agent.MathEnv().step({"action_text": "answer", "label": "1"}))
+        while not started.is_set():
+            await asyncio.sleep(0)
+        loop_remained_responsive = not timed_out.is_set()
+        release.set()
+        return await task, loop_remained_responsive
+
+    result, loop_remained_responsive = asyncio.run(run_step())
 
     assert result.reward.item() == 1.0
-    assert grader_threads and grader_threads[0] != event_loop_thread
+    assert loop_remained_responsive
 
 
 def main() -> None:
