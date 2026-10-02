@@ -465,8 +465,7 @@ def test_run_turn_loads_images_without_blocking_event_loop(monkeypatch):
 
     async def run_turn():
         task = asyncio.create_task(_run_turn(state, state.sessions["sid"], body))
-        while not started.is_set():
-            await asyncio.sleep(0)
+        await asyncio.wait_for(asyncio.to_thread(started.wait), timeout=5)  # fail, don't spin forever
         loop_remained_responsive = not timed_out.is_set()
         release.set()
         return await task, loop_remained_responsive
@@ -523,7 +522,7 @@ def test_multiturn_vlm_carries_image_and_absorbs_a_new_one(monkeypatch):
         nonlocal new_image_loads
         if url == "u2":
             new_image_loads += 1
-            if new_image_loads == 2:
+            if new_image_loads == 1:
                 started.set()
                 if not release.wait(timeout=1):
                     timed_out.set()
@@ -538,14 +537,14 @@ def test_multiturn_vlm_carries_image_and_absorbs_a_new_one(monkeypatch):
 
     async def run_image_turn():
         task = asyncio.create_task(_run_turn(state, session, {"messages": msgs}))
-        while not started.is_set():
-            await asyncio.sleep(0)
+        await asyncio.wait_for(asyncio.to_thread(started.wait), timeout=5)  # fail, don't spin forever
         loop_remained_responsive = not timed_out.is_set()
         release.set()
         await task
         return loop_remained_responsive
 
     assert asyncio.run(run_image_turn())
+    assert new_image_loads == 1  # the new image is decoded once, not again for the feedback delta
     assert traj.pil_images == ["PIL1", "PIL2"] and traj.mm_train_inputs["pixel_values"].shape[0] == 2
     assert traj.image_budget == 10 and tp.calls[2][1] == {"image": ["PIL1", "PIL2"]}
     # token-exact across all 3 turns (image prompt + action + text delta + action + image delta + action)
@@ -649,7 +648,7 @@ def test_decode_anthropic_system_blocks_reach_template_input():
         "messages": [{"role": "user", "content": "hi"}],
     }
     out = _decode_anthropic(body)
-    chat, images = cs._messages_to_chat(SimpleNamespace(expand_image_placeholder=False), out["messages"])
+    chat, images, _ = cs._messages_to_chat(SimpleNamespace(expand_image_placeholder=False), out["messages"])
     assert chat == [{"role": "system", "content": "Be concise."}, {"role": "user", "content": "hi"}]
     assert images == []
 

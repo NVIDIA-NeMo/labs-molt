@@ -107,8 +107,7 @@ def test_runner_prepares_images_without_blocking_event_loop(monkeypatch):
 
     async def run_execute():
         task = asyncio.create_task(runner.execute("prompt", "label", SimpleNamespace(), 128, None, None, images=["u"]))
-        while not started.is_set():
-            await asyncio.sleep(0)
+        await asyncio.wait_for(asyncio.to_thread(started.wait), timeout=5)  # fail, don't spin forever
         loop_remained_responsive = not timed_out.is_set()
         release.set()
         return await task, loop_remained_responsive

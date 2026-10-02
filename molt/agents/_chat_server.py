@@ -245,18 +245,20 @@ class ChatServerState:
 # ===========================================================================
 # 3. Forward one turn -> grow the session's ONE token-exact Trajectory.
 # ===========================================================================
-def _messages_to_chat(state: ChatServerState, messages: list) -> tuple[list, list]:
-    """OpenAI messages -> (ChatML rows with a literal ``<image>`` per image, loaded PIL images).
-    Split the literal placeholder into structured content for models whose image token isn't
-    ``<image>`` (Qwen-VL), so the template renders it — mirrors the RL dataset's rendering."""
-    chat, pil_images = [], []
+def _messages_to_chat(state: ChatServerState, messages: list) -> tuple[list, list, list]:
+    """OpenAI messages -> (ChatML rows with a literal ``<image>`` per image, all loaded PIL
+    images, the LAST message's PIL images). Split the literal placeholder into structured content
+    for models whose image token isn't ``<image>`` (Qwen-VL), so the template renders it — mirrors
+    the RL dataset's rendering. The last message's images are returned separately so a continuation
+    turn can commit them without decoding (or re-fetching a URL) a second time."""
+    chat, pil_images, imgs = [], [], []
     for m in messages:
         text, imgs = _content_to_text_and_images(m.get("content"))
         chat.append({"role": m.get("role"), "content": text})
         pil_images.extend(imgs)
     if state.expand_image_placeholder:
         chat = [split_image_placeholder(m) for m in chat]
-    return chat, pil_images
+    return chat, pil_images, imgs
 
 
 async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tuple[str, str]:
@@ -279,7 +281,7 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
     # (compaction)? A normal turn only appends (assistant + new user/tool) onto the SAME prefix, so
     # its messages extend last_messages; a compaction changes that prefix. Also false on turn 1.
     extends = bool(session.trajectories) and messages[: len(session.last_messages)] == session.last_messages
-    chat, pil_images = await loop.run_in_executor(_TOKENIZE_EXECUTOR, _messages_to_chat, state, messages)
+    chat, pil_images, new_pil = await loop.run_in_executor(_TOKENIZE_EXECUTOR, _messages_to_chat, state, messages)
     full = state.processor.apply_chat_template(chat, tokenize=False, add_generation_prompt=True, **kwargs)
     if extends:
         prefix = state.processor.apply_chat_template(chat[:-1], tokenize=False, add_generation_prompt=False, **kwargs)
@@ -324,10 +326,7 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
         # user/tool turn + generation prompt (committed as masked feedback -> token-exact segment).
         traj = session.trajectories[-1]
         delta_text = full[len(prefix) :]
-        _, new_pil = await loop.run_in_executor(
-            _TOKENIZE_EXECUTOR, _content_to_text_and_images, messages[-1].get("content")
-        )
-        delta_ids = await loop.run_in_executor(
+        delta_ids = await loop.run_in_executor(  # new_pil: the images added THIS turn
             _TOKENIZE_EXECUTOR, _tokenize_feedback, state.processor, delta_text, new_pil, traj, state.max_length
         )
         # Generate over the accumulated tokens PLUS this turn's delta, but do NOT append the delta yet.
