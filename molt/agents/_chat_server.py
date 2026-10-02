@@ -324,7 +324,9 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
         # user/tool turn + generation prompt (committed as masked feedback -> token-exact segment).
         traj = session.trajectories[-1]
         delta_text = full[len(prefix) :]
-        new_pil = _content_to_text_and_images(messages[-1].get("content"))[1]  # images added THIS turn
+        _, new_pil = await loop.run_in_executor(
+            _TOKENIZE_EXECUTOR, _content_to_text_and_images, messages[-1].get("content")
+        )
         delta_ids = await loop.run_in_executor(
             _TOKENIZE_EXECUTOR, _tokenize_feedback, state.processor, delta_text, new_pil, traj, state.max_length
         )

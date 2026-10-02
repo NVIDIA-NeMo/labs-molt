@@ -514,12 +514,38 @@ def test_multiturn_vlm_carries_image_and_absorbs_a_new_one(monkeypatch):
     assert tp.calls[1][1] == {"image": ["PIL1"]}
 
     # turn 3: a NEW image mid-conversation -> accumulated into the one trajectory (both forwarded)
-    monkeypatch.setattr(cs, "load_images", lambda url: ["PIL2"])
+    started = threading.Event()
+    release = threading.Event()
+    timed_out = threading.Event()
+    new_image_loads = 0
+
+    def load_images(url):
+        nonlocal new_image_loads
+        if url == "u2":
+            new_image_loads += 1
+            if new_image_loads == 2:
+                started.set()
+                if not release.wait(timeout=1):
+                    timed_out.set()
+            return ["PIL2"]
+        return ["PIL1"]
+
+    monkeypatch.setattr(cs, "load_images", load_images)
     msgs = msgs + [
         {"role": "assistant", "content": "ACT"},
         {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "u2"}}]},
     ]
-    _drive(state, session, msgs)
+
+    async def run_image_turn():
+        task = asyncio.create_task(_run_turn(state, session, {"messages": msgs}))
+        while not started.is_set():
+            await asyncio.sleep(0)
+        loop_remained_responsive = not timed_out.is_set()
+        release.set()
+        await task
+        return loop_remained_responsive
+
+    assert asyncio.run(run_image_turn())
     assert traj.pil_images == ["PIL1", "PIL2"] and traj.mm_train_inputs["pixel_values"].shape[0] == 2
     assert traj.image_budget == 10 and tp.calls[2][1] == {"image": ["PIL1", "PIL2"]}
     # token-exact across all 3 turns (image prompt + action + text delta + action + image delta + action)
