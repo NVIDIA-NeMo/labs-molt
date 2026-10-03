@@ -254,7 +254,8 @@ class RouterGenerateClient:
         template + mm processing) and return its ``{token_ids, features}``. We use ONLY ``features``
         (vLLM's mm pixel tensors -> N vision embeds); the placeholder ranges are realigned to our
         canonical prompt by the caller. The router forwards this custom route verbatim."""
-        content = [{"type": "image_url", "image_url": {"url": _image_data_uri(im)}} for im in images]
+        urls = [await asyncio.to_thread(_image_data_uri, image) for image in images]
+        content = [{"type": "image_url", "image_url": {"url": url}} for url in urls]
         body = {"messages": [{"role": "user", "content": content}]}
         return await self._post("/v1/chat/completions/render", body, session_id)
 
@@ -282,12 +283,15 @@ class RouterGenerateClient:
         # routed_experts is the UNIFIED full-sequence [tokens,layer,topk] npy (prompt+gen); absorb_routing
         # lays it down by absolute position from 0 (base64 npy is faithful, unlike the old JSON lists).
         re_blob = c.get("routed_experts")
+        routed_experts = (
+            await asyncio.to_thread(_decode_routed_experts, re_blob) if (re_blob is not None and ids) else None
+        )
         gen = SimpleNamespace(
             token_ids=ids,
             text="",  # /inference/v1/generate is token-only; the runner decodes text from token_ids
             finish_reason=finish_reason,
             logprobs=logprobs,
-            routed_experts=_decode_routed_experts(re_blob) if (re_blob is not None and ids) else None,
+            routed_experts=routed_experts,
         )
         # off_policy_len=0: the HTTP transport can't observe a mid-request weight-swap boundary and
         # doesn't need to — each token keeps its generation-time logprob, so per-token IS
