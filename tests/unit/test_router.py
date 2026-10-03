@@ -17,6 +17,7 @@ import asyncio
 import base64
 import inspect
 import io
+import threading
 from types import SimpleNamespace
 
 import aiohttp
@@ -225,6 +226,28 @@ def test_generate_vlm_renders_realigns_then_generates():
     assert ro.outputs[0].token_ids == [90]
 
 
+def test_render_image_encoding_does_not_block_event_loop(monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocking_image_data_uri(_image):
+        started.set()
+        assert release.wait(timeout=1), "event loop could not release image encoding"
+        return "data:image/png;base64,image"
+
+    monkeypatch.setattr("molt.trainer.rollout.router._image_data_uri", _blocking_image_data_uri)
+    client = RouterGenerateClient(_FakeHttp({RENDER: {}}))
+
+    async def _run():
+        task = asyncio.create_task(client._render([object()], "session"))
+        while not started.is_set():
+            await asyncio.sleep(0)
+        release.set()
+        await task
+
+    asyncio.run(_run())
+
+
 def test_generate_pins_render_and_generate_to_one_session():
     # render + generate for a VLM call MUST carry the SAME x-session-id so consistent_hash routes them
     # to one engine (a render mm-cache hit returns kwargs_data=None, resolvable only on that engine).
@@ -260,6 +283,29 @@ def test_align_features_multi_image_finds_separated_runs():
 def test_decode_routed_experts_handles_both_encodings():
     assert _decode_routed_experts(_npy_b64([[1], [2]])).tolist() == [[1], [2]]  # base64 .npy
     assert _decode_routed_experts([[3], [4]]).tolist() == [[3], [4]]  # nested JSON lists
+
+
+def test_generate_routing_decode_does_not_block_event_loop(monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+
+    def _blocking_decode(_blob):
+        started.set()
+        assert release.wait(timeout=1), "event loop could not release routing decode"
+        return np.asarray([[1]])
+
+    monkeypatch.setattr("molt.trainer.rollout.router._decode_routed_experts", _blocking_decode)
+    client = RouterGenerateClient(_FakeHttp({GEN: _gen_resp([90], routed="blob")}))
+
+    async def _run():
+        task = asyncio.create_task(client.generate([1], _sp()))
+        while not started.is_set():
+            await asyncio.sleep(0)
+        release.set()
+        result, _ = await task
+        assert result.outputs[0].routed_experts.tolist() == [[1]]
+
+    asyncio.run(_run())
 
 
 def test_agent_runner_actor_init_is_synchronous():
