@@ -16,6 +16,7 @@
 import asyncio
 import importlib.util
 import sys
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -90,24 +91,79 @@ def test_step_terminates_on_nested_boxed_answer_with_tool_call(monkeypatch):
 def test_step_continues_on_tool_call_without_answer(monkeypatch):
     """No committed answer + a tool_call → keep going (mid-trajectory, not terminal)."""
     env = geo3k.GeoEnv()
+    started = threading.Event()
+    release = threading.Event()
+    timed_out = threading.Event()
+
+    def slow_execute(_arguments):
+        started.set()
+        if not release.wait(timeout=1):
+            timed_out.set()
+        return "1"
+
     monkeypatch.setattr(
         geo3k, "_extract_tool_call", lambda text: {"name": "python_executor", "arguments": {"code": "print(1)"}}
     )
+    monkeypatch.setattr(geo3k, "_TOOLS", {"python_executor": SimpleNamespace(execute=slow_execute)})
 
-    result = asyncio.run(
-        env.step({"action_text": "let me compute <tool_call>x</tool_call>", "label": {"ground_truth": "5"}})
-    )
+    async def run_step():
+        task = asyncio.create_task(
+            env.step({"action_text": "let me compute <tool_call>x</tool_call>", "label": {"ground_truth": "5"}})
+        )
+        while not started.is_set():
+            await asyncio.sleep(0)
+        loop_remained_responsive = not timed_out.is_set()
+        release.set()
+        return await task, loop_remained_responsive
+
+    result, loop_remained_responsive = asyncio.run(run_step())
 
     assert result.terminated is False
     assert env.tool_call_count == 1
     assert result.observation.startswith("<|im_end|>\n<|im_start|>user")
+    assert loop_remained_responsive
+
+
+def test_step_grading_keeps_event_loop_responsive(monkeypatch):
+    env = geo3k.GeoEnv()
+    started = threading.Event()
+    release = threading.Event()
+    timed_out = threading.Event()
+
+    def slow_grader(_text, _label):
+        started.set()
+        if not release.wait(timeout=1):
+            timed_out.set()
+        return 1.0, "5"
+
+    monkeypatch.setattr(geo3k, "_extract_tool_call", lambda text: None)
+    monkeypatch.setattr(geo3k, "_grade_answer", slow_grader)
+
+    async def run_step():
+        task = asyncio.create_task(env.step({"action_text": "<answer>5</answer>", "label": {"ground_truth": "5"}}))
+        while not started.is_set():
+            await asyncio.sleep(0)
+        loop_remained_responsive = not timed_out.is_set()
+        release.set()
+        return await task, loop_remained_responsive
+
+    result, loop_remained_responsive = asyncio.run(run_step())
+
+    assert result.reward.item() == 1.0
+    assert loop_remained_responsive
 
 
 def test_step_marks_last_tool_call_turn_truncated(monkeypatch):
     env = geo3k.GeoEnv()
+    executed = []
     monkeypatch.setattr(geo3k, "_MAX_TURNS", 1)
     monkeypatch.setattr(
         geo3k, "_extract_tool_call", lambda text: {"name": "python_executor", "arguments": {"code": "print(1)"}}
+    )
+    monkeypatch.setattr(
+        geo3k,
+        "_TOOLS",
+        {"python_executor": SimpleNamespace(execute=lambda arguments: executed.append(arguments))},
     )
 
     result = asyncio.run(
@@ -117,6 +173,7 @@ def test_step_marks_last_tool_call_turn_truncated(monkeypatch):
     assert result.terminated is False
     assert result.truncated is True
     assert env.tool_call_count == 1
+    assert executed == []
 
 
 def _run_chat_agent(monkeypatch, chat_geo3k, replies, max_turns):

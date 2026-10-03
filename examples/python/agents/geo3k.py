@@ -35,6 +35,7 @@ Environment variables:
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import json
 import logging
@@ -183,7 +184,7 @@ class GeoEnv(Env):
         # length/turns with no reward gain (a length-hacking failure mode).
         committed_answer = bool(_final_answer(action))
         if committed_answer or tool_call is None:
-            reward, parsed = self._final_reward(label)
+            reward, parsed = await asyncio.to_thread(self._final_reward, label)
             status = "Correct." if reward.item() >= 1.0 else f"Done. Final answer: {parsed or 'none'}"
             return Result(
                 reward=reward,
@@ -192,23 +193,28 @@ class GeoEnv(Env):
                 info=self._info(reward),
             )
 
-        # Dispatch tool_call; tools handle their own argument validation.
+        # Count calls the model emitted even when the turn cap prevents execution,
+        # matching the chat-agent path's metric.
         self.tool_call_count += 1
+        if is_last_turn:
+            # No turn remains to consume the tool output, so do not block the
+            # runner on work that cannot affect the trajectory.
+            reward, _ = await asyncio.to_thread(self._final_reward, label)
+            return Result(reward=reward, terminated=False, truncated=True, info=self._info(reward))
+
         name = tool_call["name"]
         tool = _TOOLS.get(name)
         obs_text = (
-            tool.execute(tool_call.get("arguments") or {})
+            await asyncio.to_thread(tool.execute, tool_call.get("arguments") or {})
             if tool
             else (f"Tool `{name}` is not supported. Available: {list(_TOOLS)}")
         )
 
-        reward, _ = self._final_reward(label) if is_last_turn else (torch.tensor(0.0), "")
-        feedback = _final_observation(close, obs_text) if is_last_turn else _tool_observation(close, obs_text)
+        reward = torch.tensor(0.0)
         return Result(
             reward=reward,
-            observation=feedback,
+            observation=_tool_observation(close, obs_text),
             terminated=False,
-            truncated=is_last_turn,
             info=self._info(reward),
         )
 
