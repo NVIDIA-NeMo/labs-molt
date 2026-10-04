@@ -223,11 +223,11 @@ class PolicyTrainer:
         n_tokens = status["num_action_tokens"]
         n_samples = status["num_samples"]
 
-        # Weighted mean of each metric across DP ranks: scale this rank's value by
-        # its local token/sample count, all-reduce the weighted sums together with
-        # the counts (carried as "_num_*" so they ride the same reduce), then divide
-        # by the reduced totals. weight is None means "report as-is" (e.g. lr) -> kept
-        # out of the reduce in last_metrics.
+        # Weighted mean of each metric across DP ranks: every key carries its own (sum, count)
+        # pair — the count is this rank's action tokens for token-weighted metrics and the number
+        # of samples that report the key otherwise — and the pairs are summed by name, so a key
+        # that only some ranks (or some samples) report is averaged over exactly those. weight is
+        # None means "report as-is" (e.g. lr) -> kept out of the reduce in last_metrics.
         reduced_status = {"_num_action_tokens": n_tokens, "_num_samples": n_samples}
         last_metrics = {}
         for k, value in metrics.items():
@@ -235,21 +235,22 @@ class PolicyTrainer:
             if weight is None:
                 last_metrics[k] = value
                 continue
-            scale = n_tokens if weight == "token" else n_samples
-            reduced_status[k] = (
-                value.float().mean().item() * scale if isinstance(value, torch.Tensor) else value * scale
-            )
+            if isinstance(value, torch.Tensor):
+                count = (
+                    value.numel()
+                    if weight == "sample" and value.dim() > 0
+                    else (n_tokens if weight == "token" else n_samples)
+                )
+                reduced_status[k] = (value.float().mean().item() * count, count)
+            else:
+                count = n_tokens if weight == "token" else n_samples
+                reduced_status[k] = (value * count, count)
 
-        reduced_status = self.strategy.all_reduce(reduced_status)
+        reduced_status = self.strategy.all_reduce_dict(reduced_status)
 
-        # n_tokens/n_samples above were this rank's local counts; these are the
-        # cross-rank totals that serve as the weighted-mean denominators.
         total_tokens = reduced_status.pop("_num_action_tokens")
         total_samples = reduced_status.pop("_num_samples")
-        merged_status = {}
-        for k, value in reduced_status.items():
-            denom = total_tokens if weights[k] == "token" else total_samples
-            merged_status[k] = value / denom
+        merged_status = {k: total / count for k, (total, count) in reduced_status.items()}
 
         merged_status.update(last_metrics)
         merged_status["_num_samples"] = total_samples

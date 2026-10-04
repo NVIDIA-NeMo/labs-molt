@@ -694,6 +694,28 @@ class FsdpStrategy:
             data = data / dist.get_world_size()
         return data.item() if data.ndim == 0 else data
 
+    def all_reduce_dict(self, data: dict) -> dict:
+        """Sum a dict's values (numbers or tuples of numbers) across all ranks, keyed by name.
+
+        Ranks may hold different keys (an env sets an info metric on some samples only), so the
+        dicts are gathered whole instead of all-reducing one tensor per entry in dict order —
+        that pairs values by position and deadlocks on a key count mismatch.
+        """
+        if not dist.is_initialized():
+            return dict(data)
+        parts = [None] * dist.get_world_size()
+        dist.all_gather_object(parts, data)
+        total: dict = {}
+        for part in parts:
+            for key, value in part.items():
+                if key not in total:
+                    total[key] = value
+                elif isinstance(value, tuple):
+                    total[key] = tuple(a + b for a, b in zip(total[key], value))
+                else:
+                    total[key] += value
+        return total
+
     def print(self, *msg):
         if self.is_rank_0():
             print(*msg)
