@@ -255,10 +255,12 @@ class CheckpointManager:
             max_size_bytes = max_mem * 1024**3
 
         while True:
+            # Only checkpoint dirs count: the HF export root (`_hf`, nested in the SFT DCP root) and
+            # any other `_`-prefixed sibling are neither counted nor evicted.
             subdirs = [
                 (os.path.join(ckpt_path, name), os.path.getmtime(os.path.join(ckpt_path, name)))
                 for name in os.listdir(ckpt_path)
-                if os.path.isdir(os.path.join(ckpt_path, name))
+                if os.path.isdir(os.path.join(ckpt_path, name)) and not name.startswith("_")
             ]
             regular_subdirs = [
                 (path, mtime)

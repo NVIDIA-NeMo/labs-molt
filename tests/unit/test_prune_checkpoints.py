@@ -129,3 +129,22 @@ def test_max_num_evicts_oldest_regardless_of_metric(tmp_path):
     cm._prune_checkpoints(root, current_tag="step-3", max_num=2, max_mem=0, is_best=False)
 
     assert set(os.listdir(root)) == {"step-2", "step-3"}
+
+
+def test_hf_export_root_inside_the_dcp_root_is_neither_counted_nor_evicted(tmp_path):
+    """SFT exports HF snapshots to ``<ckpt.path>/_hf``, inside the DCP root it prunes. ``_hf`` is
+    not a checkpoint: it must not eat a slot of ``dcp_max_num`` (3 saves kept, not 2) and must
+    never be the eviction victim even when it is the oldest directory (a resume with ``save_hf``
+    off would otherwise delete every HF export at once)."""
+    root = str(tmp_path)
+    _make_ckpt_dir(os.path.join(root, "_hf"), "global_step50", 1, age_s=100)
+    hf_root = os.path.join(root, "_hf")
+    os.utime(hf_root, (time.time() - 100, time.time() - 100))  # oldest of all
+    for i, step in enumerate([50, 100, 150]):
+        _make_ckpt_dir(root, f"global_step{step}", 1, age_s=30 - 10 * i)
+    _make_ckpt_dir(root, "global_step200", 1)
+
+    _cm()._prune_checkpoints(root, current_tag="global_step200", max_num=3, max_mem=0, is_best=False)
+
+    remaining = sorted(os.listdir(root))
+    assert remaining == ["_hf", "global_step100", "global_step150", "global_step200"]
