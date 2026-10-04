@@ -675,3 +675,73 @@ def test_response_bodies_parse_with_real_sdk_models():
     assert completion.choices[0].message.content == "hi"
     message = anthropic_types.Message.model_validate(_anthropic_message_body("policy", "hi", "length"))
     assert message.content[0].text == "hi" and message.stop_reason == "max_tokens"
+
+
+class _ChatMLProc:
+    """A ChatML-shaped template with a real end-of-turn SPECIAL token (id 1 = <|im_end|>): the
+    model generates it, the template also renders it plus a "\\n" separator after every turn."""
+
+    image_token = "<image>"
+    all_special_ids = [1]
+    EOT = "<|im_end|>"
+
+    def apply_chat_template(self, chat, tokenize=False, add_generation_prompt=False, **kwargs):
+        out = "".join(f"<|im_start|>{m['role']}\n{m['content']}{self.EOT}\n" for m in chat)
+        return out + ("<|im_start|>assistant\n" if add_generation_prompt else "")
+
+    def encode(self, text):
+        ids = []
+        for part in text.split(self.EOT):
+            ids += [ord(c) for c in part] + [1]
+        return ids[:-1]
+
+    def __call__(self, text=None, add_special_tokens=False, return_tensors=None):
+        return {"input_ids": torch.tensor([self.encode(text)])}
+
+    def decode(self, ids, skip_special_tokens=False):
+        return "".join(self.EOT if i == 1 else chr(i) for i in ids)
+
+
+def _chatml_turns(action_ids_per_turn):
+    engine = _DriftyEngine([_dact(ids, [-0.1] * len(ids)) for ids in action_ids_per_turn])
+    state = ChatServerState(engine, _ChatMLProc(), "policy", 10000, _sampling())
+    state.open("sid", "P", "lab", None)
+    return state, state.sessions["sid"]
+
+
+def test_chatml_reply_strips_the_end_of_turn_token_and_the_stream_matches_the_template():
+    # Turn 1 generates "A1<|im_end|>"; the agent must receive "A1" (no special token to echo), and
+    # after it resends the history the committed tokens must be exactly the template's render —
+    # including the "\n" the template puts after <|im_end|>, which the model never generated.
+    proc = _ChatMLProc()
+    state, session = _chatml_turns([proc.encode("A1" + proc.EOT), proc.encode("A2" + proc.EOT)])
+    msgs = [{"role": "user", "content": "Q0"}]
+    act1, _ = _drive(state, session, msgs)
+    assert act1 == "A1"
+    msgs = msgs + [{"role": "assistant", "content": act1}, {"role": "user", "content": "OBS1"}]
+    act2, _ = _drive(state, session, msgs)
+    assert act2 == "A2"
+    traj = session.trajectories[0]
+    canonical = proc.encode(proc.apply_chat_template(msgs, add_generation_prompt=True))
+    assert traj.observation_tokens[: len(canonical)] == canonical
+    assert traj.observation_tokens[len(canonical) :] == proc.encode("A2" + proc.EOT)
+    assert proc.decode(traj.observation_tokens).count(proc.EOT + proc.EOT) == 0  # no doubled end-of-turn
+
+
+def test_chatml_turn_cut_by_length_gets_the_template_end_of_turn_in_the_feedback():
+    # No <|im_end|> was generated (finish_reason=length): the next turn's feedback must start with the
+    # template's end-of-turn markup so the stream is still the template's exact token sequence.
+    proc = _ChatMLProc()
+    engine = _DriftyEngine(
+        [_dact(proc.encode("A1 cut"), [-0.1] * 6, finish="length"), _dact(proc.encode("A2" + proc.EOT), [-0.1] * 3)]
+    )
+    state = ChatServerState(engine, proc, "policy", 10000, _sampling())
+    state.open("sid", "P", "lab", None)
+    session = state.sessions["sid"]
+    msgs = [{"role": "user", "content": "Q0"}]
+    act1, finish = _drive(state, session, msgs)
+    assert (act1, finish) == ("A1 cut", "length")
+    msgs = msgs + [{"role": "assistant", "content": act1}, {"role": "user", "content": "OBS1"}]
+    _drive(state, session, msgs)
+    canonical = proc.encode(proc.apply_chat_template(msgs, add_generation_prompt=True))
+    assert session.trajectories[0].observation_tokens[: len(canonical)] == canonical
