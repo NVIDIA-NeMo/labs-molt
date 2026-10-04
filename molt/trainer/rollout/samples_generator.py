@@ -189,6 +189,14 @@ class SamplesGenerator:
 
         return all_experiences
 
+    @property
+    def prompts_drained(self) -> bool:
+        """True once the epoch's last prompt has been dispatched (the iterator is spent), even while
+        the pool still holds rollouts. A checkpoint taken from here on must point at the NEXT episode
+        with a fresh dataloader: StatefulDataLoader restores a finished iterator as a fresh epoch, so
+        saving the spent state would replay this episode from its first prompt on resume."""
+        return hasattr(self, "_dataloader_iter") and self._dataloader_iter is None
+
     @torch.no_grad()
     def generate_samples(self, **generate_kwargs) -> Tuple[List[Experience], Dict[str, float], int, bool]:
         """Stream one training-sized batch out of a continuously-refilled rollout pool.
