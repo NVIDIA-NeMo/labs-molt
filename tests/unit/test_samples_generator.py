@@ -541,3 +541,48 @@ def test_without_partial_rollout_the_pool_holds_one_batch_and_drains(monkeypatch
     assert [sample.group_ids[0] for sample in samples] == ["p0", "p1", "p2"]
     assert prompts_dispatched == 3  # capacity 5, but only the batch's 3 prompts go out
     assert generator._inflight_rollouts == []  # pool drained: the refit sees no in-flight rollout
+
+
+def test_prompts_drained_flags_the_spent_epoch_while_rollouts_are_still_in_flight(monkeypatch):
+    # 20 prompts, 4 per batch, 8 in flight (partial rollout keeps the pool refilled): the loader is
+    # spent several batches before the episode ends. From the batch that dispatches the last prompt
+    # on, the checkpoint must point at the next episode (prompts_drained) even though rollouts are
+    # still in the pool; before that it is mid-epoch.
+    generator = object.__new__(SamplesGenerator)
+    generator.args = SimpleNamespace(
+        rollout=SimpleNamespace(batch_size=4, n_samples_per_prompt=1, vllm_generate_batch_size=8),
+        algo=SimpleNamespace(dynamic_filtering_enable=False),
+        ckpt=SimpleNamespace(warm_resume_rollouts=False),
+        actor=SimpleNamespace(num_nodes=1, num_gpus_per_node=1),
+        fsdp=SimpleNamespace(cp_size=1, tp_size=1),
+        train=SimpleNamespace(partial_rollout_enable=True),
+    )
+    generator.prompts_dataloader = _prompt_loader(20)
+    _wire_fake_vllm(generator, monkeypatch, _sample)
+    assert generator.prompts_drained is False  # nothing dispatched yet
+
+    dispatched_total, drained_with_pool = 0, False
+    for _ in range(10):
+        _, _, dispatched, exhausted = generator.generate_samples()
+        dispatched_total += dispatched
+        assert generator.prompts_drained is (dispatched_total == 20)
+        if generator.prompts_drained and generator._inflight_rollouts:
+            drained_with_pool = True  # the spent-loader / non-empty-pool state the fix is about
+        if exhausted:
+            break
+    assert exhausted and dispatched_total == 20 and drained_with_pool
+
+
+def test_stateful_dataloader_restores_a_spent_iterator_as_a_fresh_epoch():
+    # The fact the trainer's checkpoint rule rests on: a StatefulDataLoader snapshot taken after
+    # its iterator raised StopIteration does not resume "finished" — it yields the whole epoch again.
+    from torchdata.stateful_dataloader import StatefulDataLoader
+
+    loader = StatefulDataLoader(list(range(6)), batch_size=2, shuffle=False)
+    it = iter(loader)
+    assert [b.tolist() for b in it] == [[0, 1], [2, 3], [4, 5]]
+    spent = loader.state_dict()
+
+    restored = StatefulDataLoader(list(range(6)), batch_size=2, shuffle=False)
+    restored.load_state_dict(spent)
+    assert [b.tolist() for b in restored] == [[0, 1], [2, 3], [4, 5]]
