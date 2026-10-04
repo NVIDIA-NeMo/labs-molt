@@ -41,6 +41,7 @@ import json
 import logging
 import os
 import re
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +73,9 @@ _PARSER_CLS_PATHS = [
     "vllm.tool_parsers.qwen3_engine_tool_parser.Qwen3EngineToolParser",
 ]
 _PARSER = None
+# Concurrent rollouts share one parser; serialize its tokenizer-backed construction
+# and use instead of racing initialization or assuming the parser is thread-safe.
+_PARSER_LOCK = threading.Lock()
 
 
 def _load_parser():
@@ -90,17 +94,18 @@ def _load_parser():
 
 def _extract_tool_call(text: str) -> dict[str, Any] | None:
     global _PARSER
-    if _PARSER is None:
-        _PARSER = _load_parser()
-    result = _PARSER.extract_tool_calls(text, request=None)
-    if not result.tools_called or not result.tool_calls:
-        return None
-    tc = result.tool_calls[0]
-    try:
-        args = json.loads(tc.function.arguments or "{}")
-    except json.JSONDecodeError:
-        args = {}
-    return {"name": tc.function.name, "arguments": args}
+    with _PARSER_LOCK:
+        if _PARSER is None:
+            _PARSER = _load_parser()
+        result = _PARSER.extract_tool_calls(text, request=None)
+        if not result.tools_called or not result.tool_calls:
+            return None
+        tc = result.tool_calls[0]
+        try:
+            args = json.loads(tc.function.arguments or "{}")
+        except json.JSONDecodeError:
+            args = {}
+        return {"name": tc.function.name, "arguments": args}
 
 
 def _final_answer(text: str) -> str:
@@ -176,7 +181,7 @@ class GeoEnv(Env):
         # text. Add the marker only when the generated turn does not already carry it.
         close = "" if action.endswith("<|im_end|>") else "<|im_end|>"
 
-        tool_call = _extract_tool_call(action)
+        tool_call = await asyncio.to_thread(_extract_tool_call, action)
 
         # Terminate once the model commits a final answer (`<answer>` / `\boxed`),
         # even if it co-emits a tool_call, or when it stops calling tools. Grading

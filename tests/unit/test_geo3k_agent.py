@@ -88,6 +88,44 @@ def test_step_terminates_on_nested_boxed_answer_with_tool_call(monkeypatch):
     assert env.tool_call_count == 0
 
 
+def test_step_parser_initialization_keeps_event_loop_responsive(monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+    timed_out = threading.Event()
+    load_count = 0
+
+    class NoToolParser:
+        def extract_tool_calls(self, text, request=None):
+            return SimpleNamespace(tools_called=False, tool_calls=[])
+
+    def slow_load_parser():
+        nonlocal load_count
+        load_count += 1
+        started.set()
+        if not release.wait(timeout=1):
+            timed_out.set()
+        return NoToolParser()
+
+    monkeypatch.setattr(geo3k, "_PARSER", None)
+    monkeypatch.setattr(geo3k, "_load_parser", slow_load_parser)
+
+    async def run_steps():
+        tasks = [
+            asyncio.create_task(geo3k.GeoEnv().step({"action_text": "reasoning", "label": None})) for _ in range(2)
+        ]
+        while not started.is_set():
+            await asyncio.sleep(0)
+        loop_remained_responsive = not timed_out.is_set()
+        release.set()
+        return await asyncio.gather(*tasks), loop_remained_responsive
+
+    results, loop_remained_responsive = asyncio.run(run_steps())
+
+    assert all(result.terminated for result in results)
+    assert load_count == 1
+    assert loop_remained_responsive
+
+
 def test_step_continues_on_tool_call_without_answer(monkeypatch):
     """No committed answer + a tool_call → keep going (mid-trajectory, not terminal)."""
     env = geo3k.GeoEnv()
