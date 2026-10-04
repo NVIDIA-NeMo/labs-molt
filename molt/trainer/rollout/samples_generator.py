@@ -273,8 +273,11 @@ class SamplesGenerator:
                     progress.update(1)
         progress.close()
 
-        # Observability: per-reason drop counts + (when filtering) the pass rate.
+        # Observability: per-reason drop counts + (when filtering) the pass rate, and the prompt
+        # groups still in flight. The dataloader cursor advances at dispatch, so a checkpoint saved
+        # with this batch skips exactly these prompts for the rest of the episode on resume.
         rollout_metrics = {f"rollout/dropped/{reason}": float(n) for reason, n in drop_counts.items()}
+        rollout_metrics["rollout/inflight_prompts"] = float(len(self._inflight_rollouts))
         if drop_counts:
             rollout_metrics["rollout/dropped/total"] = float(sum(drop_counts.values()))
         if dynamic_filtering and groups_completed:

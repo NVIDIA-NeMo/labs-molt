@@ -783,6 +783,9 @@ class GenerateSamplesActor:
                         logger.info(f"[rollout_dump] wrote {len(rollout_samples)} samples to {dump_path}")
 
                 if rollout_samples:
+                    # The loader state marks every dispatched prompt consumed; the ones still in flight
+                    # (rollout/inflight_prompts) are not re-drawn by a resume — they are the work after
+                    # the checkpoint, like the untrained tail of the pool.
                     client_states = {
                         "episode": ep,
                         "total_consumed_prompts": total_consumed_prompts,

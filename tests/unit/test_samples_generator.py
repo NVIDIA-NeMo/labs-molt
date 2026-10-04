@@ -117,7 +117,7 @@ def test_generate_samples_returns_batch_as_rollouts_finish_and_keeps_pool_satura
     assert [handle.group_id for handle in generator._inflight_rollouts] == ["p3", "p4", "p5", "p6"]
     assert generator._finished_samples == []
     # No drops and no dynamic filtering → no rollout metrics emitted.
-    assert rollout_metrics == {}
+    assert rollout_metrics == {"rollout/inflight_prompts": 4.0}  # the pool stays saturated: 4 groups still generating
     assert exhausted is False
 
 
@@ -541,3 +541,22 @@ def test_without_partial_rollout_the_pool_holds_one_batch_and_drains(monkeypatch
     assert [sample.group_ids[0] for sample in samples] == ["p0", "p1", "p2"]
     assert prompts_dispatched == 3  # capacity 5, but only the batch's 3 prompts go out
     assert generator._inflight_rollouts == []  # pool drained: the refit sees no in-flight rollout
+
+
+def test_rollout_metrics_report_the_prompt_groups_still_in_flight(monkeypatch):
+    # 8 in flight / 4 per batch with partial rollout: after the first batch 8 groups are still
+    # generating — the prompts a checkpoint saved with this batch would skip on resume.
+    generator = object.__new__(SamplesGenerator)
+    generator.args = SimpleNamespace(
+        rollout=SimpleNamespace(batch_size=4, n_samples_per_prompt=1, vllm_generate_batch_size=8),
+        algo=SimpleNamespace(dynamic_filtering_enable=False),
+        ckpt=SimpleNamespace(warm_resume_rollouts=False),
+        actor=SimpleNamespace(num_nodes=1, num_gpus_per_node=1),
+        fsdp=SimpleNamespace(cp_size=1, tp_size=1),
+        train=SimpleNamespace(partial_rollout_enable=True),
+    )
+    generator.prompts_dataloader = _prompt_loader(40)
+    _wire_fake_vllm(generator, monkeypatch, _sample)
+
+    _, metrics, _, _ = generator.generate_samples()
+    assert metrics["rollout/inflight_prompts"] == len(generator._inflight_rollouts) > 0
