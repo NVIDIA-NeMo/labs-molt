@@ -243,7 +243,7 @@ class RouterGenerateClient:
                 async with self.http.post(path, json=body, headers=headers) as resp:
                     resp.raise_for_status()
                     return await resp.json()
-            except (aiohttp.ClientResponseError, aiohttp.ClientConnectionError) as e:
+            except (aiohttp.ClientResponseError, aiohttp.ClientConnectionError, aiohttp.ClientPayloadError) as e:
                 fatal = isinstance(e, aiohttp.ClientResponseError) and e.status < 500  # 4xx = real bug
                 if fatal or attempt == retries - 1:
                     raise
