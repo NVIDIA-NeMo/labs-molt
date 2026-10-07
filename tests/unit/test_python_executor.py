@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import importlib.util
+import time
 from pathlib import Path
 
 _TOOL_PATH = Path(__file__).resolve().parents[2] / "examples" / "python" / "tools" / "python_executor.py"
@@ -42,3 +43,51 @@ def test_run_python_isolates_file_writes_to_tempdir(tmp_path, monkeypatch):
     # The snippet ran in its own throwaway cwd, so nothing lands in our cwd.
     assert not (tmp_path / sentinel).exists()
     assert list(tmp_path.iterdir()) == []
+
+
+def test_run_python_timeout_terminates_spawned_children(tmp_path):
+    ready = tmp_path / "ready.txt"
+    survivor = tmp_path / "survived.txt"
+    child = f"import time; open({str(ready)!r}, 'w').close(); time.sleep(1); open({str(survivor)!r}, 'w').close()"
+    code = (
+        "import os, subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, '-c', {child!r}])\n"
+        f"while not os.path.exists({str(ready)!r}): time.sleep(0.01)\n"
+        "time.sleep(30)\n"
+    )
+
+    out = run_python(code, timeout_seconds=0.5)
+    assert ready.exists()
+    time.sleep(1.1)
+
+    assert "timed out" in out
+    assert not survivor.exists()
+
+
+def test_run_python_timeout_does_not_wait_for_escaped_child(tmp_path):
+    ready = tmp_path / "ready.txt"
+    release = tmp_path / "release.txt"
+    child = (
+        "import time\n"
+        "from pathlib import Path\n"
+        f"Path({str(ready)!r}).touch()\n"
+        "deadline = time.monotonic() + 5\n"
+        f"while time.monotonic() < deadline and not Path({str(release)!r}).exists(): time.sleep(0.01)\n"
+    )
+    code = (
+        "import os, subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, '-c', {child!r}], start_new_session=True)\n"
+        f"while not os.path.exists({str(ready)!r}): time.sleep(0.01)\n"
+        "time.sleep(30)\n"
+    )
+
+    started = time.monotonic()
+    try:
+        out = run_python(code, timeout_seconds=0.5)
+    finally:
+        release.touch()
+    elapsed = time.monotonic() - started
+
+    assert ready.exists()
+    assert "timed out" in out
+    assert elapsed < 2

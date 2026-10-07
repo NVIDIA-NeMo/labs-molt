@@ -41,7 +41,7 @@ this endpoint over the internet.
 from __future__ import annotations
 
 import os
-import resource
+import signal
 import subprocess
 import tempfile
 
@@ -52,20 +52,15 @@ DEFAULT_MEM_LIMIT_BYTES = int(os.environ.get("PYTHON_EXECUTOR_MEM_BYTES", str(10
 # Truncate captured output so a runaway print doesn't blow up the next prompt.
 DEFAULT_OUTPUT_CHARS = int(os.environ.get("PYTHON_EXECUTOR_OUTPUT_CHARS", "2048"))
 
-# Preamble: only the cheap `math` stdlib (sympy/numpy cold-start is ~3s each
-# and would exhaust the 5s wall-clock budget on every call). The model is told
-# in the tool description to import sympy/numpy itself if it needs them.
-_PREAMBLE = "import math\n"
-
-
-def _set_limits():
-    soft = DEFAULT_MEM_LIMIT_BYTES
-    hard = int(soft * 1.5)
-    try:
-        resource.setrlimit(resource.RLIMIT_AS, (soft, hard))
-    except (ValueError, OSError):
-        # Some environments forbid setrlimit; rely on timeout alone.
-        pass
+# Set the memory cap inside the fresh interpreter: preexec_fn is unsafe because tool calls launch
+# from worker threads. Only preload cheap `math`; the model imports sympy/numpy itself when needed.
+_PREAMBLE = f"""import math
+import resource
+try:
+    resource.setrlimit(resource.RLIMIT_AS, ({DEFAULT_MEM_LIMIT_BYTES}, {int(DEFAULT_MEM_LIMIT_BYTES * 1.5)}))
+except (ValueError, OSError):
+    pass
+"""
 
 
 def _truncate(text: str, cap: int = DEFAULT_OUTPUT_CHARS) -> str:
@@ -93,20 +88,35 @@ def run_python(
         # Run in a throwaway working directory so files the snippet writes land
         # in temp and are removed on exit, instead of polluting the actor's cwd.
         with tempfile.TemporaryDirectory(prefix="py_executor_") as workdir:
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 ["python3", "-I", "-c", script],
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout_seconds,
-                preexec_fn=_set_limits,
                 cwd=workdir,
+                start_new_session=True,
             )
-    except subprocess.TimeoutExpired:
-        return f"Error: execution timed out after {timeout_seconds:.1f}s."
+            try:
+                stdout, stderr = proc.communicate(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                # Kill descendants that remain in the interpreter's process group.
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                # Escaped descendants can retain these pipes. Close them and bound
+                # reaping so cleanup cannot extend the tool timeout indefinitely.
+                proc.stdout.close()
+                proc.stderr.close()
+                try:
+                    proc.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    pass
+                return f"Error: execution timed out after {timeout_seconds:.1f}s."
     except Exception as exc:  # pragma: no cover - defensive
         return f"Error: failed to launch interpreter ({type(exc).__name__}: {exc})."
-    stdout = _truncate(proc.stdout or "", output_chars)
-    stderr = _truncate(proc.stderr or "", output_chars)
+    stdout = _truncate(stdout or "", output_chars)
+    stderr = _truncate(stderr or "", output_chars)
     if proc.returncode != 0:
         return f"Exit code {proc.returncode}.\nstdout:\n{stdout}\nstderr:\n{stderr}".strip()
     if not stdout and stderr:
