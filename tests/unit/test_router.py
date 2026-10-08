@@ -178,6 +178,37 @@ def test_post_retries_transient_then_succeeds(monkeypatch):
     assert http.attempts == 3 and ro.outputs[0].token_ids == [90]  # 2 transient failures, 3rd succeeds
 
 
+@pytest.mark.parametrize("path", [GEN, RENDER])
+@pytest.mark.parametrize("failed_attempts", [2, 3])
+def test_post_retries_interrupted_response_body(monkeypatch, path, failed_attempts):
+    payload = {"ok": True}
+    http = _FakeHttp({path: payload})
+    backoffs = []
+
+    async def read_body(response):
+        if len(http.calls) <= failed_attempts:
+            raise aiohttp.ClientPayloadError("Response payload is not completed")
+        return response._p
+
+    async def record_backoff(delay):
+        backoffs.append(delay)
+
+    monkeypatch.setattr(_FakeResp, "json", read_body)
+    monkeypatch.setattr("molt.trainer.rollout.router.asyncio.sleep", record_backoff)
+    request = RouterGenerateClient(http)._post(path, {"token_ids": [1, 2]}, "stable-session")
+    if failed_attempts == 3:
+        with pytest.raises(aiohttp.ClientPayloadError, match="not completed"):
+            asyncio.run(request)
+    else:
+        assert asyncio.run(request) == payload
+    assert len(http.calls) == 3
+    assert backoffs == [1, 2]
+    assert all(
+        call == (path, {"model": "policy", "token_ids": [1, 2]}, {"x-session-id": "stable-session"})
+        for call in http.calls
+    )
+
+
 def test_post_fails_fast_on_4xx(monkeypatch):
     # A 4xx is a real client bug, not a transient — fail immediately without burning the retry budget.
     async def _no_sleep(*_a, **_k):
