@@ -601,6 +601,26 @@ if __name__ == "__main__":
         "the same).",
     )
     parser.add_argument("--reward.clip_range", type=float, nargs=2, default=(-10, 10), help="Reward clip range")
+    parser.add_argument(
+        "--reward.overlong_buffer_len",
+        type=float,
+        default=None,
+        help="DAPO-style overlong penalty: soft-penalize responses exceeding "
+        "rollout.max_new_tokens - overlong_buffer_len. Unset disables it.",
+    )
+    parser.add_argument(
+        "--reward.overlong_penalty_factor",
+        type=float,
+        default=1.0,
+        help="DAPO-style overlong penalty factor (maximum penalty magnitude).",
+    )
+    parser.add_argument(
+        "--reward.stop_properly_penalty_coef",
+        type=float,
+        default=None,
+        help="ProRL-style stop-properly penalty: scale truncated-sample rewards by this "
+        "coefficient in [0, 1], or set them to this value if negative. Unset disables it.",
+    )
 
     # Rollout / generation
     parser.add_argument("--train.agent_path", type=str, default=None, help="Agent script path")
