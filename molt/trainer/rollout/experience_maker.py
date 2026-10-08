@@ -31,6 +31,7 @@ from molt.trainer.algorithm.advantage import (
     get_advantage_estimator,
 )
 from molt.trainer.algorithm.experience import Experience
+from molt.trainer.algorithm.length_penalty import apply_length_penalties
 from molt.utils.logging_utils import init_logger
 
 if TYPE_CHECKING:
@@ -220,6 +221,16 @@ class RemoteExperienceMaker:
         each sample independently (see `_per_sample_rewards`).
         """
         args = self.args
+        # Length penalties (DAPO overlong / ProRL stop-properly), ported from OpenRLHF.
+        # Applied per-sample before reward merging so each sample's own length/truncation
+        # shapes its reward; no-op unless the --reward.* penalty flags are set. Rewards are
+        # promoted to at least FP32 first so the penalty math doesn't lose precision.
+        for experience in experiences:
+            experience.rewards = experience.rewards.to(
+                torch.promote_types(experience.rewards.dtype, torch.float32)
+            )
+        apply_length_penalties(experiences, args)
+
         if self.advantage_estimator in GROUP_ADVANTAGE_ESTIMATORS:
             rollouts = self._merge_rollout_rewards(experiences)
         else:
