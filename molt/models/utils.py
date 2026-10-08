@@ -16,6 +16,7 @@
 # Adapted from OpenRLHF (https://github.com/OpenRLHF/OpenRLHF),
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
+import os
 from typing import Optional, Union
 
 import torch
@@ -89,6 +90,42 @@ def compute_approx_kl(
     return log_ratio.clamp(min=-10, max=10)
 
 
+class _VllmTokenLogProbs(torch.autograd.Function):
+    """Use vLLM's selected-logprob forward with the analytic backward."""
+
+    @staticmethod
+    def forward(
+        ctx: torch.autograd.function.FunctionCtx,
+        logits: torch.Tensor,
+        labels: torch.Tensor,
+        temperature: float,
+    ) -> torch.Tensor:
+        from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
+
+        ctx.save_for_backward(logits, labels)
+        ctx.temperature = temperature
+        scaled_logits = logits.float()
+        if temperature != 1.0:
+            scaled_logits = scaled_logits / temperature
+        return compute_token_logprobs(scaled_logits, labels.unsqueeze(-1)).squeeze(-1)
+
+    @staticmethod
+    def backward(
+        ctx: torch.autograd.function.FunctionCtx, grad_output: torch.Tensor
+    ) -> tuple[torch.Tensor | None, None, None]:
+        logits, labels = ctx.saved_tensors
+        scaled_logits = logits.float()
+        if ctx.temperature != 1.0:
+            scaled_logits = scaled_logits / ctx.temperature
+        grad_logits = -torch.softmax(scaled_logits, dim=-1) * grad_output.unsqueeze(-1)
+        grad_logits.scatter_add_(
+            -1, labels.unsqueeze(-1), grad_output.unsqueeze(-1)
+        )
+        if ctx.temperature != 1.0:
+            grad_logits = grad_logits / ctx.temperature
+        return grad_logits.to(logits.dtype), None, None
+
+
 def log_probs_from_logits(logits: torch.Tensor, labels: torch.Tensor, temperature: float = 1.0) -> torch.Tensor:
     batch_dim = logits.shape[:-1]
     last_dim = logits.shape[-1]
@@ -101,7 +138,8 @@ def log_probs_from_logits(logits: torch.Tensor, labels: torch.Tensor, temperatur
     #
     # Fast path: fused triton CE kernel only supports fp32/fp64.
     # https://github.com/OpenRLHF/OpenRLHF/pull/718#issuecomment-2641081881
-    if logits.dtype in [torch.float32, torch.float64]:
+    use_vllm_logprobs = os.environ.get("MOLT_AUTOMODEL_MATCH_VLLM_LOGSOFTMAX") == "1"
+    if logits.dtype in [torch.float32, torch.float64] and not use_vllm_logprobs:
         try:
             from flash_attn.ops.triton.cross_entropy import cross_entropy_loss
 
@@ -119,10 +157,13 @@ def log_probs_from_logits(logits: torch.Tensor, labels: torch.Tensor, temperatur
     # Each chunk is recomputed in backward: autograd would otherwise keep every
     # fp32 chunk alive until backward (8 GiB per rank at 8k tokens x 248k vocab).
     def chunk_log_probs(chunk_logits, chunk_labels):
+        if use_vllm_logprobs:
+            return _VllmTokenLogProbs.apply(chunk_logits, chunk_labels, temperature)
         chunk = chunk_logits.float()
         if temperature != 1.0:
             chunk = chunk / temperature
-        return chunk.gather(dim=-1, index=chunk_labels.unsqueeze(-1)).squeeze(-1) - torch.logsumexp(chunk, dim=-1)
+        selected = chunk.gather(dim=-1, index=chunk_labels.unsqueeze(-1)).squeeze(-1)
+        return selected - torch.logsumexp(chunk, dim=-1)
 
     chunk_size = 256
     out = []
