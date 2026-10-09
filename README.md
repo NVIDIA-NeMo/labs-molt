@@ -403,6 +403,26 @@ Four reference agents ship under `examples/python/agents/`:
 --train.agent_path examples/python/agents/chat_geo3k.py    # ChatAgent: VLM multi-turn + Python tool
 ```
 
+Optional reward shaping (both disabled by default):
+
+- `--reward.overlong_buffer_len B` subtracts a DAPO-style ramp up to
+  `--reward.overlong_penalty_factor` (default 1) over the last `B` tokens of
+  `data.max_len`. Molt uses the largest segment context, including prompt,
+  generated tokens, tool feedback and expanded image tokens. History compaction
+  resets the context window; separate segments are not added together. This is a
+  context-budget adaptation, rather than OpenRLHF's per-response generation cap;
+  `rollout.max_new_tokens` remains a per-turn cap and may be unset.
+- `--reward.stop_properly_penalty_coef C` scales rewards by `C` in `[0, 1]`, or
+  overrides them with `C` when negative, if any segment is truncated. Truncation
+  includes generation length limits, context exhaustion and environment turn caps.
+
+Group estimators shape one reward per rollout after merging segments, before
+reward clipping. REINFORCE and GAE shape each sample separately. Raw `reward`
+metrics are preserved; `length_penalty`, `overlong_penalty` and
+`stop_properly_penalty` record the corrections. `rollout/overlong_frac` and
+`rollout/truncated_penalized` count kept training rollouts with nonzero corrections,
+once per rollout, while `rollout/reward_mean` covers all generated rollouts.
+
 ## 🍳 Recipes
 
 Reference launch scripts live under `examples/scripts/`, all end-to-end

@@ -77,7 +77,7 @@ def _grpo_maker():
         advantage_estimator="grpo",
         kl_ctl=SimpleNamespace(value=0.0),
         args=SimpleNamespace(
-            reward=SimpleNamespace(clip_range=None),
+            reward=SimpleNamespace(clip_range=None, overlong_buffer_len=None, stop_properly_penalty_coef=None),
             algo=SimpleNamespace(advantage=SimpleNamespace(gamma=1.0, lam=1.0, no_whiten=False)),
             rollout=SimpleNamespace(n_samples_per_prompt=4),
         ),

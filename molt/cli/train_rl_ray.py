@@ -18,6 +18,7 @@
 
 import argparse
 import copy
+import math
 import os
 
 from molt.trainer.algorithm.experience import get_model_parallel_size
@@ -601,6 +602,31 @@ if __name__ == "__main__":
         "the same).",
     )
     parser.add_argument("--reward.clip_range", type=float, nargs=2, default=(-10, 10), help="Reward clip range")
+    parser.add_argument(
+        "--reward.overlong_buffer_len",
+        type=float,
+        default=None,
+        help="DAPO-style context penalty: subtract factor * clamp((peak_context_length - "
+        "(data.max_len - buffer)) / buffer, 0, 1). Peak context includes prompt, generated "
+        "tokens, tool feedback and expanded image tokens; take the maximum across segments "
+        "after history compaction. Uses data.max_len, independently of the per-turn "
+        "rollout.max_new_tokens (which may be unset). Unset disables it.",
+    )
+    parser.add_argument(
+        "--reward.overlong_penalty_factor",
+        type=float,
+        default=1.0,
+        help="DAPO-style overlong penalty factor (maximum penalty magnitude).",
+    )
+    parser.add_argument(
+        "--reward.stop_properly_penalty_coef",
+        type=float,
+        default=None,
+        help="ProRL-style stop-properly penalty: scale truncated-rollout rewards by this "
+        "coefficient in [0, 1], or set them to this value if negative. Note: 'truncated' in "
+        "Molt covers vLLM finish_reason=length AND context exhaustion AND env turn caps. "
+        "Unset disables it.",
+    )
 
     # Rollout / generation
     parser.add_argument("--train.agent_path", type=str, default=None, help="Agent script path")
@@ -948,6 +974,18 @@ if __name__ == "__main__":
             "RL rollout currently requires vLLM. Set --vllm.num_engines > 0; "
             "actor-side generation fallback is not wired in this AutoModel path."
         )
+
+    # --- Length penalties (DAPO overlong / ProRL stop-properly) ---
+    buf = args.reward.overlong_buffer_len
+    if buf is not None:
+        if not math.isfinite(buf) or not 0 < buf <= args.data.max_len:
+            raise ValueError("--reward.overlong_buffer_len must be finite and in (0, data.max_len]")
+        factor = args.reward.overlong_penalty_factor
+        if not math.isfinite(factor) or factor < 0:
+            raise ValueError("--reward.overlong_penalty_factor must be finite and nonnegative")
+    coef = args.reward.stop_properly_penalty_coef
+    if coef is not None and (not math.isfinite(coef) or coef > 1):
+        raise ValueError("--reward.stop_properly_penalty_coef must be finite and <= 1 (negative overrides reward)")
 
     # --- Algorithm setup & defaults ---
     threshold = args.algo.advantage.is_correction_threshold
