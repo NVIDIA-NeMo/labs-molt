@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import itertools
 import os
 import statistics
 import time
@@ -378,6 +379,17 @@ class BaseRLTrainer:
             "rollout/truncated_rate": truncated.float().mean().item(),
             "rollout/num_samples": float(num_turn_rows),
         }
+        # Penalty rates describe the kept training rollouts; count each rollout once,
+        # even when compaction produced several segments or reinforce scores them separately.
+        if "overlong_penalty" in experiences[0].info:
+            rollout_ids = list(itertools.chain.from_iterable(rollout_and_group_ids(e)[0] for e in experiences))
+            for key, metric in (
+                ("overlong_penalty", "rollout/overlong_frac"),
+                ("stop_properly_penalty", "rollout/truncated_penalized"),
+            ):
+                corrections = torch.cat([e.info[key] for e in experiences]).tolist()
+                affected = {rid for rid, delta in zip(rollout_ids, corrections, strict=True) if delta != 0}
+                rollout_stats[metric] = len(affected) / len(set(rollout_ids))
 
         # Push the experiences to the actor shards (and the critic, which trains on the same batch
         # with values + returns) before optimization. Each rank fetches its samples' heavy tensors

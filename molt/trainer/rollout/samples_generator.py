@@ -574,7 +574,10 @@ class SamplesGenerator:
         total_length = attention_mask.float().sum()
         is_clipped = total_length >= truncate_length
 
-        info = {"response_clip_ratio": torch.tensor([is_clipped])}
+        info = {
+            "response_clip_ratio": torch.tensor([is_clipped]),
+            "context_length": torch.tensor([total_length + response.image_budget]),
+        }
         if response.mm_train_inputs is not None and media_ids:
             # Embedded image tokens that actually enter training. An image silently dropped or rendered
             # at reduced resolution shrinks this count while reward/vllm_kl stay plausible — the one
