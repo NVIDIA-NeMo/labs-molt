@@ -50,6 +50,47 @@ def rollout_and_group_ids(experience):
     return rollout_ids, (experience.group_ids or rollout_ids)
 
 
+def shape_length_penalties(args, experiences: List[Experience], rollouts: dict) -> torch.Tensor:
+    """Apply the DAPO overlong ramp or the ProRL stop-properly coefficient to the merged rewards.
+
+    Both are off by default, and then the rewards come back exactly as they went in. They are two
+    answers to the same question and the CLI rejects enabling both: a rollout that runs out of
+    context trips either rule, so together they would penalize its length twice.
+
+    Each rule reshapes one reward per rollout -- the ramp subtracts, the coefficient rescales or
+    replaces -- and how far it moved that reward is recorded on each of the rollout's segments
+    under `info` for the metrics, leaving `info["reward"]` raw. A rollout is scored by its WORST
+    segment and never by the sum of them: history compaction resets the context budget, so its
+    segments are separate windows. That is what the amax in each branch reads out -- the peak
+    context any segment reached, or whether any segment was truncated.
+    """
+    rewards = rollouts["rewards"]
+    buf, coef = args.reward.overlong_buffer_len, args.reward.stop_properly_penalty_coef
+    if buf is None and coef is None:
+        return rewards
+
+    rewards = rewards.float()
+    s2r = rollouts["sample_to_rollout"]
+    if buf is not None:
+        # DAPO: the last `buf` tokens of the context window cost up to `overlong_penalty_factor`.
+        lengths = torch.cat([e.info["context_length"] for e in experiences]).to(rewards)
+        peak = torch.zeros_like(rewards).scatter_reduce(0, s2r, lengths, reduce="amax")
+        over = (peak - (args.data.max_len - buf)).clamp(0, buf)
+        name = "overlong_penalty"
+        shaped = rewards - over / buf * args.reward.overlong_penalty_factor
+    else:
+        # ProRL: a truncated rollout keeps `coef` of its reward, or becomes `coef` outright.
+        flags = torch.cat([e.truncated for e in experiences]).to(rewards)
+        truncated = torch.zeros_like(rewards).scatter_reduce(0, s2r, flags, reduce="amax").bool()
+        rescaled = torch.full_like(rewards, coef) if coef < 0 else rewards * coef
+        name = "stop_properly_penalty"
+        shaped = torch.where(truncated, rescaled, rewards)
+
+    for exp, values in zip(experiences, (shaped - rewards)[s2r].split(rollouts["exp_len"])):
+        exp.info[name] = values
+    return shaped
+
+
 class RemoteExperienceMaker:
     """Builds train-ready experiences from rollout samples and remote model forwards."""
 
@@ -226,36 +267,7 @@ class RemoteExperienceMaker:
         else:
             rollouts = self._per_sample_rewards(experiences)
 
-        rewards = rollouts["rewards"]
-        buf = args.reward.overlong_buffer_len
-        coef = args.reward.stop_properly_penalty_coef
-        if buf is not None or coef is not None:
-            rewards = rewards.float()
-            s2r = rollouts["sample_to_rollout"]
-            overlong_pen = torch.zeros_like(rewards)
-            sp_pen = torch.zeros_like(rewards)
-            # Compaction resets the context budget; use the peak segment footprint,
-            # including tool feedback and expanded image tokens, rather than summing segments.
-            if buf is not None:
-                lengths = torch.cat([e.info.get("context_length", e.total_length) for e in experiences]).to(rewards)
-                peak = torch.zeros_like(rewards).scatter_reduce(0, s2r, lengths, reduce="amax")
-                exceed = (peak - (args.data.max_len - buf)).clamp(0, buf)
-                overlong_pen = -exceed / buf * args.reward.overlong_penalty_factor
-                rewards = rewards + overlong_pen
-            if coef is not None:
-                truncated = torch.cat([e.truncated for e in experiences]).to(rewards)
-                truncated = torch.zeros_like(rewards).index_add(0, s2r, truncated).bool()
-                penalized = torch.full_like(rewards, coef) if coef < 0 else rewards * coef
-                sp_pen = torch.where(truncated, penalized - rewards, 0.0)
-                rewards = torch.where(truncated, penalized, rewards)
-            # Broadcast one correction to every segment; raw reward metrics stay untouched.
-            for name, penalty in (
-                ("length_penalty", overlong_pen + sp_pen),
-                ("overlong_penalty", overlong_pen),
-                ("stop_properly_penalty", sp_pen),
-            ):
-                for exp, values in zip(experiences, penalty[s2r].split(rollouts["exp_len"])):
-                    exp.info[name] = values
+        rewards = shape_length_penalties(args, experiences, rollouts)
 
         # Clip the penalized per-rollout reward before the baseline.
         clip = args.reward.clip_range

@@ -616,7 +616,7 @@ if __name__ == "__main__":
         "--reward.overlong_penalty_factor",
         type=float,
         default=1.0,
-        help="DAPO-style overlong penalty factor (maximum penalty magnitude).",
+        help="Maximum magnitude of the overlong penalty. No effect without --reward.overlong_buffer_len.",
     )
     parser.add_argument(
         "--reward.stop_properly_penalty_coef",
@@ -976,16 +976,21 @@ if __name__ == "__main__":
         )
 
     # --- Length penalties (DAPO overlong / ProRL stop-properly) ---
+    factor = args.reward.overlong_penalty_factor
+    if not math.isfinite(factor) or factor < 0:
+        raise ValueError("--reward.overlong_penalty_factor must be finite and nonnegative")
     buf = args.reward.overlong_buffer_len
-    if buf is not None:
-        if not math.isfinite(buf) or not 0 < buf <= args.data.max_len:
-            raise ValueError("--reward.overlong_buffer_len must be finite and in (0, data.max_len]")
-        factor = args.reward.overlong_penalty_factor
-        if not math.isfinite(factor) or factor < 0:
-            raise ValueError("--reward.overlong_penalty_factor must be finite and nonnegative")
+    if buf is not None and not (math.isfinite(buf) and 0 < buf <= args.data.max_len):
+        raise ValueError("--reward.overlong_buffer_len must be finite and in (0, data.max_len]")
     coef = args.reward.stop_properly_penalty_coef
     if coef is not None and (not math.isfinite(coef) or coef > 1):
         raise ValueError("--reward.stop_properly_penalty_coef must be finite and <= 1 (negative overrides reward)")
+    if buf is not None and coef is not None:
+        raise ValueError(
+            "--reward.overlong_buffer_len and --reward.stop_properly_penalty_coef are two answers to the "
+            "same question; a rollout that runs out of context trips either one, so enabling both "
+            "penalizes its length twice. Pick one."
+        )
 
     # --- Algorithm setup & defaults ---
     threshold = args.algo.advantage.is_correction_threshold

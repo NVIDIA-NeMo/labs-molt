@@ -16,27 +16,22 @@ from molt.trainer.rollout.experience_maker import RemoteExperienceMaker
 
 
 def _maker(estimator="dr_grpo", **reward_kwargs):
+    """A real RemoteExperienceMaker: only `strategy.args` and the KL controller are stubbed, so a
+    new step on the compute_advantages path does not need another binding here."""
     reward = dict(
         clip_range=None, overlong_buffer_len=None, overlong_penalty_factor=1.0, stop_properly_penalty_coef=None
     )
     reward.update(reward_kwargs)
-    maker = SimpleNamespace(
-        advantage_estimator=estimator,
-        kl_ctl=SimpleNamespace(value=0.0),
-        args=SimpleNamespace(
-            reward=SimpleNamespace(**reward),
-            algo=SimpleNamespace(advantage=SimpleNamespace(gamma=1.0, lam=1.0, no_whiten=True)),
-            rollout=SimpleNamespace(n_samples_per_prompt=2, max_new_tokens=None, batch_size=1),
-            data=SimpleNamespace(max_len=2048),
-            actor=SimpleNamespace(num_nodes=1, num_gpus_per_node=1),
-            fsdp=SimpleNamespace(cp_size=1, tp_size=1),
-            train=SimpleNamespace(force_on_policy=True),
-        ),
+    args = SimpleNamespace(
+        reward=SimpleNamespace(**reward),
+        algo=SimpleNamespace(advantage=SimpleNamespace(estimator=estimator, gamma=1.0, lam=1.0, no_whiten=True)),
+        rollout=SimpleNamespace(n_samples_per_prompt=2, max_new_tokens=None, batch_size=1),
+        data=SimpleNamespace(max_len=2048),
+        actor=SimpleNamespace(num_nodes=1, num_gpus_per_node=1),
+        fsdp=SimpleNamespace(cp_size=1, tp_size=1),
+        train=SimpleNamespace(force_on_policy=True),
     )
-    maker._merge_rollout_rewards = RemoteExperienceMaker._merge_rollout_rewards.__get__(maker)
-    maker._per_sample_rewards = RemoteExperienceMaker._per_sample_rewards
-    maker.compute_advantages_and_returns = RemoteExperienceMaker.compute_advantages_and_returns.__get__(maker)
-    return maker
+    return RemoteExperienceMaker(None, None, SimpleNamespace(value=0.0), SimpleNamespace(args=args), None)
 
 
 def _sample(rid, gid, reward, response_length, total_length, truncated, idx):
@@ -51,7 +46,7 @@ def _sample(rid, gid, reward, response_length, total_length, truncated, idx):
         index=[idx],
         group_ids=[gid],
         rollout_ids=[rid],
-        info={"reward": torch.tensor([float(reward)])},
+        info={"reward": torch.tensor([float(reward)]), "context_length": torch.tensor([float(total_length)])},
     )
 
 
@@ -78,13 +73,13 @@ def test_real_group_advantages_are_order_invariant(estimator, magnitude, order):
         _sample("A", "g", 1, 1000, 2048, True, 1),
         _sample("B", "g", 1, 100, 600, False, 2),
     ]
-    maker = _maker(estimator, overlong_buffer_len=200, stop_properly_penalty_coef=0.5)
+    maker = _maker(estimator, overlong_buffer_len=200)
     maker.compute_advantages_and_returns([samples[i] for i in order])
     for s, expected in zip(samples, [-magnitude, -magnitude, magnitude]):
         torch.testing.assert_close(s.advantages, torch.full((1, 4), expected), atol=1e-5, rtol=1e-5)
         torch.testing.assert_close(s.info["reward"], torch.tensor([1.0]))
-    assert samples[0].info["length_penalty"].item() == -1
-    assert samples[1].info["length_penalty"].item() == -1
+    assert samples[0].info["overlong_penalty"].item() == -1  # both segments carry A's correction
+    assert samples[1].info["overlong_penalty"].item() == -1
 
 
 def test_compaction_does_not_sum_separate_context_windows(record_rewards):
@@ -118,15 +113,11 @@ def test_tool_feedback_in_largest_segment_counts(record_rewards):
 
 def test_penalties_before_clip_keep_raw_reward(record_rewards):
     s = _sample("A", "g", 1, 1408, 1908, True, 0)
-    _maker(
-        overlong_buffer_len=200, stop_properly_penalty_coef=0.5, clip_range=(0.0, 0.5)
-    ).compute_advantages_and_returns([s])
-    torch.testing.assert_close(record_rewards["rewards"], torch.tensor([0.35]))
+    _maker(overlong_buffer_len=200, clip_range=(0.0, 0.5)).compute_advantages_and_returns([s])
+    torch.testing.assert_close(record_rewards["rewards"], torch.tensor([0.5]))  # 1 - 0.3, then clipped
     torch.testing.assert_close(s.rewards, torch.tensor([1.0]))
     torch.testing.assert_close(s.info["reward"], torch.tensor([1.0]))
-    torch.testing.assert_close(s.info["length_penalty"], torch.tensor([-0.65]))
     torch.testing.assert_close(s.info["overlong_penalty"], torch.tensor([-0.3]))
-    torch.testing.assert_close(s.info["stop_properly_penalty"], torch.tensor([-0.35]))
 
 
 @pytest.mark.parametrize("coef,expected", [(0.5, 0.5), (0.0, 0.0), (1.0, 1.0), (-2.0, -2.0)])
@@ -146,7 +137,7 @@ def test_stop_any_segment_needs_only_truncation(record_rewards, coef, expected):
 @pytest.mark.parametrize("estimator", ["reinforce", "gae"])
 def test_per_sample_estimators_keep_distinct_rewards(record_rewards, estimator):
     samples = [_sample("A", "g", 1, 100, 1908, True, 0), _sample("A", "g", 1, 100, 600, False, 1)]
-    _maker(estimator, overlong_buffer_len=200, stop_properly_penalty_coef=-2).compute_advantages_and_returns(samples)
+    _maker(estimator, stop_properly_penalty_coef=-2).compute_advantages_and_returns(samples)
     torch.testing.assert_close(record_rewards["rewards"], torch.tensor([-2.0, 1.0]))
 
 
@@ -156,7 +147,7 @@ def test_disabled_preserves_reward_dtype_and_needs_no_lengths(record_rewards):
     s.total_length = s.response_length = s.truncated = None
     _maker().compute_advantages_and_returns([s])
     assert record_rewards["rewards"].dtype == torch.bfloat16
-    assert "length_penalty" not in s.info
+    assert "overlong_penalty" not in s.info
 
 
 def test_real_sample_conversion_counts_image_budget(record_rewards, monkeypatch):
@@ -185,11 +176,11 @@ def test_real_sample_conversion_counts_image_budget(record_rewards, monkeypatch)
     torch.testing.assert_close(record_rewards["rewards"], torch.tensor([0.0]))
 
 
-def test_trainer_metrics_deduplicate_segments_and_keep_dropped_rewards(monkeypatch):
+def test_trainer_keeps_raw_metrics_and_never_shapes_a_dropped_sample(monkeypatch):
     monkeypatch.setitem(sys.modules, "vllm", SimpleNamespace(SamplingParams=SimpleNamespace, __version__="0.21.0"))
     import molt.trainer.rl_trainer as rt
 
-    maker = _maker(overlong_buffer_len=200, stop_properly_penalty_coef=0.5)
+    maker = _maker(overlong_buffer_len=200)
     maker.args.actor.num_gpus_per_node = 2
     samples = [
         _sample("A", "g", 1, 100, 600, False, 0),
@@ -213,9 +204,9 @@ def test_trainer_metrics_deduplicate_segments_and_keep_dropped_rewards(monkeypat
     stats, step = rt.BaseRLTrainer.train_step(trainer, samples, 0)
     assert step == 1
     assert stats["rollout/reward_mean"] == pytest.approx(2 / 3)
-    assert stats["rollout/overlong_frac"] == 0.5  # one of two kept rollouts, not three of four segments
+    assert stats["rollout/truncated_rate"] == pytest.approx(1 / 5)  # raw, over everything generated
     assert samples[-1].info["reward"].item() == 0
-    assert "length_penalty" not in samples[-1].info
+    assert "overlong_penalty" not in samples[-1].info
 
 
 @pytest.mark.parametrize(
@@ -224,10 +215,14 @@ def test_trainer_metrics_deduplicate_segments_and_keep_dropped_rewards(monkeypat
         (["--reward.overlong_buffer_len", "0"], "overlong_buffer_len must be finite and in"),
         (["--reward.overlong_buffer_len", "4096"], "overlong_buffer_len must be finite and in"),
         (["--reward.overlong_buffer_len", "nan"], "overlong_buffer_len must be finite and in"),
-        (["--reward.overlong_buffer_len", "200", "--reward.overlong_penalty_factor", "-1"], "factor must be finite"),
-        (["--reward.overlong_buffer_len", "200", "--reward.overlong_penalty_factor", "nan"], "factor must be finite"),
+        (["--reward.overlong_penalty_factor", "-1"], "factor must be finite"),
+        (["--reward.overlong_penalty_factor", "nan"], "factor must be finite"),
         (["--reward.stop_properly_penalty_coef", "1.5"], "coef must be finite and <= 1"),
         (["--reward.stop_properly_penalty_coef", "nan"], "coef must be finite and <= 1"),
+        (
+            ["--reward.overlong_buffer_len", "200", "--reward.stop_properly_penalty_coef", "0.5"],
+            "two answers to the same question",
+        ),
         (["--reward.overlong_buffer_len", "200"], "--train.agent_path is required"),
     ],
 )

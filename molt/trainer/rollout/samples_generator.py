@@ -576,6 +576,8 @@ class SamplesGenerator:
 
         info = {
             "response_clip_ratio": torch.tensor([is_clipped]),
+            # What this segment cost against data.max_len: tool feedback included, and the image
+            # tokens vLLM expands the placeholders into rather than the placeholders themselves.
             "context_length": torch.tensor([total_length + response.image_budget]),
         }
         if response.mm_train_inputs is not None and media_ids:
