@@ -40,16 +40,22 @@ this endpoint over the internet.
 
 from __future__ import annotations
 
+import codecs
+import io
 import os
+import selectors
 import signal
 import subprocess
 import tempfile
+import time
 
 # How long we let a single tool call run before SIGKILL.
 DEFAULT_TIMEOUT_SECONDS = float(os.environ.get("PYTHON_EXECUTOR_TIMEOUT", "10"))
 # Per-call soft cap on resident memory (bytes). The hard cap is +50%.
 DEFAULT_MEM_LIMIT_BYTES = int(os.environ.get("PYTHON_EXECUTOR_MEM_BYTES", str(1024 * 1024 * 1024)))
-# Truncate captured output so a runaway print doesn't blow up the next prompt.
+# Per-stream output retained for the next prompt. Additional output is drained
+# without buffering it in the rollout actor. The truncation notice is additional,
+# so very small values can return a response longer than this limit.
 DEFAULT_OUTPUT_CHARS = int(os.environ.get("PYTHON_EXECUTOR_OUTPUT_CHARS", "2048"))
 
 # Set the memory cap inside the fresh interpreter: preexec_fn is unsafe because tool calls launch
@@ -61,13 +67,6 @@ try:
 except (ValueError, OSError):
     pass
 """
-
-
-def _truncate(text: str, cap: int = DEFAULT_OUTPUT_CHARS) -> str:
-    if len(text) <= cap:
-        return text
-    head = text[: cap - 64]
-    return f"{head}\n... [{len(text) - len(head)} more chars truncated]"
 
 
 def run_python(
@@ -97,7 +96,43 @@ def run_python(
                 start_new_session=True,
             )
             try:
-                stdout, stderr = proc.communicate(timeout=timeout_seconds)
+                decoder = codecs.getincrementaldecoder(proc.stdout.encoding)
+                streams = {
+                    stream: {
+                        "decoder": io.IncrementalNewlineDecoder(decoder(errors=stream.errors), translate=True),
+                        "text": "",
+                        "total": 0,
+                    }
+                    for stream in (proc.stdout, proc.stderr)
+                }
+                deadline = time.monotonic() + timeout_seconds
+                with selectors.DefaultSelector() as selector:
+                    for stream in streams:
+                        selector.register(stream, selectors.EVENT_READ)
+                    while selector.get_map():
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise subprocess.TimeoutExpired(proc.args, timeout_seconds)
+                        events = selector.select(remaining)
+                        if not events:
+                            raise subprocess.TimeoutExpired(proc.args, timeout_seconds)
+                        for key, _ in events:
+                            stream = key.fileobj
+                            chunk = os.read(stream.fileno(), 64 * 1024)
+                            state = streams[stream]
+                            text = state["decoder"].decode(chunk, final=not chunk)
+                            state["total"] += len(text)
+                            state["text"] += text[: max(0, output_chars - len(state["text"]))]
+                            if not chunk:
+                                selector.unregister(stream)
+                                stream.close()
+                # EOF can precede interpreter exit. Reaping stays under the original
+                # deadline, while a final poll avoids losing an exit-boundary race.
+                try:
+                    proc.wait(timeout=max(0, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    if proc.poll() is None:
+                        raise
             except subprocess.TimeoutExpired:
                 # Kill descendants that remain in the interpreter's process group.
                 try:
@@ -115,8 +150,14 @@ def run_python(
                 return f"Error: execution timed out after {timeout_seconds:.1f}s."
     except Exception as exc:  # pragma: no cover - defensive
         return f"Error: failed to launch interpreter ({type(exc).__name__}: {exc})."
-    stdout = _truncate(stdout or "", output_chars)
-    stderr = _truncate(stderr or "", output_chars)
+    for state in streams.values():
+        text = state["text"]
+        if state["total"] > output_chars:
+            head = text[: max(0, output_chars - 64)]
+            text = f"{head}\n... [{state['total'] - len(head)} more chars truncated]"
+        state["text"] = text
+    stdout = streams[proc.stdout]["text"]
+    stderr = streams[proc.stderr]["text"]
     if proc.returncode != 0:
         return f"Exit code {proc.returncode}.\nstdout:\n{stdout}\nstderr:\n{stderr}".strip()
     if not stdout and stderr:
