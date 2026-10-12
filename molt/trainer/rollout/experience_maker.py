@@ -50,6 +50,47 @@ def rollout_and_group_ids(experience):
     return rollout_ids, (experience.group_ids or rollout_ids)
 
 
+def shape_length_penalties(args, experiences: List[Experience], rollouts: dict) -> torch.Tensor:
+    """Apply the DAPO overlong ramp or the ProRL stop-properly coefficient to the merged rewards.
+
+    Both are off by default, and then the rewards come back exactly as they went in. They are two
+    answers to the same question and the CLI rejects enabling both: a rollout that runs out of
+    context trips either rule, so together they would penalize its length twice.
+
+    Each rule reshapes one reward per rollout -- the ramp subtracts, the coefficient rescales or
+    replaces -- and how far it moved that reward is recorded on each of the rollout's segments
+    under `info` for the metrics, leaving `info["reward"]` raw. A rollout is scored by its WORST
+    segment and never by the sum of them: history compaction resets the context budget, so its
+    segments are separate windows. That is what the amax in each branch reads out -- the peak
+    context any segment reached, or whether any segment was truncated.
+    """
+    rewards = rollouts["rewards"]
+    buf, coef = args.reward.overlong_buffer_len, args.reward.stop_properly_penalty_coef
+    if buf is None and coef is None:
+        return rewards
+
+    rewards = rewards.float()
+    s2r = rollouts["sample_to_rollout"]
+    if buf is not None:
+        # DAPO: the last `buf` tokens of the context window cost up to `overlong_penalty_factor`.
+        lengths = torch.cat([e.info["context_length"] for e in experiences]).to(rewards)
+        peak = torch.zeros_like(rewards).scatter_reduce(0, s2r, lengths, reduce="amax")
+        over = (peak - (args.data.max_len - buf)).clamp(0, buf)
+        name = "overlong_penalty"
+        shaped = rewards - over / buf * args.reward.overlong_penalty_factor
+    else:
+        # ProRL: a truncated rollout keeps `coef` of its reward, or becomes `coef` outright.
+        flags = torch.cat([e.truncated for e in experiences]).to(rewards)
+        truncated = torch.zeros_like(rewards).scatter_reduce(0, s2r, flags, reduce="amax").bool()
+        rescaled = torch.full_like(rewards, coef) if coef < 0 else rewards * coef
+        name = "stop_properly_penalty"
+        shaped = torch.where(truncated, rescaled, rewards)
+
+    for exp, values in zip(experiences, (shaped - rewards)[s2r].split(rollouts["exp_len"])):
+        exp.info[name] = values
+    return shaped
+
+
 class RemoteExperienceMaker:
     """Builds train-ready experiences from rollout samples and remote model forwards."""
 
@@ -211,13 +252,14 @@ class RemoteExperienceMaker:
 
     @torch.no_grad()
     def compute_advantages_and_returns(self, experiences: List[Experience]) -> List[Experience]:
-        """Clip rewards, run the estimator (which returns per-token advantages/returns), assemble onto exps.
+        """Apply length penalties, clip rewards, run the estimator, assemble onto exps.
 
         Estimators live in `advantage.py` and never see `Experience`: this method extracts the small
         tensor inputs (rewards, action masks, per-token KL), builds the `AdvantageContext`, and
         writes the returned advantages/returns/info back onto each experience. Only the group
         baselines merge multi-turn step-samples to one reward per rollout; reinforce/gae score
-        each sample independently (see `_per_sample_rewards`).
+        each sample independently (see `_per_sample_rewards`). Length penalties (when enabled)
+        apply to the merged per-rollout rewards before the clip.
         """
         args = self.args
         if self.advantage_estimator in GROUP_ADVANTAGE_ESTIMATORS:
@@ -225,9 +267,11 @@ class RemoteExperienceMaker:
         else:
             rollouts = self._per_sample_rewards(experiences)
 
-        # Clip the raw per-rollout reward before the baseline.
+        rewards = shape_length_penalties(args, experiences, rollouts)
+
+        # Clip the penalized per-rollout reward before the baseline.
         clip = args.reward.clip_range
-        rewards = rollouts["rewards"].clamp(min=clip[0], max=clip[1]) if clip else rollouts["rewards"]
+        rewards = rewards.clamp(min=clip[0], max=clip[1]) if clip else rewards
 
         # PPO/gae is the only estimator that consumes a learned value baseline; the
         # critic filled exp.values during make_experience. Other estimators ignore it.

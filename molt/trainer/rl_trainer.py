@@ -378,7 +378,6 @@ class BaseRLTrainer:
             "rollout/truncated_rate": truncated.float().mean().item(),
             "rollout/num_samples": float(num_turn_rows),
         }
-
         # Push the experiences to the actor shards (and the critic, which trains on the same batch
         # with values + returns) before optimization. Each rank fetches its samples' heavy tensors
         # from the producing runner via reload() — the images reach the rank straight from the

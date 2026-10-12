@@ -291,11 +291,13 @@ The module must export `AgentRunner`. Choose **one** of two paths:
 ```python
 from molt.agents import Env, Result, StepEnvRunner
 
+
 class MathEnv(Env):
     async def step(self, state) -> Result:
         # state: observation_text, action_text, label, sampling_params
         reward = grade(state["action_text"], state["label"])
         return Result(reward=reward, terminated=True)
+
 
 class AgentRunner(StepEnvRunner):
     def __init__(self):
@@ -315,6 +317,7 @@ turns until `terminated` or `truncated`.
 from openai import AsyncOpenAI
 from molt.agents import ChatAgent, ChatAgentRunner, ChatContext, Result
 
+
 class MyAgent(ChatAgent):
     async def run(self, ctx: ChatContext) -> Result:
         # ctx.base_url carries the session id and auto-captures the token
@@ -327,6 +330,7 @@ class MyAgent(ChatAgent):
             temperature=ctx.sampling_params.temperature,
         )
         return Result(reward=grade(resp.choices[0].message.content, ctx.label))
+
 
 class AgentRunner(ChatAgentRunner):
     def __init__(self):
@@ -402,6 +406,28 @@ Four reference agents ship under `examples/python/agents/`:
 --train.agent_path examples/python/agents/chat_minimal.py  # ChatAgent: hello-world chat loop
 --train.agent_path examples/python/agents/chat_geo3k.py    # ChatAgent: VLM multi-turn + Python tool
 ```
+
+Two optional length penalties, both off by default and **mutually exclusive** -- they are
+two answers to the same question, a rollout that runs out of context trips either one, and
+the CLI rejects enabling both. Each shapes the merged per-rollout reward before
+`--reward.clip_range` (group estimators merge a rollout's segments first; REINFORCE and GAE
+shape each sample separately):
+
+- `--reward.overlong_buffer_len B` ramps a DAPO-style penalty up to
+  `--reward.overlong_penalty_factor` (default 1) over the last `B` tokens of `--data.max_len`.
+- `--reward.stop_properly_penalty_coef C` scales a truncated rollout's reward by `C` in
+  `[0, 1]`, or replaces it with `C` when `C` is negative. Truncation covers the generation
+  length limit, context exhaustion and the agent turn cap.
+
+Both measure a rollout by its **peak segment**, never by a sum: history compaction resets the
+context window, so segments of one rollout do not add up. The quantity is the context a
+segment occupied -- prompt, generated tokens, tool feedback and the image tokens vLLM expands
+the placeholders into -- rather than a generation count, so `--rollout.max_new_tokens` may
+stay unset.
+
+Raw `reward` metrics are preserved; whichever rule is on reports its mean correction as
+`overlong_penalty` or `stop_properly_penalty`, so a nonzero value is also how you see that it
+fired, and `rollout/truncated_rate` keeps counting truncation over the full generated set.
 
 ## 🍳 Recipes
 

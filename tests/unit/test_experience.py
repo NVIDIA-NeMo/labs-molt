@@ -72,20 +72,14 @@ def test_balance_experiences_equal_count_and_length_sorted():
 
 
 def _grpo_maker():
-    """A duck-typed RemoteExperienceMaker self with just the fields compute_advantages reads."""
-    maker = SimpleNamespace(
-        advantage_estimator="grpo",
-        kl_ctl=SimpleNamespace(value=0.0),
-        args=SimpleNamespace(
-            reward=SimpleNamespace(clip_range=None),
-            algo=SimpleNamespace(advantage=SimpleNamespace(gamma=1.0, lam=1.0, no_whiten=False)),
-            rollout=SimpleNamespace(n_samples_per_prompt=4),
-        ),
+    """A real RemoteExperienceMaker: only `strategy.args` and the KL controller are stubbed, so a
+    new step on the compute_advantages path does not need another binding here."""
+    args = SimpleNamespace(
+        reward=SimpleNamespace(clip_range=None, overlong_buffer_len=None, stop_properly_penalty_coef=None),
+        algo=SimpleNamespace(advantage=SimpleNamespace(estimator="grpo", gamma=1.0, lam=1.0, no_whiten=False)),
+        rollout=SimpleNamespace(n_samples_per_prompt=4),
     )
-    # Bind the two instance methods the estimator path dispatches through (each reads only its args).
-    maker._merge_rollout_rewards = RemoteExperienceMaker._merge_rollout_rewards.__get__(maker)
-    maker.compute_advantages_and_returns = RemoteExperienceMaker.compute_advantages_and_returns.__get__(maker)
-    return maker
+    return RemoteExperienceMaker(None, None, SimpleNamespace(value=0.0), SimpleNamespace(args=args), None)
 
 
 def _sample(idx, group_id, reward, length=6):
