@@ -205,6 +205,7 @@ class _Session:
     # doesn't re-send temperature would otherwise sample every later train/eval call at the
     # first-caller's temperature (silent train/eval sampling-temperature mismatch).
     sampling_params: Any = None
+    last_action_text: str = ""  # the last reply as generated (end-of-turn token included), for the TITO boundary
     # Token-exact Trajectory segments for this episode. Normal multi-turn = ONE segment that later
     # turns append to in place; a compaction (the agent rewrites/shortens history) or a non-prefix
     # template re-render of prior turns starts a fresh segment. Empty until the first turn generates.
@@ -323,7 +324,18 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
         # renders land in the shared prefix and cancel (verified above), so the suffix is the new
         # user/tool turn + generation prompt (committed as masked feedback -> token-exact segment).
         traj = session.trajectories[-1]
-        delta_text = full[len(prefix) :]
+        # The template closes the prior assistant turn with markup the model did not generate (ChatML:
+        # "<|im_end|>\n" after an action that ends at <|im_end|>, the whole close when the action was
+        # cut by length). Whatever the rendered turn holds beyond the generated action is this turn's
+        # feedback, so the stream stays the template's exact token sequence. A template that re-renders
+        # the assistant text (trim, wrap) does not start with the generated action -> plain suffix.
+        prev_action_text = session.last_action_text  # as generated, end-of-turn token included
+        generated = state.processor.apply_chat_template(
+            chat[:-2], tokenize=False, add_generation_prompt=True, **kwargs
+        )
+        generated += prev_action_text  # history + generation prompt + the action exactly as generated
+        closing = prefix[len(generated) :] if prefix.startswith(generated) else ""
+        delta_text = closing + full[len(prefix) :]
         _, new_pil = await loop.run_in_executor(
             _TOKENIZE_EXECUTOR, _content_to_text_and_images, messages[-1].get("content")
         )
@@ -352,9 +364,19 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
     action_ids = list(generation.token_ids)
     # /inference/v1/generate is token-only (generation.text == ""); decode the action text from the
     # ids so the agent/grader sees it. skip_special_tokens=False keeps answer markers (<answer>,
-    # \boxed, tool tags) — matches observation_text decoding in base.py.
-    action_text = generation.text or (
+    # \boxed, tool tags) — matches observation_text decoding in base.py — but the trailing stop /
+    # EOS tokens are dropped: an agent echoes the content verbatim and the template adds its own
+    # end-of-turn token, so leaving them in doubles the token on every re-render.
+    tokenizer = getattr(state.processor, "tokenizer", state.processor)
+    special_ids = set(getattr(tokenizer, "all_special_ids", None) or ())
+    end = len(action_ids)
+    while end and action_ids[end - 1] in special_ids:
+        end -= 1
+    raw_action_text = generation.text or (
         state.processor.decode(action_ids, skip_special_tokens=False) if action_ids else ""
+    )
+    action_text = generation.text or (
+        state.processor.decode(action_ids[:end], skip_special_tokens=False) if end else ""
     )
     finish_reason = generation.finish_reason or "stop"
     # a non-empty completion MUST carry aligned per-token logprobs — fails fast otherwise (IS correction).
@@ -366,7 +388,6 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
     if not extends:
         session.trajectories.append(traj)
     else:
-        prev_action_text = session.last_response[0] if session.last_response else ""
         traj.append_feedback(prev_action_text, delta_text, delta_ids)
     traj.truncated = traj.truncated or finish_reason == "length"
     # off_policy_len: leading tokens generated under stale weights when a broadcast landed
@@ -376,6 +397,7 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
     # prefill covers the prior action's trailing token too, so the turn-boundary backfills naturally.
     traj.absorb_routing(request_output)
     session.last_messages, session.last_response = messages, (action_text, finish_reason)
+    session.last_action_text = raw_action_text
     return action_text, finish_reason
 
 
