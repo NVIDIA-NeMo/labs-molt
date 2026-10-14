@@ -124,9 +124,7 @@ def train(args):
     if vllm_engines:
         from molt.trainer.rollout.router import create_vllm_router
 
-        vllm_router, router_url = create_vllm_router(
-            vllm_engines, policy=getattr(args.vllm, "router_policy", "consistent_hash")
-        )
+        vllm_router, router_url = create_vllm_router(vllm_engines, policy=args.vllm.router_policy)
         print(f"[rollout] gateway up at {router_url} fronting {len(vllm_engines)} engines", flush=True)
 
     from molt.trainer.rl_trainer import RLTrainer
@@ -663,9 +661,10 @@ if __name__ == "__main__":
     parser.add_argument(
         "--vllm.router_policy",
         type=str,
-        default="consistent_hash",
-        help="vllm-router policy (default consistent_hash: x-session-id affinity pins a rollout's "
-        "render+generate to one engine for mm-feature cache; cache_aware | round_robin | power_of_two | random)",
+        default="cache_aware",
+        help="vllm-router policy (default cache_aware: token-prefix affinity keeps a rollout's turns on one "
+        "engine and falls back to the shortest queue when engines are imbalanced; "
+        "consistent_hash | round_robin | power_of_two | random)",
     )
     parser.add_argument(
         "--vllm.mtp_num_speculative_tokens",

@@ -196,8 +196,8 @@ class _Session:
     prompt: str
     label: Any
     images: list | None
-    # This rollout's id, reused as the router ``x-session-id`` so all turns (and each turn's
-    # render + generate) pin to one engine (consistent_hash) — see ``RouterGenerateClient.generate``.
+    # This rollout's id, reused as the router ``x-session-id`` (the consistent_hash routing key; the
+    # default cache_aware pins by token prefix) — see ``RouterGenerateClient.generate``.
     session_id: str | None = None
     # THIS rollout's SamplingParams (carries the train-vs-eval temperature / max_tokens for this
     # call). Used as the per-turn default before the agent's own body overrides it; the fallback is

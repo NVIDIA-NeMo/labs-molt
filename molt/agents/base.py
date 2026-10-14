@@ -313,9 +313,9 @@ class StepEnvRunner(Runner):
         # the kwarg exists only for Runner signature parity with the chat path.
         sampling_params = deepcopy(sampling_params)
         env = self.env_cls()  # fresh env instance per episode
-        # One session id for the whole rollout: consistent_hash routes every turn (and each turn's
-        # render + generate) to ONE engine, so the multi-turn KV prefix stays warm and a VLM turn's
-        # render features resolve where it generates. Per-rollout, like vime/slime.
+        # One session id for the whole rollout, sent as the router's x-session-id: the key that keeps
+        # every turn on one engine under consistent_hash (the default cache_aware pins by token prefix
+        # instead). Per-rollout, like vime/slime.
         rollout_sid = uuid4().hex
 
         try:

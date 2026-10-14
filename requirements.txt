@@ -20,6 +20,6 @@ torchmetrics
 tqdm
 transformers
 vllm
-vllm-router>=0.1.14
+vllm-router>=0.1.15
 wandb
 wheel
