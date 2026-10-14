@@ -11,14 +11,15 @@ packaging
 peft
 pylatexenc
 pynvml>=12.0.0
-ray[default]==2.55.0
+ray[default]==2.59.0
 sympy
 tensorboard
+tokenizers>=0.23.1,<0.24.0
 torch
 torchdata
 torchmetrics
 tqdm
-transformers
+transformers==5.18.0
 vllm
 vllm-router>=0.1.14
 wandb
