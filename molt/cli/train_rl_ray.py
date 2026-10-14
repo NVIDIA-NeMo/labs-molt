@@ -124,7 +124,11 @@ def train(args):
     if vllm_engines:
         from molt.trainer.rollout.router import create_vllm_router
 
-        vllm_router, router_url = create_vllm_router(vllm_engines, policy=args.vllm.router_policy)
+        vllm_router, router_url = create_vllm_router(
+            vllm_engines,
+            policy=args.vllm.router_policy,
+            balance=(args.vllm.router_balance_abs, args.vllm.router_balance_rel),
+        )
         print(f"[rollout] gateway up at {router_url} fronting {len(vllm_engines)} engines", flush=True)
 
     from molt.trainer.rl_trainer import RLTrainer
@@ -665,6 +669,21 @@ if __name__ == "__main__":
         help="vllm-router policy (default cache_aware: token-prefix affinity keeps a rollout's turns on one "
         "engine and falls back to the shortest queue when engines are imbalanced; "
         "consistent_hash | round_robin | power_of_two | random)",
+    )
+    parser.add_argument(
+        "--vllm.router_balance_abs",
+        type=int,
+        default=10,
+        help="cache_aware keeps a rollout's turns on one engine until (max_in_flight - min_in_flight) "
+        "exceeds this AND max > --vllm.router_balance_rel * min. The router's own 64 is sized for a "
+        "serving fleet and is unreachable when one batch puts rollout.generate_batch_size requests in "
+        "flight; vime runs this workload at 10.",
+    )
+    parser.add_argument(
+        "--vllm.router_balance_rel",
+        type=float,
+        default=1.2,
+        help="The ratio half of the cache_aware load-balance trigger (router default 1.5; vime 1.2).",
     )
     parser.add_argument(
         "--vllm.mtp_num_speculative_tokens",

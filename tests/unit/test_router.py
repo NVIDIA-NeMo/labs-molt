@@ -22,10 +22,12 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
+from unittest import mock
 
 import aiohttp
 import numpy as np
 import pytest
+import ray
 
 from molt.trainer.rollout.router import (
     AgentRunnerActor,
@@ -33,6 +35,7 @@ from molt.trainer.rollout.router import (
     VllmRouterActor,
     _align_features_to_canonical,
     _decode_routed_experts,
+    create_vllm_router,
 )
 
 GEN = "/inference/v1/generate"
@@ -460,3 +463,31 @@ def test_cache_aware_router_keeps_each_rollout_on_one_engine():
     assert len(_FakeVllmEngine.routes) == 32
     assert all(len(ports) == 1 for ports in served.values()), served
     assert len(set().union(*served.values())) > 1
+
+
+def test_router_command_line_carries_both_balance_thresholds():
+    """Both halves of the cache_aware trigger have to reach the subprocess: with only the absolute
+    one set, the ratio stays at the router's 1.5 and the gap it describes is never reached."""
+    cls = getattr(VllmRouterActor, "__ray_actor_class__", VllmRouterActor)
+    seen = {}
+
+    class _Popen:
+        def __init__(self, argv):
+            seen["argv"] = argv
+
+    with (
+        mock.patch("subprocess.Popen", _Popen),
+        mock.patch.object(ray.util, "get_node_ip_address", lambda: "127.0.0.1"),
+    ):
+        cls.__new__(cls).__init__(["http://127.0.0.1:1"], policy="cache_aware", balance=(7, 1.1))
+    argv = seen["argv"]
+    assert argv[argv.index("--balance-abs-threshold") + 1] == "7"
+    assert argv[argv.index("--balance-rel-threshold") + 1] == "1.1"
+    assert argv[argv.index("--policy") + 1] == "cache_aware"
+
+
+def test_router_balance_defaults_match_the_rollout_regime():
+    """The defaults are vime's, not the router's serving-fleet 64 / 1.5."""
+    cls = getattr(VllmRouterActor, "__ray_actor_class__", VllmRouterActor)
+    for fn in (cls.__init__, create_vllm_router):
+        assert inspect.signature(fn).parameters["balance"].default == (10, 1.2)

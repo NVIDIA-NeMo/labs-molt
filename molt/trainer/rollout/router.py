@@ -63,7 +63,7 @@ class VllmRouterActor:
             s.bind((host, 0))
             return s.getsockname()[1]
 
-    def __init__(self, worker_urls, *, policy="cache_aware", port=None, max_payload_mb=512):
+    def __init__(self, worker_urls, *, policy="cache_aware", balance=(10, 1.2), port=None, max_payload_mb=512):
         import subprocess
         import sys
 
@@ -84,11 +84,15 @@ class VllmRouterActor:
                 str(self._free_port(self._host)),
                 "--policy",
                 policy,
-                # cache_aware gives up its prefix placement for the shortest queue only once the in-flight
-                # gap exceeds this (and max > 1.5x min). The default 64 never trips at ~25 requests per
-                # engine, so one slow engine kept filling until its KV cache thrashed.
+                # cache_aware keeps its prefix placement until (max - min) > abs AND max > rel * min.
+                # The router's 64 / 1.5 are sized for a serving fleet: one rollout batch puts only
+                # `rollout.generate_batch_size` requests in flight across the engines, so a gap above 64
+                # is unreachable and one slow engine kept filling until its KV cache thrashed. vime
+                # runs the same workload at 10 / 1.2 (vime/backends/vllm_utils/arguments.py).
                 "--balance-abs-threshold",
-                "16",
+                str(balance[0]),
+                "--balance-rel-threshold",
+                str(balance[1]),
                 "--max-payload-size",
                 str(max_payload_mb * 1024 * 1024),  # token-id / embed payloads are large
                 "--worker-urls",
@@ -403,7 +407,7 @@ class AgentRunnerActor:
         return results
 
 
-def create_vllm_router(engines, *, policy="cache_aware", port=None):
+def create_vllm_router(engines, *, policy="cache_aware", balance=(10, 1.2), port=None):
     """Serve each engine's OpenAI API + launch the vllm-router in front; return (router, url).
 
     Default policy ``cache_aware``: a generate goes to the engine whose radix tree holds its token
@@ -411,5 +415,5 @@ def create_vllm_router(engines, *, policy="cache_aware", port=None):
     balance. ``consistent_hash`` hashed the per-rollout ``x-session-id`` blind to load, so engines
     filled unevenly and the slow one thrashed its KV cache."""
     engine_urls = ray.get([e.serve_openai.remote() for e in engines])
-    router = VllmRouterActor.remote(engine_urls, policy=policy, port=port)
+    router = VllmRouterActor.remote(engine_urls, policy=policy, balance=balance, port=port)
     return router, ray.get(router.ready.remote())
