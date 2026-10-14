@@ -421,8 +421,14 @@ class StepEnvRunner(Runner):
                 trajectory.append_action(action_tokens, action_logprobs, off_policy_len=off_policy_len)
                 trajectory.absorb_routing(request_output)  # fills routing by absolute position (R3)
 
-                feedback_tokens = _tokenize_feedback(
-                    hf_tokenizer, result.observation, result.images, trajectory, max_length
+                feedback_tokens = await asyncio.get_running_loop().run_in_executor(
+                    _TOKENIZE_EXECUTOR,
+                    _tokenize_feedback,
+                    hf_tokenizer,
+                    result.observation,
+                    result.images,
+                    trajectory,
+                    max_length,
                 )
                 feedback_budget = max(0, max_length - len(trajectory.observation_tokens) - trajectory.image_budget)
                 feedback_tokens = feedback_tokens[:feedback_budget]
