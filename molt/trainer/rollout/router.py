@@ -15,8 +15,9 @@
 
 """Real vllm-router in front of the engine servers, + the rollout transport over it.
 
-The router load-balances the engines' OpenAI API (default consistent_hash: ``x-session-id`` affinity
-so a rollout's render+generate co-locate on one engine); weight sync bypasses it (NCCL to the engines). Everything the runners generate goes over HTTP through the router via
+The router load-balances the engines' OpenAI API (default cache_aware: each request follows its token
+prefix to the engine already serving that rollout while load is even, else the shortest queue); weight
+sync bypasses it (NCCL to the engines). Everything the runners generate goes over HTTP through the router via
 one client, ``RouterGenerateClient.generate(token_ids, sp, mm) -> (RequestOutput, off_policy_len)``:
 token-in / token-out over vLLM's ``/inference/v1/generate`` (VLM images are rendered server-side
 first, over ``/v1/chat/completions/render``, for their mm features). Both the StepEnvRunner and the
@@ -62,7 +63,7 @@ class VllmRouterActor:
             s.bind((host, 0))
             return s.getsockname()[1]
 
-    def __init__(self, worker_urls, *, policy="consistent_hash", port=None, max_payload_mb=512):
+    def __init__(self, worker_urls, *, policy="cache_aware", balance=(10, 1.2), port=None, max_payload_mb=512):
         import subprocess
         import sys
 
@@ -83,6 +84,15 @@ class VllmRouterActor:
                 str(self._free_port(self._host)),
                 "--policy",
                 policy,
+                # cache_aware keeps its prefix placement until (max - min) > abs AND max > rel * min.
+                # The router's 64 / 1.5 are sized for a serving fleet: one rollout batch puts only
+                # `rollout.generate_batch_size` requests in flight across the engines, so a gap above 64
+                # is unreachable and one slow engine kept filling until its KV cache thrashed. vime
+                # runs the same workload at 10 / 1.2 (vime/backends/vllm_utils/arguments.py).
+                "--balance-abs-threshold",
+                str(balance[0]),
+                "--balance-rel-threshold",
+                str(balance[1]),
                 "--max-payload-size",
                 str(max_payload_mb * 1024 * 1024),  # token-id / embed payloads are large
                 "--worker-urls",
@@ -213,11 +223,10 @@ class RouterGenerateClient:
 
     async def generate(self, prompt_token_ids, sampling_params, multi_modal_data=None, session_id=None):
         prompt = list(prompt_token_ids)
-        # ``session_id`` pins every request it tags to ONE engine (``x-session-id`` + the router's
-        # consistent_hash policy). The runner passes ONE id per rollout, so all of a rollout's turns —
-        # and each turn's render + generate — co-locate: render's mm features resolve on the engine that
-        # generates, and (with prefix caching on) the multi-turn KV prefix stays warm. vime/slime pin
-        # the same way, per sample. Falls back to a per-call id when the caller passes none.
+        # One ``session_id`` per rollout goes out as ``x-session-id``. The default cache_aware policy
+        # ignores headers and places each generate by its token prefix, so a rollout's turns (each
+        # extending the last) stay on one engine until load skews; the header is the routing key only
+        # under ``--vllm.router_policy consistent_hash``. Falls back to a per-call id when none is passed.
         sid = session_id or uuid4().hex
         features = None
         if multi_modal_data and multi_modal_data.get("image"):
@@ -398,12 +407,13 @@ class AgentRunnerActor:
         return results
 
 
-def create_vllm_router(engines, *, policy="consistent_hash", port=None):
+def create_vllm_router(engines, *, policy="cache_aware", balance=(10, 1.2), port=None):
     """Serve each engine's OpenAI API + launch the vllm-router in front; return (router, url).
 
-    Default policy ``consistent_hash`` routes by the ``x-session-id`` header so a rollout's render +
-    generate land on ONE engine (mm-feature cache affinity — see ``RouterGenerateClient.generate``);
-    prefix caching is off, so ``cache_aware`` would add no KV reuse to trade for that affinity."""
+    Default policy ``cache_aware``: a generate goes to the engine whose radix tree holds its token
+    prefix, so a rollout's turns stay together, and to the shortest queue once engines fall out of
+    balance. ``consistent_hash`` hashed the per-rollout ``x-session-id`` blind to load, so engines
+    filled unevenly and the slow one thrashed its KV cache."""
     engine_urls = ray.get([e.serve_openai.remote() for e in engines])
-    router = VllmRouterActor.remote(engine_urls, policy=policy, port=port)
+    router = VllmRouterActor.remote(engine_urls, policy=policy, balance=balance, port=port)
     return router, ray.get(router.ready.remote())

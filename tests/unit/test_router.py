@@ -17,18 +17,25 @@ import asyncio
 import base64
 import inspect
 import io
+import json
 import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from types import SimpleNamespace
+from unittest import mock
 
 import aiohttp
 import numpy as np
 import pytest
+import ray
 
 from molt.trainer.rollout.router import (
     AgentRunnerActor,
     RouterGenerateClient,
+    VllmRouterActor,
     _align_features_to_canonical,
     _decode_routed_experts,
+    create_vllm_router,
 )
 
 GEN = "/inference/v1/generate"
@@ -280,8 +287,9 @@ def test_render_image_encoding_does_not_block_event_loop(monkeypatch):
 
 
 def test_generate_pins_render_and_generate_to_one_session():
-    # render + generate for a VLM call MUST carry the SAME x-session-id so consistent_hash routes them
-    # to one engine (a render mm-cache hit returns kwargs_data=None, resolvable only on that engine).
+    # render + generate for a VLM call carry the SAME x-session-id: under consistent_hash that keeps them
+    # on one engine. The default cache_aware places them independently, which is safe only because the
+    # engines run with mm_processor_cache_gb=0 (render always returns full kwargs_data).
     from PIL import Image
 
     render_payload = {
@@ -384,3 +392,102 @@ def test_agent_runner_drops_unconvertible_trajectory(monkeypatch):
 
     # The conversion error is reported per rollout instead of failing the whole group task.
     assert results == [(None, "convert_error"), (None, "convert_error")]
+
+
+class _FakeVllmEngine(BaseHTTPRequestHandler):
+    """Answers the router's worker probes and records which port served each generate."""
+
+    routes = []  # (first prompt token = rollout marker, engine port)
+
+    def _send_json(self, payload):
+        body = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        if self.path == "/v1/models":
+            self._send_json(
+                {"object": "list", "data": [{"id": "policy", "object": "model", "created": 1, "owned_by": "t"}]}
+            )
+        else:
+            self._send_json({"status": "ok"})
+
+    def do_POST(self):
+        payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+        self.routes.append((payload["token_ids"][0], self.server.server_port))
+        time.sleep(0.2)  # keep requests in flight so the router sees real load
+        self._send_json(_gen_resp([90]))
+
+    def log_message(self, *_):
+        pass
+
+
+@pytest.mark.integration
+def test_cache_aware_router_keeps_each_rollout_on_one_engine():
+    """Concurrent multi-turn rollouts spread over the engines, and every later turn (a token-prefix
+    extension of the previous one) returns to the engine that served the first, through the shipped
+    VllmRouterActor command line."""
+    pytest.importorskip("vllm_router")
+
+    engines = [ThreadingHTTPServer(("127.0.0.1", 0), _FakeVllmEngine) for _ in range(4)]
+    for engine in engines:
+        threading.Thread(target=engine.serve_forever, daemon=True).start()
+    actor_cls = getattr(VllmRouterActor, "__ray_actor_class__", VllmRouterActor)
+    router = actor_cls([f"http://127.0.0.1:{engine.server_port}" for engine in engines])
+
+    async def rollout(client, marker):
+        prompt = [marker, *range(1, 24)]
+        for _ in range(4):
+            out, _ = await client.generate(prompt, _sp(), session_id=f"rollout-{marker}")
+            prompt += [*out.outputs[0].token_ids, 7, 7, 7]  # action + observation extend the prefix
+
+    async def run(router_url):
+        async with aiohttp.ClientSession(base_url=router_url) as http:
+            await asyncio.gather(*(rollout(RouterGenerateClient(http), 1000 + i) for i in range(8)))
+
+    try:
+        asyncio.run(run(router.ready()))
+    finally:
+        router._proc.terminate()
+        router._proc.wait(timeout=10)
+        for engine in engines:
+            engine.shutdown()
+            engine.server_close()
+
+    served = {}
+    for marker, port in _FakeVllmEngine.routes:
+        served.setdefault(marker, set()).add(port)
+    assert len(_FakeVllmEngine.routes) == 32
+    assert all(len(ports) == 1 for ports in served.values()), served
+    assert len(set().union(*served.values())) > 1
+
+
+def test_router_command_line_carries_both_balance_thresholds():
+    """Both halves of the cache_aware trigger have to reach the subprocess: with only the absolute
+    one set, the ratio stays at the router's 1.5 and the gap it describes is never reached."""
+    cls = getattr(VllmRouterActor, "__ray_actor_class__", VllmRouterActor)
+    seen = {}
+
+    class _Popen:
+        def __init__(self, argv):
+            seen["argv"] = argv
+
+    with (
+        mock.patch("subprocess.Popen", _Popen),
+        mock.patch.object(ray.util, "get_node_ip_address", lambda: "127.0.0.1"),
+    ):
+        cls.__new__(cls).__init__(["http://127.0.0.1:1"], policy="cache_aware", balance=(7, 1.1))
+    argv = seen["argv"]
+    assert argv[argv.index("--balance-abs-threshold") + 1] == "7"
+    assert argv[argv.index("--balance-rel-threshold") + 1] == "1.1"
+    assert argv[argv.index("--policy") + 1] == "cache_aware"
+
+
+def test_router_balance_defaults_match_the_rollout_regime():
+    """The defaults are vime's, not the router's serving-fleet 64 / 1.5."""
+    cls = getattr(VllmRouterActor, "__ray_actor_class__", VllmRouterActor)
+    for fn in (cls.__init__, create_vllm_router):
+        assert inspect.signature(fn).parameters["balance"].default == (10, 1.2)
