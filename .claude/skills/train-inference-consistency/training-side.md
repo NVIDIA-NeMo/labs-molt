@@ -1,16 +1,15 @@
 # Training side: the aligned forward and its backward
 
 How to build a trainer forward that computes vLLM's math for a new model, and the backward that trains it
-(gates G0, G4 and G5 of [workflow.md](workflow.md#gate-table)). Flags, engine settings, patch points and the
-per-operator kernel map live in [molt-integration.md](molt-integration.md#the-aligned-mode) and its
-[operator table](molt-integration.md#operator-table).
-One route: an FSDP2-sharded model definition (AutoModel custom class, else HF) whose value-producing operators
-are swapped for vLLM ops inside `torch.autograd.Function`s whose backward is the native training math.
+(gates C0, C5, C6 and C7 of [workflow.md](workflow.md#gate-table)). Flags, engine settings, patch points and
+the per-operator kernel map live in [molt-integration.md](molt-integration.md#the-aligned-mode) and its
+[operator table](molt-integration.md#operator-table). One route: an FSDP2-sharded model definition (AutoModel
+custom class, else HF) whose value-producing operators are swapped for vLLM ops inside
+`torch.autograd.Function`s whose backward is the native training math.
 
 ## Module inventory
 
-G0, day one: one row per module, every column filled, `unknown` in blanks, never "should exist" (in one case
-three modules without a backward surfaced three weeks in; the inventory is what prevents that).
+C0, day one: one row per module, every column filled, `unknown` in blanks, never "should exist".
 
 | Column | Question to answer |
 |---|---|
@@ -20,22 +19,25 @@ three modules without a backward surfaced three weeks in; the inventory is what 
 | Quantization rounding | FP8 rounding in the forward, weights and activations separately (BF16 route: none) |
 | Discrete choice | top-k expert ids, candidate set, tie-break, ordering; ids are fixed and not differentiated, the continuous score needs a derivative |
 | Backward exists | In which library, and whether its saved intermediates (LSE, rstd, token permutation) line up with what the vLLM forward saves |
-| Verdict | reuse / glue / new, by the rules in [Backward](#backward-reuse-glue-or-new) |
+| Verdict | Forward: already equal / swap trainer op / needs vLLM change. Backward: reuse / glue / new, by the rules in [Backward](#backward-reuse-glue-or-new) |
 
 A module is anything producing a value on the logprob path: embedding, every norm (q/k and final), position
 encoding, attention, SSM/conv, router, routed and shared experts, activation, lm_head, both scorers (vLLM
 sampler logprob; molt `log_probs_from_logits` and its TP variant), every encoder. Parts that do not take part
 in training (MTP head, draft model, redundant experts, a tower under `--actor.freeze_visual_encoder`) get a
 row with mapping and fact: load and refit skip them by explicit list and the log says "skipped", not "no
-error"; a part the engine uses (MTP on) is used by both arms, and BI=1 then needs spec-verify logprob == full
-forward; a frozen encoder that both sides run is on the value path — identical kernels on both sides or
-embeddings shipped from the engine; freezing does not make bytes equal.
+error"; a part the engine uses (MTP on) is used by both arms ([engine
+knobs](molt-integration.md#engine-knobs)); a frozen encoder that both sides run is on the value path —
+identical kernels on both sides or embeddings shipped from the engine; freezing does not make bytes equal.
 
-Read vLLM's model file, not the HF reference: layer types and order, residual and norm positions, position
-encoding, attention visibility, router, special embeddings → the kernel each layer calls and its quantization
+Read vLLM's model file, not the HF reference: layer types and order, residual and norm positions (`1 + w`
+variant?), position encoding (neox / mRoPE / none), attention visibility (sliding window, sinks, GQA), router
+(softmax or sigmoid, bias, renormalisation, grouped top-k, tie-break), activation, shared experts, state
+layers (Mamba, conv), special embeddings and encoders → the kernel each layer calls and its quantization
 variant → attention backend and KV dtype → weight loader (name mapping, fused order, derived scales) →
 branches under the BI switch; confirm parameters and buffers from checkpoint and config. Model-specific math
-is written from the inference source, not from the paper or the HF modeling file.
+is written from the inference source, not from the paper or the HF modeling file. Sizes sharing one vLLM model
+file share one port; a multimodal variant is validated per task.
 
 <a id="call-kernels-do-not-port-the-scheduler"></a>
 ## Reproduce the forward: call kernels, do not port the scheduler
@@ -50,9 +52,17 @@ is written from the inference source, not from the paper or the HF modeling file
 - Keep the training parameter container: parameters stay the FSDP2 DTensors behind the fp32 master; inside
   the forward use the full parameter FSDP2 gathered (`full_tensor()` for an explicitly sharded one, as the
   refit's `gather_full_param` does); no parameters or copies the optimizer does not know. Keep the native
-  entry point (`model(**batch)`): patch class forwards, do not re-route the call chain.
+  entry point (`model(**batch)`): patch class forwards, do not re-route the call chain. The patch lives in
+  source behind a flag and is proved from a fresh process through the real loader; a REPL-only patch or
+  monkeypatch is not evidence.
 - Reuse order: autograd-capable native module → short torch reference to vLLM semantics → ready-made op with
-  a backward → custom autograd/kernel only when necessary. Throughput is not a goal at this stage.
+  a backward → custom autograd/kernel only when necessary. Throughput is not a goal at this stage. What is
+  trained, frozen or carries an auxiliary loss follows the model definition: no detaching to get it running,
+  no `--actor.aux_loss_coef` the recipe does not have.
+- fp32 where vLLM is fp32 (RoPE angles, router logits and bias, norm statistics) is set per operator
+  (`gate_precision`, `MOLT_RMS_NORM=torch_fp32`), never by a forward-level `torch.autocast` — molt runs
+  none, and one would downcast the fp32-kept gate; casting matmul inputs alone does not stop a downgrade,
+  so measure dtypes inside the forward.
 
 Three lessons where "the same kernel" still differed:
 1. Direct and compiled paths of one kernel are two numerics; the gap closed only when both sides called it
@@ -64,41 +74,64 @@ Three lessons where "the same kernel" still differed:
    projection truncated to manufacture equality.
 
 Reproduce the math from the same checkpoint, config and inference code: layer order, parameters and buffers,
-residual and norm positions, position encoding, visibility range, router, special embeddings. A frozen base
-still propagates input gradients: `W.requires_grad_(False)`, never `no_grad()` around the block (it cuts
-adapters and encoders upstream; a frozen table lookup is the one exception); a zero-initialized adapter shows
-zero gradient legitimately, so judge with a non-zero adapter and a real step, not a finite loss. Mapping
-checks cover values and semantics, not only shape: per weight class, source → training → engine name, axis
-transforms, sharing (tied embeddings); fused QKV, gate/up order, expert numbering, extra norm/bias,
-non-persistent buffers, derived state; fused parameters overwritten whole; every missing or extra item with a
-written reason. In molt the refit broadcast is that mapping; `--train.check_weight_update_equal` lists what
-it never assigned.
+residual and norm positions, position encoding, visibility range, router, special embeddings.
+
+- A frozen base still propagates input gradients: `W.requires_grad_(False)`, never `no_grad()` around the
+  block (it cuts adapters and encoders upstream; a frozen table lookup is the one exception); a
+  zero-initialized adapter shows zero gradient legitimately, so judge with a non-zero adapter and a real step,
+  not a finite loss.
+- Metric-only quantities (`mismatch/*`, `vllm_kl`, entropy) are computed under `no_grad` on detached copies,
+  never in place on a tensor the loss needs.
+- molt's LoRA (`--actor.lora_dim`) is off the bitwise contract by construction
+  ([refit](molt-integration.md#refit)).
+- Mapping checks cover values and semantics, not only shape: per weight class, source → training → engine
+  name, axis transforms, sharing (tied embeddings); fused QKV, gate/up order, expert numbering, extra
+  norm/bias, non-persistent buffers, derived state; fused parameters overwritten whole; every missing or
+  extra item with a written reason. In molt the refit broadcast is that mapping;
+  `--train.check_weight_update_equal` lists unassigned names ([refit](molt-integration.md#refit)).
 
 Stateful modules (conv, SSM scan, recurrence) must consume `cu_seqlens`; a correct attention mask proves
-nothing about them (one case: boundaries never reached the SSM, adjacent states ran together, the logprob was
-silently wrong and showed only as a larger mismatch). Chunk grid per sequence: the engine starts its chunk
+nothing about them. Chunk grid per sequence: the engine starts its chunk
 grid at each sequence's position 0, so the packed forward restarts it at every `cu_seqlens[i]`, not at the
 row offset, and decode must reproduce the chunked reduction order (the absolute-segment idea of the aligned
-attention). Test unequal lengths alone and merged; sentinel-fill outputs to catch missed writes.
+attention). Test unequal lengths alone and merged; sentinel-fill outputs with a different value per side to
+catch missed writes (zero-filling both sides reads as a false green).
 
-Recompute and trimming: under `--actor.gradient_checkpoint full|selective` the recompute must read the same
-saved state (routing ids, RNG) and be bitwise — a deterministic forward is; under EP > 1 molt keeps the
-router projection saved under AC (`ignore_router_for_ac`); on the EP = 1 path verify it yourself — a
-near-tie token must not re-route in the recompute. The G2 proxy is the smallest
-layer set covering every non-equivalent path (usually 2–6 layers): keep mixed attention, cross-layer sharing
-and lookups that live in specific layers; record the kept layer indices and config transform; it proves the
-covered paths only. Prove the forward in G4 on vLLM-captured trajectories, both paths (no-grad old-logprob,
-grad-enabled actor forward), `mismatch/bitwise_frac` 0 and replay count 0 ([debugging.md](debugging.md#compare-per-token-logprobs)).
+- Recompute: under `--actor.gradient_checkpoint full|selective` the recompute must read the same saved state
+  (routing ids, RNG) and be bitwise — a deterministic forward is; under EP > 1 molt keeps the router
+  projection saved under AC (`ignore_router_for_ac`); on the EP = 1 path verify it yourself — a near-tie
+  token must not re-route in the recompute.
+- Proxy: the C2 proxy is the smallest layer set covering every non-equivalent path (usually 2–6 layers):
+  keep mixed attention, cross-layer sharing and lookups that live in specific layers; record the kept layer
+  indices and config transform; it proves the covered paths only.
+- Proof: C5 on vLLM-captured trajectories, both paths of the
+  [dual-path contract](evidence.md#dual-path-contract), `mismatch/bitwise_frac` 0 and replay count 0
+  ([debugging.md](debugging.md#compare-per-token-logprobs)). Under default kernels (BI=0) there is no 0-diff
+  target: judge each side against an independent reference, then attribute what remains to precision.
+
+Order of work and stop conditions — every step ends with a short conclusion, the source version, a
+reproducible command and an artifact; distribute only after the first two pass, scale up after the
+few-layer two-step loop passes. Cost is judged per blocker (an operator without a backward or clear
+semantics is its own item, reference and gradient validation first), never as a uniform figure.
+
+| Step | Minimal acceptance | If it fails |
+|---|---|---|
+| Inventory | Model class, every backward, loader; gaps listed | Write the minimal model; stop cold-starting the full model |
+| Module comparison | Same weights and inputs; forward bytes, gradients vs a differentiable reference | Locate the earliest difference |
+| Few-layer training | Non-zero loss, finite gradients, the intended parameters change | Separate broken path, operator bug, gradient-less target |
+| Save and restore | Fresh-process restore: same forward bytes and next step | State, adapter, optimizer, residency |
 
 ## Layout, length and world size
 
 Compute resources first: record trainer and engine topologies separately — trainer
 `--fsdp.{tp_size,cp_size,ep_size}` × DP (`W = TP × CP × DP`; EP shards experts inside DP, do not multiply it
 in again), engine `--vllm.tensor_parallel_size`, `--vllm.enable_expert_parallel`, engine count. Budget the
-aligned forward's memory before asking for GPUs: fp32 attention partials sized by the context ceiling (per
-device, grown once, never freed), one paged KV copy per packed sequence, the fp32 reference recompute in
-backward, chunked fp32 logits in the scorer. `--fsdp.offload` changes the optimizer's arithmetic, not the
-forward.
+aligned forward's memory before asking for GPUs: fp32 attention partials sized by the context ceiling
+([operator table](molt-integration.md#operator-table)), one paged KV copy per packed sequence, the fp32
+reference recompute in backward, chunked fp32 logits in the scorer, the refit's per-parameter `full_tensor()`
+gather.
+`--fsdp.offload optimizer` changes the optimizer's arithmetic, not the forward; `full` also streams parameters
+through CPU (slower forward; the flag's help lists MoE breakage).
 
 Packing and CP: `--fsdp.packing_samples` flattens the microbatch to one row with `cu_seqlens` (`cu_seq_lens_q`
 on the HF path) and per-sequence positions; the aligned attention builds one block table per packed sequence
@@ -112,7 +145,8 @@ EP and collectives: keep the AutoModel dispatcher (`MOLT_MOE_DISPATCHER`) for mo
 expert forward runs on one rank's local tokens with the engine's fused kernel and tile config; the combine
 (fp32, top-k slot order) is part of the contract. Record expert mapping, tokens per rank, padding capacity,
 route order; an empty rank still joins the collective; reused buffers get sentinel fills. NCCL pins remove
-reduction differences at a throughput cost — a verified choice that must match across the weight-sync group.
+reduction differences at a throughput cost — a verified choice that must match across the weight-sync group
+(transport checks: [debugging.md](debugging.md#communication-and-transport)).
 
 Bitwise identity after changing the parallel layout. Addition is not associative: the layout decides what is
 summed in which order and where it rounds, so "bitwise" holds for the verified layout only.
@@ -135,8 +169,8 @@ missing dependency locally and re-accept on the same path.
 
 | Long-sequence boundary | Fact | Test |
 |---|---|---|
-| Segment ceiling | The aligned attention splits keys into fixed absolute segments; the ceiling ([reference measurements](molt-integration.md#reference-measurements)) is a correctness bound shared by both sides, not a performance knob | Exceeding it raises, never truncates; two real lengths below it; decode == prefill at segment edges (1023/1024/1025 …) |
-| Chunk boundaries | Engine prefill chunking (`--vllm.max_num_batched_tokens`) and the SSM chunk grid are independent numerical boundaries | Chunked == full prefill == token-by-token decode at the chunk edges (G3); one sequence crossing an SSM chunk edge |
+| Segment ceiling | The aligned attention's context ceiling ([operator table](molt-integration.md#operator-table); 16k in the reference) is a correctness bound shared by both sides, not a performance knob | Exceeding it raises, never truncates; two real lengths below it; decode == prefill at segment edges (1023/1024/1025 …) |
+| Chunk boundaries | Engine prefill chunking (`--vllm.max_num_batched_tokens`) and the SSM chunk grid are independent numerical boundaries | Chunked == full prefill == token-by-token decode at the chunk edges (C3); one sequence crossing an SSM chunk edge |
 | KV block | The trainer's paged KV copy has block edges (16 tokens in the reference) | Sparse dY across a block edge |
 | Packing prepend | Prepending a short sequence shifts every row offset of the target | Two prepend controls vs none, bitwise |
 | Microbatch fits the longest row | `--train.max_tokens_per_gpu` / `--train.micro_batch_size` must hold the longest packed row at the formal length | One OOM probe at the formal length; no extrapolation from 8k |
@@ -148,11 +182,12 @@ gradient (loss normalization, accumulation order, the embedding backward above; 
 denominator is `max(bf16 reference floor, implementation noise floor)`, never the fp32 ideal; both arms use
 the same split; a split change means A/A first; `grad_norm` is not comparable across microbatch counts.
 
+<a id="control-matrix"></a>
 Control matrix — what to re-run when an axis changes: proxy geometry (layers, hidden, experts) → coverage
-table, G3, G4; a kernel, op, tile or segment constant (always both sides together) → same-input op test on
-both sides, module VJP, G4 A/A and A/C, the boundary rows; packing, batch composition, graph/eager or cache
-state → G3, G4 replay, packing A/C; parallel layout (trainer TP/EP/CP, engine TP/EP, engine count) → rules
-1–5, then G4, then G6; microbatch split, recompute mode or offload → gradient A/A, one-step update; image,
+table, C3, C5; a kernel, op, tile or segment constant (always both sides together) → same-input op test on
+both sides, module VJP, C5 A/A and A/C, the boundary rows; packing, batch composition, graph/eager or cache
+state → C3, C5 replay, packing A/C; parallel layout (trainer TP/EP/CP, engine TP/EP, engine count) → rules
+1–5, then C5, then C8; microbatch split, recompute mode or offload → gradient A/A, one-step update; image,
 vLLM or AutoModel version → everything in the execution closure. With policy and tokens fixed also run the
 original layout, reversed order, target first/last, a changed microbatch and one sample crossing each
 boundary; a fix passes on the original triggering layout and its neighbours — lowering the trigger
@@ -169,8 +204,10 @@ forward calls the vLLM op without a graph and saves inputs (plus intermediates t
 LSE, routing ids); backward recomputes `native` (flash-attn varlen, `grouped_mm`, fp32 torch) from them and
 differentiates it. Never return `visible.detach()` as the trainable value. Where a fused kernel has no
 backward at all, `visible + (graph − graph.detach())` with `graph` the same math in PyTorch keeps the kernel's
-bytes (`x − x` is exactly +0; only a −0.0 result flips sign, so keep dtypes equal); published recipes use it
-for such kernels. It holds the surrogate graph in memory, which the `Function` form avoids.
+bytes (`x − x` is exactly +0; only a −0.0 result flips sign, so keep dtypes equal). It holds the surrogate
+graph in memory, which the `Function` form avoids; use it in eager
+only (a compiler may rewrite the add/subtract), never as the layer-1 reference bridge, and never modify a
+bridge output in place downstream.
 
 | Case | Signature | Examples | Do |
 |---|---|---|---|
@@ -184,12 +221,16 @@ autograd first, then TE / flash-attn / mamba_ssm. What forces glue (none of it "
 backward"): a library backward bound to intermediates of its own forward (rstd, token permutation) that the
 vLLM forward lacks — recompute them; model-specific math in no library; discrete selection must copy the
 forward (a top-k recomputed in backward can pick another expert on a tie — store ids, differentiate only the
-continuous score); generic autograd recompute too costly in memory — use a closed form.
+continuous score); generic autograd recompute too costly in memory or time (a pure-torch SSM scan is an
+oracle, not a production backward) — use a closed form or the library kernel.
 
 Three rules when reusing:
 1. Intermediate definitions match: attention backward takes the forward's O and LSE — ln vs log2, softmax
-   scale folded or not, per-head vs per-token layout; GQA dK/dV summed within the head group. If they do not
-   match, recompute the forward with the training kernel inside the backward (what the reference does).
+   scale folded or not, per-head vs per-token layout; GQA dK/dV summed within the head group in a fixed order
+   (an A/A needs it). If they do not match, recompute the forward with the training kernel inside the
+   backward (what the reference does); O, LSE and P come from one forward — the kernel's O inside
+   `D = rowsum(dO⊙O)` against a recomputed P leaves `rowsum(dS) ≠ 0` and biases dQ (systematic once P is
+   FP8-rounded).
 2. Backward is not required to be bitwise: recomputed intermediates differ in the last bf16 bit, gradients by
    the same amount; the contract must hold and the error sit near the noise floor. Report bitwise and
    tolerance apart.
@@ -199,11 +240,12 @@ Three rules when reusing:
 Two test-infrastructure false negatives (test errors, never a train/inference difference):
 - FSDP2 unsharded copy after a forward-only pass: the root module is not resharded (and with
   `MOLT_MOE_RESHARD_AFTER_FWD=0` experts stay gathered), so a parameter fetched by name is the bf16 compute
-  copy, not the fp32 master; perturbing it or reading its `.grad` misleads. Reshard or finish a backward first.
-- A test that passes because the patched path was never hit: an op instantiated directly misses the
-  production context (compile config, env before the first handle, forced attention backend), or an import
-  without GPU visibility makes vLLM pick a non-CUDA platform; the native path is compared with itself. Assert
-  the target callsite was hit (kernel name in the profiler, a counter in the patch); use the production config.
+  copy, not the fp32 master; perturbing it or reading its `.grad` misleads. Reshard or finish a backward
+  first.
+- A test that passes because the patched path was never hit: an op instantiated directly misses the production
+  context (compile config, env before the first handle, forced attention backend), or an import without GPU
+  visibility makes vLLM pick a non-CUDA platform; the native path is compared with itself. Assert the target
+  callsite was hit (kernel name in the profiler, a counter in the patch); use the production config.
 
 ## Gradient contract and validation
 
@@ -225,13 +267,17 @@ Write the contract first. A weight has three tiers and the gradient must return 
 | deployed | The bytes vLLM holds after refit (`load_weights` casts to the engine dtype) | BF16 route: the training-forward bytes; FP8 route: `requantize(master)` |
 
 Keep the optimizer's parameter identity; the deployed value is not trainable. Per module class write down:
-visible forward (op, I/O dtype and layout, cast positions, accumulation precision; FP8: quant positions, scale
-granularity, rounding); trainable variables (input, master weight, bias, norm weight, router; what is
-frozen); surrogate (dX from master or dequantized value; identity or clipped STE and the value at the
-threshold — BF16 route: none); discrete state (ids from routing replay, candidate sets, ordering; continuous
-combine weights still get gradients); backward (reused or glue; cast, accumulation and reduction precision,
-collectives, normalization); save/recompute (inputs, LSE, ids, RNG; the surrogate never switches on
-recompute); reference and acceptance (independent reference, shapes and paths, metrics and tolerances fixed).
+
+- visible forward: op, I/O dtype and layout, cast positions, accumulation precision; FP8: quant positions,
+  scale granularity, rounding;
+- trainable variables: input, master weight, bias, norm weight, router; what is frozen;
+- surrogate: dX from master or dequantized value; identity or clipped STE and the value at the threshold —
+  BF16 route: none;
+- discrete state: ids from routing replay, candidate sets, ordering; continuous combine weights still get
+  gradients;
+- backward: reused or glue; cast, accumulation and reduction precision, collectives, normalization;
+- save/recompute: inputs, LSE, ids, RNG; the surrogate never switches on recompute;
+- reference and acceptance: independent reference, shapes and paths, metrics and tolerances fixed.
 
 Which weight dX uses: `Y = X·Wᵀ + b`, upstream `G`: `dW = Gᵀ·X_ref`, `db = Σ_tokens G`, `dX = G·W_ref`. BF16
 route: `W_ref` is the bf16 training-forward weight the kernel used, i.e. the deployed byte — no choice. FP8:
@@ -249,15 +295,18 @@ path: visible value from the inference op under `no_grad`; surrogate graph from 
 normal grad mode; a bridge Function whose forward asserts shape/device/dtype and returns the visible value
 and whose backward passes the gradient to the surrogate. Steps:
 1. Fix the state (inputs, weights, mask, routing ids), independent copies, cleared grads; check the visible
-   forward equals the inference bytes, then the saved state; at integration confirm the real forward produces it.
+   forward equals the inference bytes, then the saved state; at integration confirm the real forward produces
+   it.
 2. Same upstream gradient, same dtype, representable values: fixed random, zero, sparse (non-zero at chosen
-   positions), then gradients captured from real training. `y.sum().backward()` alone misses transposes,
+   positions), then gradients captured from real training (synthetic inputs are labelled as such).
+   `y.sum().backward()` alone misses transposes,
    permutations and broadcasts.
 3. Compare per item — dX, dW, every bias/norm/router/scale: missing, shape, finiteness, non-zero where
    expected; unused differentiable inputs listed, not ignored. Report max abs error, relative L2
    `‖g − g_ref‖₂ / max(‖g_ref‖₂, eps)`, norm ratio and cosine (undefined at zero norm → absolute error).
-4. Tolerances fixed in advance from dtype, reduction length and reference precision, per module, reasoning
-   recorded; never relaxed after a failure, never with "STE is approximate anyway" for a same-semantics kernel.
+4. Tolerances fixed in advance from dtype, reduction length, reference precision and this model's own noise
+   floor and baseline (never another model's number), per module, reasoning recorded; never relaxed after a
+   failure, never with "STE is approximate anyway" for a same-semantics kernel.
 5. Coverage: small M (decode-like) and large M, several lengths, unaligned tails, padding/packing/mask, zeros
    and extremes; MoE: empty experts, repeated routing, shared experts, top-k ties; shared parameters: gradient
    accumulation across use sites; under the target dtype and layout, activation checkpointing, gradient
@@ -272,7 +321,7 @@ fixed, away from non-smooth points); never accept an STE with finite differences
 | Linear / QKV / lm_head | Native linear VJP; gradient returns to master | dX weight convention, cast, bias, tied-weight accumulation |
 | Norm / RoPE | Native VJP, fp32 statistics | eps, `1 + w` variant, position offset, neox layout, where cos/sin were built |
 | Activation | Analytic derivative composed as the forward fused it | Saturation, fusion order (`silu_and_mul` on `cat(gate, up)`) |
-| Attention | Training backward with the same mask/index semantics | Causal boundary, softmax scale, LSE definition, GQA group sum, per-sequence block table / `cu_seqlens` |
+| Attention | Training backward with the same mask/index semantics | Causal boundary, softmax scale, LSE definition, GQA group sum, O/LSE/P from one forward, per-sequence block table / `cu_seqlens` |
 | MoE experts | Grouped VJP plus a differentiable combine | Inverse dispatch permutation, repeated tokens, empty experts, shared experts, top-k weight normalization, weight before or after the down GEMM |
 | Router | Ids fixed, derivative of the continuous score | No gradient for ids; the router output is never detached whole; the fp32 gate stays fp32 |
 | SSM / linear attention | Training backward with the same chunk arithmetic | Chunk boundary, initial state, state dtype, conv state |
@@ -292,18 +341,21 @@ A result holds for the precision, learning rate and run length measured — re-m
 | Aligned + native backward | Aligned forward | Native backward (production) | The deliverable |
 | Reference | Aligned forward, same snapshot | Independent surrogate (the layer-1 bridge) | Isolates backward implementation error |
 
-Do not start SFT until layer 1 passes; build the native arm before the process-wide patch. First compare
-gradients and the one-step update of deliverable vs reference on a fixed checkpoint and batch, then run the
-curves; after the trajectories diverge later agreement is not assumed; the deliverable-vs-native gap includes
-forward-path differences and is not all backward; when the budget forbids the full reference curve, compare
-representative batches and state the missing range. Controlled: initial weights and optimizer state, data and
-order, labels/mask, packing, loss normalization, global batch and accumulation, learning rate and schedule,
-clipping, precision, seed, recompute policy. Recorded: train loss, NLL on a fixed validation set, gradient
-norm, update RMS, clip ratio, non-finite count, throughput, on an x-axis of optimizer steps or cumulative
-tokens; window and acceptable deviation agreed before the run. Localization: loss differs at the initial
-weights → forward, data, mask; initial loss equal, one-step update differs → backward, reduction, scale,
-clipping, optimizer; divergence after several steps → save the first abnormal checkpoint, check recompute,
-learning rate, RNG, then a same-weight replay. Unexplained → `inconclusive`; forward 0 diff does not cover it.
+Do not start SFT until layer 1 passes; build the native arm before the process-wide patch.
+
+- Order: first compare gradients and the one-step update of deliverable vs reference on a fixed checkpoint
+  and batch, then run the curves; after the trajectories diverge later agreement is not assumed; the
+  deliverable-vs-native gap includes forward-path differences and is not all backward; when the budget
+  forbids the full reference curve, compare representative batches and state the missing range.
+- Controlled: initial weights and optimizer state, data and order, labels/mask, packing, loss normalization,
+  global batch and accumulation, learning rate and schedule, clipping, precision, seed, recompute policy.
+- Recorded: train loss, NLL on a fixed validation set, gradient norm, update RMS, clip ratio, non-finite
+  count, throughput, on an x-axis of optimizer steps or cumulative tokens; window and acceptable deviation
+  agreed before the run.
+- Localization: loss differs at the initial weights → forward, data, mask; initial loss equal, one-step
+  update differs → backward, reduction, scale, clipping, optimizer; divergence after several steps → save the
+  first abnormal checkpoint, check recompute, learning rate, RNG, then a same-weight replay. Unexplained →
+  `inconclusive`; forward 0 diff does not cover it.
 
 Common false differences: dY fp32 on one side and bf16-rounded on the other; dumps taken at different
 pipeline points (before vs after the FSDP reduce, EP scaling, loss normalization) read as a multiplicative
@@ -311,23 +363,23 @@ gap; the FSDP2 unsharded copy above; "frozen" by zeroed grad — AdamW weight de
 freeze is `grad = None` or removal from the optimizer; test environment ≠ production (above).
 
 Criterion v2 and operator authorization:
-- The criterion (tolerance, denominator, thresholds) is frozen before the run, its hash recorded, never edited.
-- Planted-error resolution first: scale one module's gradients ×1.25 and ×1.05 — both must read FAIL; a check
-  that cannot resolve ×1.05 is useless.
-- Several snapshots (e.g. steps 0 / 50 / 150 / 250): a step-0 pass does not carry — in one case the fault
-  appeared only at step 150. On failure, bisect by injecting reference gradients block by block.
+- The criterion (tolerance, denominator, thresholds) is frozen before the run, its hash recorded, never
+  edited.
+- Planted error first ([workflow.md](workflow.md#evidence)).
+- Several snapshots (e.g. steps 0 / 50 / 150 / 250): a step-0 pass does not carry. On failure, bisect by
+  injecting reference gradients block by block.
 - The gradient export path gets its own A/A (‖g‖ bitwise, local shards equal to the dump, replica diff 0).
 - Cross-process bitwise backward is not required, but a sporadically non-bitwise first step has a cause
   (compile autotune by timing, a thread-local deterministic config) and is found, not tolerated.
 - Operator authorization: the optimizer consumes the clipped gradient, the update lands on the fp32 master,
   the deployed bytes after the next refit equal the cast of master (FP8: `requantize(master)`); every
   parameter-group type is covered (weight-decay-0 groups, fp32-kept params), not one step of one group;
-  failures split into criterion modeling gap (reason written) and implementation error (fixed).
-  `--fsdp.offload optimizer` (CPU AdamW) is documented as equivalent to GPU AdamW but not bit-identical (sqrt
-  and division rounding) — accept the recipe's and never swap it inside one comparison.
+  failures split into criterion modeling gap (reason written — e.g. the first Adam step moves every
+  coordinate by the same magnitude, which voids ratio-type checks) and implementation error (fixed).
+  `--fsdp.offload` stays the recipe's ([CPU AdamW](acceptance.md#checkpoint-resume-and-memory)).
 
 Report per module class: the contract (dX choice, STE type, scale handling), reference, dY construction,
 shapes and paths covered, metrics and tolerances with reasoning; layer 2 cosine / norm ratio per class and
-layer with outliers (or "none: BF16 route"); layer 3 config diff of the three arms, curves, window
-conclusion; the planted-error result and snapshots; missing coverage listed separately, never "the rest is
-analogous". It feeds the "Proxy coverage and gradient contract" row of the [report template](acceptance.md#report-template).
+layer with outliers (or "none: BF16 route"); layer 3 config diff of the three arms, curves, window conclusion;
+the planted-error result and snapshots; missing coverage listed separately, never "the rest is analogous". It
+feeds the "Proxy coverage and gradient contract" row of the [report template](acceptance.md#report-template).
