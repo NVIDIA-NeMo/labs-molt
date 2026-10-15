@@ -31,7 +31,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from molt.models import Actor, PolicyLoss, agg_loss
-from molt.models.utils import compute_approx_kl, masked_mean, split_moe_aux_loss
+from molt.models.utils import compute_approx_kl, masked_mean, mismatch_metrics, split_moe_aux_loss
 from molt.trainer.algorithm.experience import Experience, get_model_parallel_size
 from molt.trainer.fsdp import FsdpStrategy
 from molt.trainer.fsdp.refit import gather_full_param
@@ -518,6 +518,8 @@ class PolicyTrainer:
             experience.info["vllm_kl"] = vllm_kl.detach()
         if is_filter_ratio is not None:
             experience.info["is_filter_ratio"] = is_filter_ratio.detach()
+        if rollout_log_probs is not None:
+            experience.info.update(mismatch_metrics(rollout_log_probs, action_log_probs, action_mask))
         if rollout_top_log_probs is not None:
             # Score centering runs without the IS path, so report the train/rollout drift it would have
             # (k1 log-ratio mean) and how much of each distribution the top-k head covers: 1 - sampler
