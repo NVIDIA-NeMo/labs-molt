@@ -146,6 +146,27 @@ def masked_mean(tensor: torch.Tensor, mask: Optional[torch.Tensor], dim: int = N
     return valid.sum(dim=dim) / denom
 
 
+def mismatch_metrics(rollout_log_probs: torch.Tensor, train_log_probs: torch.Tensor, mask: torch.Tensor) -> dict:
+    """Train-inference consistency of the sampled-token logprobs over the valid tokens.
+
+    ``bitwise_frac`` is the fraction of valid tokens whose fp32 logprob bytes differ between the
+    rollout engine and this forward; 0 with valid tokens is the bitwise pass. The others are
+    diagnostics on d = train - rollout: mean |d| and the k3 KL estimate exp(d) - 1 - d. All three
+    are masked means, so the token-weighted reduction over microbatches and ranks stays exact
+    (a max would not survive that reduction; replay comparisons report it).
+    """
+    valid = mask.bool()
+    rollout = rollout_log_probs.float().contiguous()
+    train = train_log_probs.detach().float().contiguous()
+    d = torch.where(valid, train - rollout, torch.zeros_like(train))
+    differs = (rollout.view(torch.int32) != train.view(torch.int32)).float()
+    return {
+        "mismatch/bitwise_frac": masked_mean(differs, valid),
+        "mismatch/abs_diff_mean": masked_mean(d.abs(), valid),
+        "mismatch/k3_kl": masked_mean(d.exp() - 1 - d, valid),
+    }
+
+
 @torch.compile
 def compute_entropy(logits: torch.Tensor):
     pd = torch.nn.functional.softmax(logits, dim=-1)

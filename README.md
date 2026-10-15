@@ -753,6 +753,25 @@ fixed router is acceptable.
 
 </details>
 
+### 🧪 Train–inference consistency — bitwise rollout vs. trainer logprobs
+
+IS correction and R3 re-weight or mask the train/rollout gap; the complementary route removes it:
+the training forward calls vLLM's own kernels for every value-producing operator and only adds a
+backward, so the trainer's per-token logprob is byte-identical to the one vLLM sampled with. The
+method is the vLLM blog post [Finish RL Training Faster: Bitwise-Consistent, High-Performance,
+Agent-Driven](https://vllm-project.github.io/2026/10/14/train-inference-consistency.html) (verl + Megatron); its molt version is the agent skill
+[`.claude/skills/train-inference-consistency`](.claude/skills/train-inference-consistency/SKILL.md)
+(gates G0–G8, per-operator contracts, molt flags and patch points, debugging, paired acceptance).
+
+Measure it with `mismatch/bitwise_frac` (fraction of valid response tokens whose fp32 logprob bytes
+differ between vLLM and the training forward; logged whenever rollout logprobs exist, i.e.
+`--algo.advantage.is_correction_level` ≠ `off` or score centering), plus `mismatch/abs_diff_mean` and
+`mismatch/k3_kl`. Bitwise means `bitwise_frac = 0` at every step of a synchronous run
+(`--train.force_sync_mode`, queue 1, one epoch); under any lag the rollout came from older weights and
+the fraction reads ≈ 1 whatever the kernels. `vllm_kl` is a signed mean and cannot tell a last-bit
+difference from 0. The aligned kernels (`--train.batch_invariant`) are being upstreamed from the
+reference branch; `main` ships the metrics, rollout dump/replay and the skill.
+
 ### 🧩 LoRA fine-tuning
 
 <details>
