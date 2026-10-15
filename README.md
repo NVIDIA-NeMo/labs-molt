@@ -757,11 +757,11 @@ fixed router is acceptable.
 
 IS correction and R3 re-weight or mask the train/rollout gap; the complementary route removes it:
 the training forward calls vLLM's own kernels for every value-producing operator and only adds a
-backward, so the trainer's per-token logprob is byte-identical to the one vLLM sampled with. The
-method is the vLLM blog post [Finish RL Training Faster: Bitwise-Consistent, High-Performance,
-Agent-Driven](https://vllm-project.github.io/2026/10/14/train-inference-consistency.html) (verl + Megatron); its molt version is the agent skill
-[`.claude/skills/train-inference-consistency`](.claude/skills/train-inference-consistency/SKILL.md)
-(gates G0–G8, per-operator contracts, molt flags and patch points, debugging, paired acceptance).
+backward, so the trainer's per-token logprob is byte-identical to the one vLLM sampled with. Molt
+ships this as an agent skill, [`.claude/skills/train-inference-consistency`](.claude/skills/train-inference-consistency/SKILL.md):
+gates G0–G8, per-operator numerical contracts, molt flags and patch points, mismatch debugging and
+paired acceptance, written for the FSDP2 + AutoModel + vLLM stack and inspired by the vLLM blog post
+[Finish RL Training Faster: Bitwise-Consistent, High-Performance, Agent-Driven](https://vllm-project.github.io/2026/10/14/train-inference-consistency.html) (verl + Megatron).
 
 Measure it with `mismatch/bitwise_frac` (fraction of valid response tokens whose fp32 logprob bytes
 differ between vLLM and the training forward; logged whenever rollout logprobs exist, i.e.
