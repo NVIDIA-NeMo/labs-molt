@@ -29,3 +29,5 @@ issue/PR links.
   after approval.
 - Verify with `python -m compileall -q molt examples/python tests` and
   `python -m pytest -q`; shell scripts with `bash -n`.
+- Train–inference consistency work (bitwise rollout vs. trainer logprobs, mismatch
+  debugging, aligned kernels): `.claude/skills/train-inference-consistency`.
