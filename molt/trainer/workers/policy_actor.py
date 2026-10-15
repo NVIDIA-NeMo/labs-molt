@@ -141,6 +141,7 @@ class PolicyTrainer:
             ),
             loss_agg_mode=self.args.actor.loss_agg_mode,
             is_correction_gating=self.args.algo.advantage.is_correction_gating,
+            score_centering=self.args.algo.advantage.score_centering_top_k > 0,
         )
 
         # Add the MoE router load-balancing aux loss only when its coefficient is set.
@@ -444,6 +445,12 @@ class PolicyTrainer:
         # ranks share the sample); the CP gradient compensation for FSDP's extra
         # dp_cp averaging is applied in FsdpStrategy.backward (loss *= cp_size).
         loss_data_parallel_size = self.strategy.dp_size
+        # Score centering: the sampler head is stored seq-last (B, k, T-1) like routed_experts; the
+        # actor and the loss take it step-major (B, T-1, k) next to the log-probs.
+        rollout_top_ids = rollout_top_log_probs = None
+        if experience.rollout_top_ids is not None:
+            rollout_top_ids = experience.rollout_top_ids.permute(0, 2, 1)
+            rollout_top_log_probs = experience.rollout_top_log_probs.permute(0, 2, 1)
         model_output = self.actor(
             sequences,
             action_mask,
@@ -454,6 +461,8 @@ class PolicyTrainer:
             return_entropy=bool(self.args.actor.entropy_coef),
             # R3: replay the rollout's expert selection (None when routing replay off).
             routed_experts=experience.routed_experts,
+            # Score centering: also score the sampler's top-k ids in the same pass (None otherwise).
+            top_ids=rollout_top_ids,
             **multimodal_inputs,
         )
         action_log_probs = model_output["action_log_probs"]
@@ -500,6 +509,8 @@ class PolicyTrainer:
             batch_num_tokens=batch_num_tokens,
             global_batch_size=batch_num_seqs,
             prompt_token_counts=prompt_token_counts,
+            top_log_probs=model_output.get("action_top_log_probs"),
+            rollout_top_log_probs=rollout_top_log_probs,
         )
         experience.info["policy_clip_ratio"] = clip_ratio.detach()
         experience.info["policy_kl"] = policy_kl.detach()
@@ -507,6 +518,20 @@ class PolicyTrainer:
             experience.info["vllm_kl"] = vllm_kl.detach()
         if is_filter_ratio is not None:
             experience.info["is_filter_ratio"] = is_filter_ratio.detach()
+        if rollout_top_log_probs is not None:
+            # Score centering runs without the IS path, so report the train/rollout drift it would have
+            # (k1 log-ratio mean) and how much of each distribution the top-k head covers: 1 - sampler
+            # mass is the tail the correction has to model (the paper's k ablation).
+            if vllm_kl is None:
+                diff = rollout_log_probs.float() - action_log_probs.detach().float()
+                experience.info["vllm_kl"] = masked_mean(
+                    torch.nan_to_num(diff, nan=0.0, posinf=30.0, neginf=-30.0), action_mask
+                )
+            policy_head = model_output["action_top_log_probs"].detach()
+            experience.info["sc_sampler_head_mass"] = masked_mean(
+                rollout_top_log_probs.float().exp().sum(-1), action_mask
+            )
+            experience.info["sc_policy_head_mass"] = masked_mean(policy_head.float().exp().sum(-1), action_mask)
 
         # Stage 4: add optional KL-as-loss, MoE aux loss, and entropy regularization.
         if self.args.algo.kl.use_loss:

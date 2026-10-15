@@ -197,6 +197,7 @@ Common RL switches:
 | Filter by agent scores | `--algo.dynamic_filtering_enable --algo.dynamic_filtering_range 0.0 1.0` |
 | Correct async rollout logprobs | `--algo.advantage.is_correction_level geo` (seq-mask-tis; token-level adds `--algo.advantage.is_correction_mode clip/trunc/mask`) |
 | FlashREINFORCE (critic-free, single-rollout) | `--train.force_on_policy --algo.advantage.estimator flash_reinforce --algo.advantage.is_correction_level seq --algo.advantage.is_correction_gating binary_kl --algo.advantage.is_correction_threshold 5e-3 --actor.loss_agg_mode seq-mean-token-mean` — see [the quick start](examples/scripts/quick_start/rl_flash_reinforce_r1d_1p5b.sh) |
+| Score centering (off-policy REINFORCE without IS) | `--algo.advantage.score_centering_top_k 32`: records the rollout sampler's top-k log-probs per token and subtracts its expected score from the policy loss ([paper](https://arxiv.org/abs/2609.20807)). Use it **instead of** an IS gate (`is_correction_level off`), or compose it with a token-level weight only: `--algo.advantage.is_correction_level token --algo.advantage.is_correction_mode trunc` (the paper's TIS variant) or `mode mask` (IcePop-style MIS). It cannot be stacked on the sequence-level gate the FlashREINFORCE recipe uses (`is_correction_level seq/geo`): a sequence gate has no per-candidate form, and its surviving tokens keep the raw ratio, under which the centering term is identically zero |
 | Freeze MoE routing (stabilize MoE RL) | `--actor.freeze_moe_router` |
 | On-policy distillation | `--algo.advantage.estimator on_policy_distill --ref.model_name_or_path /path/to/teacher` |
 | Independent eval sampling | `--eval.temperature`, `--eval.top_p`, `--eval.max_new_tokens`, `--eval.n_samples_per_prompt` (unset ones fall back to rollout) |
@@ -608,10 +609,51 @@ The named schemes and their prior art:
 | `level token mode clip` | token clip | per-token weight clamp |
 | `level geo mode mask` | seq-mask-tis (recipe default) | MIS-style sequence masked importance sampling |
 | `level seq mode mask` | product-ratio reject | sequence log-ratio sum |
+| `score_centering_top_k 32` (+ optional `level token mode trunc\|mask`) | score centering (no ratio; optionally on top of TIS / IcePop) | Score Centering |
 
 References: **TIS** (truncated importance sampling of the train/infer ratio), **IcePop**
-(token-level masking of out-of-band ratios), and **MIS** (masked importance sampling, Yingru Li —
-sequence-level masked IS, which motivates the `seq`/`geo` rejection filter).
+(token-level masking of out-of-band ratios), **MIS** (masked importance sampling, Yingru Li —
+sequence-level masked IS, which motivates the `seq`/`geo` rejection filter), and
+**Score Centering** ([arXiv 2609.20807](https://arxiv.org/abs/2609.20807)).
+
+**Score centering** (`--algo.advantage.score_centering_top_k k`)
+
+Symbols, for one position of one response: the engine sampled token `y` from its distribution
+`q`; the trainer scores the same position with its own distribution `p`; `∇` is the gradient
+with respect to the trainer's weights; `v` ranges over the vocabulary.
+
+1. **Why plain REINFORCE drifts.** The update pushes `log p_y` up or down in proportion to the
+   advantage. Averaged over what the engine samples, the push is `Σ_v q_v ∇log p_v`. If engine
+   and trainer agreed (`q = p`) this would be `∇ Σ_v p_v = ∇1 = 0`: without a reward signal
+   there is no net push. When they disagree it is not zero — the engine's preferences leak into
+   every update, reward or not. That is the drift.
+
+2. **What score centering does.** It subtracts the average push before the advantage is applied:
+   `log p_y − Σ_v q_v log p_v`. The gradient of the subtracted term is exactly the drift, so after
+   the subtraction every position is unbiased again. The engine only ships its top-k log-probs, so
+   the sum runs over those k tokens and the remaining mass is handled by a rescaled `p` (the
+   paper's tail term). Nothing is rejected or down-weighted; every sample stays in.
+
+3. **Combining with a token-level weight (TIS, IcePop).** TIS multiplies the sampled token by
+   `f(r) = min(r, c)` with `r = p_y / q_y`; IcePop uses `f(r) = r` inside a band and 0 outside. Both
+   are functions of `(p, q)` *at that position*, so the same `f` can be applied to every candidate
+   in the top-k: center `Σ_v q_v f(r_v) log p_v` instead. Still exact.
+
+4. **Why the sequence gate (`is_correction_level seq`/`geo`, the FlashREINFORCE recipe) cannot be
+   added on top.** That gate keeps or drops a *whole response* from a statistic of all its tokens.
+   To center against it you would need, for every candidate `v` at position `t`, the probability
+   that the response is kept *given that `v` was chosen there* — it depends on tokens generated
+   later, so the engine's top-k cannot provide it, and no exact correction exists. There is also
+   nothing left to correct: the gate's surviving tokens carry the raw ratio `r`, and with
+   `f(r) = r` the average push is `Σ_v q_v (p_v / q_v) ∇log p_v = ∇ Σ_v p_v = 0` already —
+   importance sampling has removed the drift, so the centering term is identically zero.
+
+| You want | Flags |
+|---|---|
+| Score centering alone (replaces the IS correction) | `--algo.advantage.score_centering_top_k 32 --algo.advantage.is_correction_level off` |
+| Score centering + TIS | `... --algo.advantage.is_correction_level token --algo.advantage.is_correction_mode trunc` |
+| Score centering + IcePop | `... --algo.advantage.is_correction_level token --algo.advantage.is_correction_mode mask` |
+| The `seq`/`geo` gate (FlashREINFORCE recipe) | keep the gate, do not add score centering (`PolicyLoss` rejects the pair) |
 
 </details>
 

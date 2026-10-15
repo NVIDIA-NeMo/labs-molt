@@ -192,6 +192,18 @@ def _cp_gather_worker(rank, world, port):
         assert local_routing.shape == (B * S // world, layers, topk)
         expected = token_ids.reshape(-1).chunk(world)[rank]
         assert torch.equal(local_routing[:, 0, 0], expected)
+
+        # Score centering: the sampler's top-k ids are (B, S, k) step-major and take the same verb;
+        # the head log-probs come back (1, local, k) and gather to the caller's (B, S, k).
+        k = 3
+        head = token_ids.view(B, S, 1).expand(B, S, k).contiguous()
+        local_head = sharder.shard_token_tensor(head, fill=0)
+        assert local_head.shape == (B * S // world, k)
+        assert torch.equal(local_head[:, 0], expected)
+        gathered_head = sharder.gather_token_tensor(
+            local_head.reshape(1, -1, k).to(torch.float32), seq_dim=1, trim=True, fill=0.0
+        )
+        assert torch.equal(gathered_head, head.to(torch.float32))
     finally:
         dist.barrier()
         dist.destroy_process_group()
