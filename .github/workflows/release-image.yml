@@ -14,10 +14,13 @@
 # limitations under the License.
 
 # Publish hijkzzz/molt:<version.txt> (+ latest) to Docker Hub as one amd64+arm64 tag, on demand from
-# the Actions tab. Each platform builds natively on the CI runners that already build the test image
-# (x86 = the default runner, arm64 = the GB200 runner Automodel's CI uses), pushed by digest; a last
-# step joins the two digests into the tag.
-# Secrets: DOCKERHUB_USERNAME / DOCKERHUB_TOKEN. Variable ARM64_RUNNER overrides the arm64 runner label.
+# the Actions tab. Each platform builds natively on its own runner, pushed by digest; a last step
+# joins the two digests into the tag.
+# Both runner labels are named here rather than read from the preflight's default_runner_prefix.
+# That variable also steers the test path, so retargeting it there silently moved this amd64 build
+# onto an arm64 runner, where buildkit emulates it and installing the vllm wheel segfaults
+# (exit 139). Variables AMD64_RUNNER / ARM64_RUNNER override either label.
+# Secrets: DOCKERHUB_USERNAME / DOCKERHUB_TOKEN.
 name: Release image
 
 on:
@@ -60,7 +63,7 @@ jobs:
       matrix:
         include:
           - arch: amd64
-            runner: ${{ needs.pre-flight.outputs.runner_prefix }}
+            runner: ${{ vars.AMD64_RUNNER || 'nemo-ci-aws' }}
           - arch: arm64
             runner: ${{ vars.ARM64_RUNNER || 'nemo-ci-gcp-gpu-x2' }}
     runs-on: ${{ matrix.runner }}
