@@ -21,15 +21,15 @@ make equal is in [contracts.md](contracts.md); how to build the trainer side is 
 | Engine environment | `molt/trainer/vllm/vllm_engine.py::_configure_vllm_env` runs inside the Ray actor before `AsyncEngineArgs` | The place to export `VLLM_BATCH_INVARIANT=1` and workspace/NCCL pins to the engine |
 | Engine worker hook | `worker_extension_cls` → `vllm_worker_wrap.py`, imported in every worker before CUDA-graph capture | The place for kernel patches that must be identical to the trainer's |
 | Engine knobs | `--vllm.attention_backend TRITON_ATTN` (the only backend the aligned attention kernel patches; auto-selection picks FA3/FlashInfer and aligns nothing, without an error), `--vllm.enforce_eager`, `--vllm.enable_prefix_caching` (default off; molt resets the cache after every refit; vLLM 0.31 requires it with `--train.routing_replay`, see below), `--vllm.enable_chunked_prefill` (a Mamba hybrid with prefix caching must keep it on: vLLM's mamba cache mode `align` demands it), `--vllm.mamba_ssm_cache_dtype` | GDN/Mamba-hybrid recipes run eager because graph capture fails at init; prefer fixing capture over paying eager |
-| Routing replay (R3) | `--train.routing_replay` → vLLM `enable_return_routed_experts`, trainer replays the engine's expert ids | Needed while the router itself is not batch-invariant (the reference's route; report the disagreement rate replay masks, see [reference measurements](#reference-measurements)). With a batch-invariant fp32-output router GEMM and a fixed tie-break, rollout and training route identically under one update per step and replay becomes a diagnostic (the blog's DeepSeek-V4 recipe). Incompatible with partial rollout and speculative decoding; tokens the engine did not generate (tool outputs) have no record and fall back to natural routing. On vLLM 0.31 the routed ids come back through the AuxOutput store keyed by prefix-cache block hashes, so prefix caching must be on (the model must be MoE and the engine must run Model Runner V2, vLLM's CUDA default) and G3 must verify cache hit == miss |
+| Routing replay (R3) | `--train.routing_replay` → vLLM `enable_return_routed_experts`, trainer replays the engine's expert ids | Needed while the router itself is not batch-invariant (the reference's route; report the disagreement rate replay masks, see [reference measurements](#reference-measurements)). With a batch-invariant fp32-output router GEMM and a fixed tie-break, rollout and training route identically under one update per step and replay becomes a diagnostic (the vLLM blog post's DeepSeek-V4 recipe). Incompatible with partial rollout and speculative decoding; tokens the engine did not generate (tool outputs) have no record and fall back to natural routing. On vLLM 0.31 the routed ids come back through the AuxOutput store keyed by prefix-cache block hashes, so prefix caching must be on (the model must be MoE and the engine must run Model Runner V2, vLLM's CUDA default) and G3 must verify cache hit == miss |
 | Seed determinism | `--train.full_determinism_enable` | Seeds, torch deterministic algorithms (`transformers.enable_full_determinism`) and a single-process engine; it does not make kernels batch-invariant |
 
 ## The aligned mode
 
 One switch, `--train.batch_invariant`; with the switch off the default path must stay byte-identical.
 The reference takes vLLM's generic batch-invariant mode (`VLLM_BATCH_INVARIANT=1`: Triton matmul, segmented
-attention) and recovers speed in G8; the blog's recipes instead make the deployment kernels themselves
-invariant (DeepGEMM batch-invariant mode, fixed split-KV, single-tactic grouped GEMM). Both satisfy the
+attention) and recovers speed in G8; the recipes in the vLLM blog post instead make the deployment kernels
+themselves invariant (DeepGEMM batch-invariant mode, fixed split-KV, single-tactic grouped GEMM). Both satisfy the
 contracts; the choice is a G1/G8 cost decision per model.
 
 Process environment, in the trainer and in every engine worker (they share the weight-sync NCCL
@@ -66,8 +66,8 @@ H100, vLLM 0.28–0.31; re-verify every row against the pinned vLLM before relyi
 | Logits / logprobs | fp32 processed logprobs | fp32 `gather − logsumexp` | — |
 
 Not covered by upstream batch-invariant mode and not in the reference implementation: Mamba2/SSM
-layers (chunked scan in prefill vs per-token recurrence in decode are two rounding paths; the blog's
-Nemotron recipe makes decode replay prefill's chunked arithmetic with an fp32 state), sliding
+layers (chunked scan in prefill vs per-token recurrence in decode are two rounding paths; the vLLM blog
+post's Nemotron recipe makes decode replay prefill's chunked arithmetic with an fp32 state), sliding
 window, logit softcap, attention sinks, fp8 KV, multimodal encoders, mRoPE, multi-turn/tool runs
 under routing replay (see above). Each needs its own row in the G0 inventory with a verdict before
 the model is declared supportable.

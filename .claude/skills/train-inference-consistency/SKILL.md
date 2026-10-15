@@ -11,10 +11,10 @@ equals the logprob vLLM returned when it sampled the token — same bytes in the
 
 Method, in one sentence: the training forward calls vLLM's own kernels for every operator that
 produces a value (inference defines the numbers), and the backward reuses the native math of the
-training stack (the gradient only has to satisfy a written contract, not be bitwise). The method and
-its gate workflow come from the vLLM blog post [Finish RL Training Faster: Bitwise-Consistent,
-High-Performance, Agent-Driven](https://vllm-project.github.io/2026/10/14/train-inference-consistency.html) (verl + Megatron; gates C0–C10 there are G0–G8 here) and its
-[skill](https://github.com/vllm-project/vllm/pull/61551); this is the molt version.
+training stack (the gradient only has to satisfy a written contract, not be bitwise). This is Molt's
+take on the idea, inspired by the vLLM blog post [Finish RL Training Faster: Bitwise-Consistent,
+High-Performance, Agent-Driven](https://vllm-project.github.io/2026/10/14/train-inference-consistency.html) (verl + Megatron) and rebuilt for molt's stack (FSDP2 +
+AutoModel + vLLM); its gates C0–C10 correspond roughly to G0–G8 here.
 
 Where the code is: `main` has the measurement side — the `mismatch/*` metrics, rollout dump and
 replay, the engine and trainer flags in molt-integration.md. The aligned kernels behind

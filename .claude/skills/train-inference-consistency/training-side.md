@@ -169,8 +169,8 @@ forward calls the vLLM op without a graph and saves inputs (plus intermediates t
 LSE, routing ids); backward recomputes `native` (flash-attn varlen, `grouped_mm`, fp32 torch) from them and
 differentiates it. Never return `visible.detach()` as the trainable value. Where a fused kernel has no
 backward at all, `visible + (graph − graph.detach())` with `graph` the same math in PyTorch keeps the kernel's
-bytes (`x − x` is exactly +0; only a −0.0 result flips sign, so keep dtypes equal) and is what the blog's
-recipes use for such kernels; it holds the surrogate graph in memory, which the `Function` form avoids.
+bytes (`x − x` is exactly +0; only a −0.0 result flips sign, so keep dtypes equal); published recipes use it
+for such kernels. It holds the surrogate graph in memory, which the `Function` form avoids.
 
 | Case | Signature | Examples | Do |
 |---|---|---|---|

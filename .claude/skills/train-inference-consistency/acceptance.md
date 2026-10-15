@@ -194,7 +194,9 @@ cgroup OOM on load), **derived state** (files complete, the first step after res
 recovers). Decide which failed before saying "the checkpoint is broken".
 
 Exact resume needs: fp32 masters (strict load, no silent missing/unexpected keys); optimizer state at the same
-step incl. CPU-offloaded moments (`--fsdp.offload optimizer`); the LR scheduler's actual value; RNG streams
+step incl. CPU-offloaded moments (`--fsdp.offload optimizer`) — molt's optimizer DCP load tolerates partial
+state (`allow_partial_load=True`), so count the restored optimizer keys yourself; the LR scheduler's actual
+value; RNG streams
 where the recipe depends on them (molt's client state holds episode, consumed prompts, dataloader and
 rollout-generator state, not RNG — a resumed trajectory is not bitwise against an uninterrupted run and need
 not be); the weight version id; a run contract (code, data, recipe hashes) checked item by item. Rebuilt
