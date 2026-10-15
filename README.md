@@ -618,35 +618,50 @@ sequence-level masked IS, which motivates the `seq`/`geo` rejection filter), and
 
 **Score centering** (`--algo.advantage.score_centering_top_k k`)
 
-Symbols, for one position of one response: the engine sampled token `y` from its distribution
-`q`; the trainer scores the same position with its own distribution `p`; `∇` is the gradient
-with respect to the trainer's weights; `v` ranges over the vocabulary.
+*The problem in one sentence.* The rollout engine (vLLM) and the trainer (FSDP) are two different
+implementations of the same model, so they disagree slightly on every token's probability; plain
+REINFORCE then nudges the trainer toward the engine's preferences at every token, even when the
+reward is zero. That nudge is the drift.
 
-1. **Why plain REINFORCE drifts.** The update pushes `log p_y` up or down in proportion to the
-   advantage. Averaged over what the engine samples, the push is `Σ_v q_v ∇log p_v`. If engine
-   and trainer agreed (`q = p`) this would be `∇ Σ_v p_v = ∇1 = 0`: without a reward signal
-   there is no net push. When they disagree it is not zero — the engine's preferences leak into
-   every update, reward or not. That is the drift.
+*Notation.* Look at one position of one response. The engine picked token `y` from its
+distribution `q`; the trainer assigns the same position its own distribution `p`; `v` runs over
+the vocabulary; `∇` is the gradient with respect to the trainer's weights.
 
-2. **What score centering does.** It subtracts the average push before the advantage is applied:
-   `log p_y − Σ_v q_v log p_v`. The gradient of the subtracted term is exactly the drift, so after
-   the subtraction every position is unbiased again. The engine only ships its top-k log-probs, so
-   the sum runs over those k tokens and the remaining mass is handled by a rescaled `p` (the
-   paper's tail term). Nothing is rejected or down-weighted; every sample stays in.
+*Where the drift comes from.* REINFORCE's per-token update is `advantage × ∇log p_y`. Because `y`
+was drawn from `q`, the average of `∇log p_y` over the engine's sampling is
 
-3. **Combining with a token-level weight (TIS, IcePop).** TIS multiplies the sampled token by
-   `f(r) = min(r, c)` with `r = p_y / q_y`; IcePop uses `f(r) = r` inside a band and 0 outside. Both
-   are functions of `(p, q)` *at that position*, so the same `f` can be applied to every candidate
-   in the top-k: center `Σ_v q_v f(r_v) log p_v` instead. Still exact.
+```
+E_{y~q}[∇log p_y]  =  Σ_v q_v ∇log p_v
+```
 
-4. **Why the sequence gate (`is_correction_level seq`/`geo`, the FlashREINFORCE recipe) cannot be
-   added on top.** That gate keeps or drops a *whole response* from a statistic of all its tokens.
-   To center against it you would need, for every candidate `v` at position `t`, the probability
-   that the response is kept *given that `v` was chosen there* — it depends on tokens generated
-   later, so the engine's top-k cannot provide it, and no exact correction exists. There is also
-   nothing left to correct: the gate's surviving tokens carry the raw ratio `r`, and with
-   `f(r) = r` the average push is `Σ_v q_v (p_v / q_v) ∇log p_v = ∇ Σ_v p_v = 0` already —
-   importance sampling has removed the drift, so the centering term is identically zero.
+If engine and trainer agreed (`q = p`) this is `Σ_v p_v ∇log p_v = Σ_v ∇p_v = ∇1 = 0`: with no
+reward signal there is no net push. When they disagree it is not zero, so every update carries a
+reward-independent push — the drift.
+
+*What score centering does.* It subtracts the average push before the advantage is applied:
+
+```
+train on   log p_y  −  Σ_v q_v log p_v        instead of   log p_y
+```
+
+The gradient of the subtracted term is exactly `Σ_v q_v ∇log p_v`, so the expected update at every
+position becomes zero: the drift is gone and no sample is thrown away. The engine only reports its
+top-k log-probs per token, so the sum runs over those `k` tokens and the remaining probability mass
+is approximated by a rescaled `p` (the paper's tail term; `k = 32` recovers ~95 % of the mass).
+
+*With TIS or IcePop.* These keep the REINFORCE update but scale the sampled token by a per-token
+weight `f(r)` of the train/rollout ratio `r = p_y / q_y` (TIS: `min(r, c)`; IcePop: `r` inside a
+band, 0 outside). Score centering then subtracts the average of the *weighted* push,
+`Σ_v q_v f(r_v) log p_v`. This stays exact because `f` only needs `(p, q)` at this position, so it
+can be evaluated for every candidate `v`.
+
+*FlashREINFORCE needs none of this.* Its recipe applies the exact ratio `r = p/q` to every surviving
+token and drops whole responses whose train/rollout mismatch is too large (the `seq`/`geo` gate).
+With the exact ratio the average push is `Σ_v q_v (p_v / q_v) ∇log p_v = ∇ Σ_v p_v = 0`: importance
+sampling already removes the drift, and the gate only bounds the variance. Simple, and drift-free by
+construction. For the same reason score centering cannot be stacked on it: with `f(r) = r` the
+centering term is identically zero, and the gate decides keep-or-drop from later tokens, so no
+per-candidate correction exists — `PolicyLoss` rejects the pair.
 
 | You want | Flags |
 |---|---|
