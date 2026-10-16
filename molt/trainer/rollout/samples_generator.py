@@ -82,7 +82,10 @@ def _collect_prompt_batch(dataloader_iter, num_prompts: int):
     return prompts, labels, images, tools, exhausted
 
 
-@ray.remote(num_cpus=0)
+# max_retries=0: a retriable task keeps its arguments for lineage reconstruction, and these arguments hold the
+# group's Experience.heavy_ref handles, so every step's offloaded tensors stayed referenced (and spilled to disk) for
+# the rest of the run. The join is trivial and its inputs come from actor tasks, which are not retried either.
+@ray.remote(num_cpus=0, max_retries=0)
 def _gather_group(*parts):
     """Re-join one prompt group's per-rollout results (runs once all of them finished)."""
     return [item for part in parts for item in part]
