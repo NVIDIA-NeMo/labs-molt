@@ -64,6 +64,7 @@ class WorkerWrap:
         import math
 
         import torch
+        from vllm.config import set_current_vllm_config
 
         sizes = [math.prod(shape) * dtype.itemsize for _, dtype, shape in metas]
 
@@ -73,7 +74,9 @@ class WorkerWrap:
         weights = [
             (name, part.view(dtype).view(*shape)) for (name, dtype, shape), part in zip(metas, buf.split(sizes))
         ]
-        loaded = self.model_runner.model.load_weights(weights=weights)
+        # A layer whose last weight lands in this flush is processed right here (begin_weight_update).
+        with set_current_vllm_config(self.vllm_config):
+            loaded = self.model_runner.model.load_weights(weights=weights)
         # Collect the names vLLM says it assigned, for the exact by-name coverage check
         # (--train.check_weight_update_equal). Only armed between reset/report calls.
         if getattr(self, "_weight_update_loaded", None) is not None and loaded:
@@ -94,6 +97,28 @@ class WorkerWrap:
                 flush=True,
             )
         del buf
+
+    def begin_weight_update(self):
+        """Defer vLLM's post-load weight processing to the end of this refit.
+
+        FlashInfer MoE kernels rewrite the expert weights after loading (TRT-LLM block layout,
+        CUTLASS swapped gate/up halves; vllm-project/vllm#54699), so plain ``load_weights`` flushes
+        alone leave checkpoint-layout bytes under the kernel. vLLM's layerwise reload re-runs the
+        processing per completed layer, in place.
+        """
+        from vllm.config import set_current_vllm_config
+        from vllm.model_executor.model_loader.reload import initialize_layerwise_reload
+
+        with set_current_vllm_config(self.vllm_config):
+            initialize_layerwise_reload(self.model_runner.model)
+
+    def end_weight_update(self):
+        """Process the layers the broadcast left incomplete; restore the ones it never touched."""
+        from vllm.config import set_current_vllm_config
+        from vllm.model_executor.model_loader.reload import finalize_layerwise_reload
+
+        with set_current_vllm_config(self.vllm_config):
+            finalize_layerwise_reload(self.model_runner.model, self.model_config)
 
     def reset_weight_update_check(self):
         """Start collecting the param names ``load_weights`` assigns in the coming broadcast."""

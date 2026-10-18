@@ -558,6 +558,7 @@ Molt targets AutoModel custom models with FSDP2.
 | Data parallel | `--vllm.data_parallel_size 4` | single-node mp; raises EP past TP (DeepSeek-V3-style TP8 + DP4 → EP32) |
 | Scheduler token budget | `--vllm.max_num_batched_tokens 32768` | |
 | MTP speculative decoding | `--vllm.mtp_num_speculative_tokens 1` | details in [Deep dives](#-deep-dives) |
+| MoE kernel backend | `--vllm.moe_backend triton` | default lets vLLM choose (FlashInfer TRT-LLM on Blackwell) |
 
 **MoE stability**
 
