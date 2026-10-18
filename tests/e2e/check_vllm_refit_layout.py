@@ -13,7 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Refit a vLLM engine with its own checkpoint through molt's packed broadcast; greedy logprobs must not change.
+"""Refit a vLLM engine with its own checkpoint through molt's packed broadcast; teacher-forced log-probs of a
+fixed set of sequences must not change beyond the kernel's own run-to-run noise.
 
 Without begin/end_weight_update (--no-bracket) FlashInfer MoE backends keep the checkpoint layout under a kernel
 that expects its own and generate garbage, although every weight "loaded". Two GPUs: engine on 0, trainer stand-in on 1.
@@ -36,9 +37,17 @@ from molt.utils.distributed_util import stateless_init_process_group
 PROMPTS = ["The capital of France is", "def fibonacci(n):", "Water boils at", "In 1969, humans first"]
 
 
-def greedy_logprobs(llm):
-    outs = llm.generate(PROMPTS, SamplingParams(temperature=0, max_tokens=32, logprobs=0))
-    return [(t, o.outputs[0].logprobs[i][t].logprob) for o in outs for i, t in enumerate(o.outputs[0].token_ids)]
+def score(llm, sequences):
+    """Teacher-forced log-prob of every response token (greedy re-generation would flip at near-ties on
+    non-deterministic kernels and hide the signal behind the cascade)."""
+    params = SamplingParams(temperature=0, max_tokens=1, prompt_logprobs=0)
+    outs = llm.generate([{"prompt_token_ids": ids} for ids, _ in sequences], params)
+    return [
+        o.prompt_logprobs[i][t].logprob
+        for o, (ids, n_prompt) in zip(outs, sequences)
+        for i, t in enumerate(ids)
+        if i >= n_prompt
+    ]
 
 
 def rpc_during(llm, method, args, trainer_side):
@@ -112,15 +121,18 @@ def main():
         lambda: group.append(stateless_init_process_group("127.0.0.1", port, 0, 2, torch.device("cuda:1"))),
     )
 
-    before = greedy_logprobs(llm)
+    generated = llm.generate(PROMPTS, SamplingParams(temperature=0, max_tokens=32))
+    sequences = [(list(o.prompt_token_ids) + list(o.outputs[0].token_ids), len(o.prompt_token_ids)) for o in generated]
+    before, again = score(llm, sequences), score(llm, sequences)
+    noise = max(abs(a - b) for a, b in zip(before, again))  # the kernel's run-to-run floor with unchanged weights
     refit_from_checkpoint(llm, group[0], args.model, bracket=not args.no_bracket)
-    after = greedy_logprobs(llm)
+    after = score(llm, sequences)
 
-    same_tokens = [t for t, _ in before] == [t for t, _ in after]
-    max_delta = max(abs(a - b) for (_, a), (_, b) in zip(before, after)) if same_tokens else float("inf")
-    ok = same_tokens and max_delta < 0.05
+    delta = max(abs(a - b) for a, b in zip(before, after))
+    ok = delta <= max(0.1, 10 * noise)
     print(
-        f"{'PASS' if ok else 'FAIL'} moe_backend={args.moe_backend} bracket={not args.no_bracket} max|dlogprob|={max_delta:.3g}"
+        f"{'PASS' if ok else 'FAIL'} moe_backend={args.moe_backend} bracket={not args.no_bracket} "
+        f"max|dlogprob|={delta:.3g} noise_floor={noise:.3g}"
     )
     sys.exit(0 if ok else 1)
 
