@@ -221,7 +221,9 @@ class Env(ABC):
         """Optional per-episode setup; override to rewrite the initial observation.
 
         Args:
-            state: ``{"observation": <prompt str>, "label": <ground truth>}``.
+            state: ``{"observation": <prompt str>, "label": <ground truth>, "tokenizer": <the
+            policy tokenizer, an AutoProcessor for VLMs>}`` — the tokenizer is there for envs that
+            parse model output with it (e.g. a vLLM tool parser).
 
         Returns:
             The (possibly modified) state dict; ``state["observation"]`` becomes
@@ -327,7 +329,7 @@ class StepEnvRunner(Runner):
         rollout_sid = uuid4().hex
 
         try:
-            reset = await env.reset({"observation": prompt, "label": label})
+            reset = await env.reset({"observation": prompt, "label": label, "tokenizer": hf_tokenizer})
             observation_text = reset["observation"]
 
             # process_prompt_with_images (inside _tokenize_observation) is a multi-second CPU op per image.

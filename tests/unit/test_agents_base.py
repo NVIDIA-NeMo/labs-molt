@@ -117,6 +117,23 @@ def _execute(env_cls, max_length=64):
     return asyncio.run(StepEnvRunner(env_cls).execute("p", "l", params, max_length, _Tokenizer(), _Engine()))
 
 
+def test_reset_state_carries_the_policy_tokenizer():
+    """Envs that parse model output (the geo3k tool agent builds a vLLM tool parser) get the
+    tokenizer molt already holds instead of loading their own from an environment variable."""
+    seen = []
+
+    class _RecordingEnv(_TerminatesEnv):
+        async def reset(self, state, **kwargs):
+            seen.append(state["tokenizer"])
+            return state
+
+    tokenizer = _Tokenizer()
+    params = SimpleNamespace(max_tokens=8, logprobs=None)
+    asyncio.run(StepEnvRunner(_RecordingEnv).execute("p", "l", params, 64, tokenizer, _Engine()))
+
+    assert seen == [tokenizer]
+
+
 def test_env_close_runs_once_on_every_exit_path():
     """Teardown must not depend on step() returning terminated/truncated: context
     exhaustion and reset/step exceptions are routine exits for OS-resource envs."""

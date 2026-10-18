@@ -21,8 +21,9 @@ the session-prefixed `ctx.base_url`). The agent owns the turn loop; the
 server stitches the per-turn token traces into the training trajectory.
 
 Tool-call format: Qwen3 Hermes XML (same as geo3k.py); swap via
-``VLLM_TOOL_PARSER_CLS``. ``ctx.messages`` arrives ready to send — the runner
-already inlined the row's image(s) as OpenAI ``image_url`` content items.
+``VLLM_TOOL_PARSER_CLS``; the parser is built from ``ctx.tokenizer``.
+``ctx.messages`` arrives ready to send — the runner already inlined the row's
+image(s) as OpenAI ``image_url`` content items.
 """
 
 from __future__ import annotations
@@ -67,10 +68,9 @@ _PARSER_CLS_PATHS = [
 _PARSER = None
 
 
-def _load_parser():
-    from transformers import AutoTokenizer
-
-    tok = AutoTokenizer.from_pretrained(os.environ["MODEL_PATH"], trust_remote_code=True)
+def _load_parser(tokenizer):
+    # molt hands the policy tokenizer in; for VLMs it is an AutoProcessor wrapping the tokenizer.
+    tok = getattr(tokenizer, "tokenizer", tokenizer)
     for path in _PARSER_CLS_PATHS:
         module_path, _, cls_name = path.rpartition(".")
         try:
@@ -81,10 +81,10 @@ def _load_parser():
     raise ImportError(f"no vLLM qwen3 tool parser found among {_PARSER_CLS_PATHS}")
 
 
-def _extract_tool_call(text: str) -> dict | None:
+def _extract_tool_call(text: str, tokenizer) -> dict | None:
     global _PARSER
     if _PARSER is None:
-        _PARSER = _load_parser()
+        _PARSER = _load_parser(tokenizer)
     result = _PARSER.extract_tool_calls(text, request=None)
     if not result.tools_called or not result.tool_calls:
         return None
@@ -158,7 +158,7 @@ class Geo3kAgent(ChatAgent):
             assistant_history.append(action)
             messages.append({"role": "assistant", "content": action})
 
-            tool_call = _extract_tool_call(action)
+            tool_call = _extract_tool_call(action, ctx.tokenizer)
             # Stop once the model commits a final answer (`<answer>` / `\boxed`),
             # even if it co-emits a tool_call, or when it stops calling tools —
             # avoids post-answer verification loops that inflate length/turns

@@ -49,7 +49,9 @@ def test_step_terminates_on_answer_even_with_co_emitted_tool_call(monkeypatch):
     tool_call — otherwise the rollout keeps tool-calling and inflates length."""
     env = geo3k.GeoEnv()
     monkeypatch.setattr(
-        geo3k, "_extract_tool_call", lambda text: {"name": "python_executor", "arguments": {"code": "print(1)"}}
+        geo3k,
+        "_extract_tool_call",
+        lambda text, tokenizer: {"name": "python_executor", "arguments": {"code": "print(1)"}},
     )
     monkeypatch.setattr(geo3k, "_grade_answer", lambda text, label: (1.0, "5"))
 
@@ -71,7 +73,9 @@ def test_step_terminates_on_answer_even_with_co_emitted_tool_call(monkeypatch):
 def test_step_terminates_on_nested_boxed_answer_with_tool_call(monkeypatch):
     env = geo3k.GeoEnv()
     monkeypatch.setattr(
-        geo3k, "_extract_tool_call", lambda text: {"name": "python_executor", "arguments": {"code": "print(1)"}}
+        geo3k,
+        "_extract_tool_call",
+        lambda text, tokenizer: {"name": "python_executor", "arguments": {"code": "print(1)"}},
     )
 
     result = asyncio.run(
@@ -102,7 +106,9 @@ def test_step_continues_on_tool_call_without_answer(monkeypatch):
         return "1"
 
     monkeypatch.setattr(
-        geo3k, "_extract_tool_call", lambda text: {"name": "python_executor", "arguments": {"code": "print(1)"}}
+        geo3k,
+        "_extract_tool_call",
+        lambda text, tokenizer: {"name": "python_executor", "arguments": {"code": "print(1)"}},
     )
     monkeypatch.setattr(geo3k, "_TOOLS", {"python_executor": SimpleNamespace(execute=slow_execute)})
 
@@ -136,7 +142,7 @@ def test_step_grading_keeps_event_loop_responsive(monkeypatch):
             timed_out.set()
         return 1.0, "5"
 
-    monkeypatch.setattr(geo3k, "_extract_tool_call", lambda text: None)
+    monkeypatch.setattr(geo3k, "_extract_tool_call", lambda text, tokenizer: None)
     monkeypatch.setattr(geo3k, "_grade_answer", slow_grader)
 
     async def run_step():
@@ -158,7 +164,9 @@ def test_step_marks_last_tool_call_turn_truncated(monkeypatch):
     executed = []
     monkeypatch.setattr(geo3k, "_MAX_TURNS", 1)
     monkeypatch.setattr(
-        geo3k, "_extract_tool_call", lambda text: {"name": "python_executor", "arguments": {"code": "print(1)"}}
+        geo3k,
+        "_extract_tool_call",
+        lambda text, tokenizer: {"name": "python_executor", "arguments": {"code": "print(1)"}},
     )
     monkeypatch.setattr(
         geo3k,
@@ -192,7 +200,9 @@ def _run_chat_agent(monkeypatch, chat_geo3k, replies, max_turns):
     monkeypatch.setattr(
         chat_geo3k,
         "_extract_tool_call",
-        lambda text: {"name": "python_executor", "arguments": {"code": text}} if "<tool_call>" in text else None,
+        lambda text, tokenizer: (
+            {"name": "python_executor", "arguments": {"code": text}} if "<tool_call>" in text else None
+        ),
     )
     monkeypatch.setattr(chat_geo3k, "_final_answer", lambda text: "42" if "boxed" in text else "")
     monkeypatch.setattr(chat_geo3k, "_grade_answer", lambda text, label: (1.0 if "boxed" in text else 0.0, ""))
@@ -208,6 +218,7 @@ def _run_chat_agent(monkeypatch, chat_geo3k, replies, max_turns):
         tools=[],
         model_name="policy",
         sampling_params=SimpleNamespace(max_tokens=8, temperature=1.0),
+        tokenizer=None,
         label="",
     )
     return asyncio.run(chat_geo3k.Geo3kAgent().run(ctx)), create, executed
@@ -239,13 +250,15 @@ def test_chat_agent_final_answer_on_last_turn_is_not_truncated(monkeypatch):
 
 def test_step_reuses_generated_turn_end_for_feedback(monkeypatch):
     env = geo3k.GeoEnv()
-    monkeypatch.setattr(geo3k, "_extract_tool_call", lambda text: None)
+    monkeypatch.setattr(geo3k, "_extract_tool_call", lambda text, tokenizer: None)
     monkeypatch.setattr(geo3k, "_grade_answer", lambda text, label: (1.0, "5"))
     final = asyncio.run(env.step({"action_text": "<answer>5</answer><|im_end|>", "label": {"ground_truth": "5"}}))
 
     env = geo3k.GeoEnv()
     monkeypatch.setattr(
-        geo3k, "_extract_tool_call", lambda text: {"name": "python_executor", "arguments": {"code": "print(1)"}}
+        geo3k,
+        "_extract_tool_call",
+        lambda text, tokenizer: {"name": "python_executor", "arguments": {"code": "print(1)"}},
     )
     tool = asyncio.run(env.step({"action_text": "<tool_call>x</tool_call><|im_end|>", "label": {"ground_truth": "5"}}))
 

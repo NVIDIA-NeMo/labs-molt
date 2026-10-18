@@ -111,6 +111,9 @@ class ChatContext:
     session_id: str  # raw id; rarely needed once base_url carries it
     sampling_params: Any
     max_length: int
+    # The policy tokenizer (an AutoProcessor for VLMs), for agents that parse model output with
+    # it — e.g. a vLLM tool parser.
+    tokenizer: Any
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +273,7 @@ class ChatAgentRunner(Runner):
             session_id=session_id,
             sampling_params=sampling_params,
             max_length=max_length,
+            tokenizer=hf_tokenizer,
         )
         try:
             result = await self.agent_cls().run(ctx)

@@ -25,7 +25,8 @@ against the ground truth — that grade becomes the trajectory reward.
 
 Tool-call parsing uses vLLM's qwen3 XML tool parser, imported by dotted class
 path with a version fallback (Qwen3XMLToolParser on vLLM <=0.23,
-Qwen3EngineToolParser on >=0.24); override via `VLLM_TOOL_PARSER_CLS`.
+Qwen3EngineToolParser on >=0.24); override via `VLLM_TOOL_PARSER_CLS`. The
+parser is built from the policy tokenizer molt hands the env at reset.
 
 Environment variables:
   MAX_AGENT_TURNS         (default 5)       — caps tool_call iterations.
@@ -74,10 +75,9 @@ _PARSER_CLS_PATHS = [
 _PARSER = None
 
 
-def _load_parser():
-    from transformers import AutoTokenizer
-
-    tok = AutoTokenizer.from_pretrained(os.environ["MODEL_PATH"], trust_remote_code=True)
+def _load_parser(tokenizer):
+    # molt hands the policy tokenizer in; for VLMs it is an AutoProcessor wrapping the tokenizer.
+    tok = getattr(tokenizer, "tokenizer", tokenizer)
     for path in _PARSER_CLS_PATHS:
         module_path, _, cls_name = path.rpartition(".")
         try:
@@ -88,10 +88,10 @@ def _load_parser():
     raise ImportError(f"no vLLM qwen3 tool parser found among {_PARSER_CLS_PATHS}")
 
 
-def _extract_tool_call(text: str) -> dict[str, Any] | None:
+def _extract_tool_call(text: str, tokenizer) -> dict[str, Any] | None:
     global _PARSER
     if _PARSER is None:
-        _PARSER = _load_parser()
+        _PARSER = _load_parser(tokenizer)
     result = _PARSER.extract_tool_calls(text, request=None)
     if not result.tools_called or not result.tool_calls:
         return None
@@ -151,11 +151,13 @@ def _final_observation(close: str, status: str) -> str:
 
 class GeoEnv(Env):
     def __init__(self):
+        self.tokenizer = None  # the policy tokenizer, handed over at reset
         self.turn = 0
         self.assistant_history: list[str] = []
         self.tool_call_count = 0
 
     async def reset(self, state):
+        self.tokenizer = state["tokenizer"]
         self.turn = 0
         self.assistant_history = []
         self.tool_call_count = 0
@@ -176,7 +178,7 @@ class GeoEnv(Env):
         # text. Add the marker only when the generated turn does not already carry it.
         close = "" if action.endswith("<|im_end|>") else "<|im_end|>"
 
-        tool_call = _extract_tool_call(action)
+        tool_call = _extract_tool_call(action, self.tokenizer)
 
         # Terminate once the model commits a final answer (`<answer>` / `\boxed`),
         # even if it co-emits a tool_call, or when it stops calling tools. Grading
