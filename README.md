@@ -742,9 +742,9 @@ expert ids it chose, and the training forward replays that exact selection.
   on preemption).
 
 **Router freeze (optional, blunter).** Hold the gate/router weights fixed so the
-routing can't drift at all — excludes the router from the optimizer *and* the refit,
-so vLLM and the actor route to the same experts **by construction**, no engine
-support needed. The trade-off: the router stops learning, so it's **redundant with
+routing can't drift at all — the router leaves the optimizer (the refit still broadcasts
+it, unchanged), so vLLM and the actor route to the same experts **by construction**, no
+engine support needed. The trade-off: the router stops learning, so it's **redundant with
 R3** and off by default; reach for it only if routing drift still dominates and a
 fixed router is acceptable.
 

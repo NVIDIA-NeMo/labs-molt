@@ -441,9 +441,8 @@ class PolicyTrainer:
         # The loss uses slime's global token-mean: batch_num_tokens is the action
         # token count of the whole optimizer-step batch (all microbatches, all DP
         # ranks), so FSDP's dp_cp reduce-scatter cannot bias gradients toward DP
-        # shards with fewer action tokens. The dp_size scale stays DP-only (CP
-        # ranks share the sample); the CP gradient compensation for FSDP's extra
-        # dp_cp averaging is applied in FsdpStrategy.backward (loss *= cp_size).
+        # shards with fewer action tokens. The dp_size scale stays DP-only (CP ranks share the
+        # sample); the CP gather's sum-backward already offsets FSDP's extra dp_cp averaging.
         loss_data_parallel_size = self.strategy.dp_size
         # Score centering: the sampler head is stored seq-last (B, k, T-1) like routed_experts; the
         # actor and the loss take it step-major (B, T-1, k) next to the log-probs.
