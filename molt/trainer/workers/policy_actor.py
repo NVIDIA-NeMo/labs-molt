@@ -706,6 +706,9 @@ class PolicyTrainer:
         check_weight_update = is_rank0 and getattr(self.strategy.args.train, "check_weight_update_equal", False)
         if check_weight_update:
             ray.get([engine.reset_weight_update_check.remote() for engine in self.vllm_engines])
+        if is_rank0:
+            # vLLM's post-load weight processing (MoE kernel layouts) is re-run per layer across the flushes.
+            ray.get([engine.begin_weight_update.remote() for engine in self.vllm_engines])
         # 512 MiB flushes, matching slime's `--update-weight-buffer-size` default
         # (512 * 1024**2). vLLM runs at high gpu_memory_utilization (~0.9-0.95) with
         # little free VRAM, and the receiver allocates a contiguous
@@ -825,6 +828,8 @@ class PolicyTrainer:
 
         if is_rank0:
             _flush()
+            # Before the coverage check: until here a tied lm_head still shows as its own (meta) parameter.
+            ray.get([engine.end_weight_update.remote() for engine in self.vllm_engines])
 
         if check_weight_update:
             # Which of the engine's weights did this broadcast never land on? The engines are
