@@ -783,14 +783,8 @@ if __name__ == "__main__":
             "is unavailable or incompatible."
         ),
     )
-    # vLLM throughput features. We leave `chunked_prefill` and `async_scheduling`
-    # at None so vLLM 0.21's own auto-resolution decides (both default ON for
-    # non-encoder-decoder models with mp/uniproc executors). Prefix caching is
-    # an explicit opt-in: it changes the rollout→training logprob path because
-    # cached prefixes survive across weight updates; the trainer calls
-    # reset_prefix_cache after every broadcast (see broadcast_to_vllm) so
-    # enabling it is safe, but we keep it off by default until a recipe is
-    # validated end-to-end.
+    # vLLM throughput features. `chunked_prefill` and `async_scheduling` stay None so vLLM's own
+    # auto-resolution decides (both default ON for non-encoder-decoder models with mp/uniproc executors).
     parser.add_argument(
         "--vllm.enable_prefix_caching",
         action=argparse.BooleanOptionalAction,
