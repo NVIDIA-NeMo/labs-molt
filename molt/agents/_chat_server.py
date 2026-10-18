@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import warnings
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
@@ -172,17 +173,16 @@ def _anthropic_message_body(model_name: str, content: str, finish_reason: str) -
 
 
 def _build_sampling_params(base_sampling, body: dict):
-    """One vLLM SamplingParams per chat call: inherit THIS rollout's defaults (its train-vs-eval
-    temperature / max_tokens — see ``_Session.sampling_params``), honor the caller's temperature /
-    max_tokens, and force logprobs on (importance-sampling correction needs token logprobs)."""
+    """One vLLM SamplingParams per chat call: this rollout's temperature / top_p (see
+    ``_Session.sampling_params``; the trainer recomputes log-probs at exactly these, so a caller's own
+    values would skew every importance ratio), the caller's max_tokens, and logprobs forced on."""
     sp = deepcopy(base_sampling)
     requested = body.get("max_completion_tokens", body.get("max_tokens"))
     if requested is not None:
         sp.max_tokens = int(requested)
-    if body.get("temperature") is not None:
-        sp.temperature = float(body["temperature"])
-    if body.get("top_p") is not None:
-        sp.top_p = float(body["top_p"])
+    for knob in ("temperature", "top_p"):
+        if body.get(knob) is not None and float(body[knob]) != getattr(sp, knob):
+            warnings.warn(f"chat request {knob}={body[knob]} ignored: this rollout samples at {getattr(sp, knob)}")
     if sp.logprobs is None:
         sp.logprobs = 1
     return sp
