@@ -101,11 +101,10 @@ class WorkerWrap:
     def begin_weight_update(self):
         """Defer vLLM's post-load weight processing to the end of this refit.
 
-        MoE kernels may rewrite expert weights after loading (FlashInfer TRT-LLM packs them into
-        a block layout, FlashInfer CUTLASS swaps the gate/up halves), so plain ``load_weights``
-        flushes would leave checkpoint-layout bytes under a kernel that reads the processed
-        layout. vLLM's layerwise reload re-runs the processing once a layer is complete and
-        copies the result back into the CUDA-graph storage (vllm-project/vllm#54699).
+        FlashInfer MoE kernels rewrite the expert weights after loading (TRT-LLM block layout,
+        CUTLASS swapped gate/up halves; vllm-project/vllm#54699), so plain ``load_weights`` flushes
+        alone leave checkpoint-layout bytes under the kernel. vLLM's layerwise reload re-runs the
+        processing per completed layer, in place.
         """
         from vllm.config import set_current_vllm_config
         from vllm.model_executor.model_loader.reload import initialize_layerwise_reload

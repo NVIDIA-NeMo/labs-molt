@@ -13,16 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Refit a vLLM engine with its own checkpoint through molt's packed broadcast and require
-unchanged greedy logprobs.
+"""Refit a vLLM engine with its own checkpoint through molt's packed broadcast; greedy logprobs must not change.
 
-A refit that skips vLLM's post-load weight processing leaves MoE weights in checkpoint layout
-under a kernel that expects its own (FlashInfer TRT-LLM block layout, CUTLASS swapped gate/up
-halves): the engine then generates garbage although every weight "loaded". Two GPUs: the
-engine on GPU 0, the broadcasting trainer stand-in on GPU 1.
+Without begin/end_weight_update (--no-bracket) FlashInfer MoE backends keep the checkpoint layout under a kernel
+that expects its own and generate garbage, although every weight "loaded". Two GPUs: engine on 0, trainer stand-in on 1.
 
-    python3 tests/e2e/check_vllm_refit_layout.py --model <hf dir> --moe-backend flashinfer_trtllm
-    python3 tests/e2e/check_vllm_refit_layout.py --model <hf dir> --moe-backend flashinfer_trtllm --no-bracket  # expected FAIL
+    python3 tests/e2e/check_vllm_refit_layout.py --model <hf dir> --moe-backend flashinfer_trtllm [--no-bracket]
 """
 
 import argparse
@@ -42,37 +38,40 @@ PROMPTS = ["The capital of France is", "def fibonacci(n):", "Water boils at", "I
 
 def greedy_logprobs(llm):
     outs = llm.generate(PROMPTS, SamplingParams(temperature=0, max_tokens=32, logprobs=0))
-    return [[(t, o.outputs[0].logprobs[i][t].logprob) for i, t in enumerate(o.outputs[0].token_ids)] for o in outs]
+    return [(t, o.outputs[0].logprobs[i][t].logprob) for o in outs for i, t in enumerate(o.outputs[0].token_ids)]
 
 
-def rpc_while_broadcasting(llm, method, args, broadcast):
-    """The worker's RPC blocks on the NCCL broadcast, so the trainer side runs it concurrently."""
-    thread = threading.Thread(target=llm.collective_rpc, args=(method,), kwargs={"args": args})
-    thread.start()
-    broadcast()
-    thread.join()
+def rpc_during(llm, method, args, trainer_side):
+    """The worker's RPC blocks on the collective, so the trainer side must run concurrently."""
+    rpc = threading.Thread(target=llm.collective_rpc, args=(method,), kwargs={"args": args})
+    rpc.start()
+    trainer_side()
+    rpc.join()
 
 
 def refit_from_checkpoint(llm, group, model_dir, bracket):
     if bracket:
         llm.collective_rpc("begin_weight_update")
-    metas, tensors = [], []
+    pending = []
 
     def flush():
-        flat = torch.cat([t.view(torch.uint8).view(-1) for t in tensors])
-        broadcast = lambda: group.broadcast(flat, src=0, stream=torch.cuda.current_stream())  # noqa: E731
-        rpc_while_broadcasting(llm, "update_weights_packed", (list(metas),), broadcast)
-        metas.clear()
-        tensors.clear()
+        flat = torch.cat([t.view(torch.uint8).view(-1) for _, t in pending])
+        metas = [(name, t.dtype, tuple(t.shape)) for name, t in pending]
+        rpc_during(
+            llm,
+            "update_weights_packed",
+            (metas,),
+            lambda: group.broadcast(flat, src=0, stream=torch.cuda.current_stream()),
+        )
+        pending.clear()
 
     for path in sorted(glob.glob(f"{model_dir}/*.safetensors")):
         with safe_open(path, "pt", device="cpu") as f:
             for name in f.keys():
                 tensor = f.get_tensor(name).cuda()
-                if tensors and sum(t.nbytes for t in tensors) + tensor.nbytes >= 512 << 20:
+                if pending and sum(t.nbytes for _, t in pending) + tensor.nbytes >= 512 << 20:
                     flush()
-                metas.append((name, tensor.dtype, tuple(tensor.shape)))
-                tensors.append(tensor)
+                pending.append((name, tensor))
     flush()
     if bracket:
         llm.collective_rpc("end_weight_update")
@@ -82,10 +81,11 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", required=True)
     parser.add_argument("--moe-backend", default=None)
-    parser.add_argument("--no-bracket", action="store_true", help="skip begin/end_weight_update (the old refit)")
+    parser.add_argument("--no-bracket", action="store_true", help="the old refit: plain load_weights flushes")
     args = parser.parse_args()
 
     torch.cuda.set_device(1)
+    engine_kwargs = {"moe_backend": args.moe_backend} if args.moe_backend else {}
     llm = LLM(
         args.model,
         worker_extension_cls="molt.trainer.vllm.vllm_worker_wrap.WorkerWrap",
@@ -93,32 +93,28 @@ def main():
         max_model_len=1024,
         enable_prefix_caching=False,
         seed=0,
-        **({"moe_backend": args.moe_backend} if args.moe_backend else {}),
+        **engine_kwargs,
     )
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]
-    group = None
-
-    def join_group():
-        nonlocal group
-        group = stateless_init_process_group("127.0.0.1", port, 0, 2, torch.device("cuda:1"))
-
-    rpc_while_broadcasting(llm, "init_process_group", ("127.0.0.1", port, 1, 2, "refit", "nccl"), join_group)
+    group = []
+    rpc_during(
+        llm,
+        "init_process_group",
+        ("127.0.0.1", port, 1, 2, "refit", "nccl"),
+        lambda: group.append(stateless_init_process_group("127.0.0.1", port, 0, 2, torch.device("cuda:1"))),
+    )
 
     before = greedy_logprobs(llm)
-    refit_from_checkpoint(llm, group, args.model, bracket=not args.no_bracket)
+    refit_from_checkpoint(llm, group[0], args.model, bracket=not args.no_bracket)
     after = greedy_logprobs(llm)
 
-    same_tokens = [t for t, _ in sum(before, [])] == [t for t, _ in sum(after, [])]
-    max_delta = (
-        max(abs(a - b) for (_, a), (_, b) in zip(sum(before, []), sum(after, []))) if same_tokens else float("inf")
-    )
+    same_tokens = [t for t, _ in before] == [t for t, _ in after]
+    max_delta = max(abs(a - b) for (_, a), (_, b) in zip(before, after)) if same_tokens else float("inf")
     ok = same_tokens and max_delta < 0.05
     print(
-        f"{'PASS' if ok else 'FAIL'} moe_backend={args.moe_backend} bracket={not args.no_bracket} "
-        f"same_tokens={same_tokens} max|dlogprob|={max_delta:.3g}",
-        flush=True,
+        f"{'PASS' if ok else 'FAIL'} moe_backend={args.moe_backend} bracket={not args.no_bracket} max|dlogprob|={max_delta:.3g}"
     )
     sys.exit(0 if ok else 1)
 

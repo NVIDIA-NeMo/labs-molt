@@ -740,9 +740,8 @@ if __name__ == "__main__":
         "--vllm.moe_backend",
         type=str,
         default=None,
-        help="Optional vLLM fused-MoE kernel backend (triton, flashinfer_trtllm, flashinfer_cutlass, ...; "
-        "default lets vLLM choose, FlashInfer TRT-LLM for bf16 MoE on Blackwell). `triton` keeps the "
-        "checkpoint weight layout and needs no JIT.",
+        help="Optional vLLM fused-MoE kernel backend (triton, flashinfer_trtllm, flashinfer_cutlass; default: "
+        "vLLM's choice, FlashInfer TRT-LLM for bf16 MoE on Blackwell).",
     )
     parser.add_argument(
         "--vllm.block_size",
