@@ -17,7 +17,7 @@
 fixed set of sequences must not change beyond the kernel's own run-to-run noise.
 
 Without begin/end_weight_update (--no-bracket) FlashInfer MoE backends keep the checkpoint layout under a kernel
-that expects its own and generate garbage, although every weight "loaded". Two GPUs: engine on 0, trainer stand-in on 1.
+that expects its own and generate garbage, although every weight "loaded". Two GPUs: engine on 0, trainer on 1.
 
     python3 tests/e2e/check_vllm_refit_layout.py --model <hf dir> --moe-backend flashinfer_trtllm [--no-bracket]
 """
