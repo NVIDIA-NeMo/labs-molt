@@ -74,9 +74,8 @@ class WorkerWrap:
         weights = [
             (name, part.view(dtype).view(*shape)) for (name, dtype, shape), part in zip(metas, buf.split(sizes))
         ]
-        # A layer whose last weight arrives in this flush is processed right here (see
-        # begin_weight_update), and that processing may read the engine's vLLM config.
-        with set_current_vllm_config(self.vllm_config), torch.device(self.device):
+        # A layer whose last weight lands in this flush is processed right here (begin_weight_update).
+        with set_current_vllm_config(self.vllm_config):
             loaded = self.model_runner.model.load_weights(weights=weights)
         # Collect the names vLLM says it assigned, for the exact by-name coverage check
         # (--train.check_weight_update_equal). Only armed between reset/report calls.
@@ -100,29 +99,26 @@ class WorkerWrap:
         del buf
 
     def begin_weight_update(self):
-        """Defer vLLM's post-load weight processing until ``end_weight_update``.
+        """Defer vLLM's post-load weight processing to the end of this refit.
 
-        MoE kernels may rewrite the expert weights after loading (FlashInfer TRT-LLM packs
-        them into a block layout, FlashInfer CUTLASS swaps the gate/up halves), so a refit of
-        plain ``load_weights`` calls would leave checkpoint-layout bytes under a kernel that
-        reads the processed layout. vLLM's layerwise reload buffers each layer's loads,
-        re-runs its processing once the layer is complete and copies the result back into
-        the storage the CUDA graphs captured (vllm-project/vllm#54699).
+        MoE kernels may rewrite expert weights after loading (FlashInfer TRT-LLM packs them into
+        a block layout, FlashInfer CUTLASS swaps the gate/up halves), so plain ``load_weights``
+        flushes would leave checkpoint-layout bytes under a kernel that reads the processed
+        layout. vLLM's layerwise reload re-runs the processing once a layer is complete and
+        copies the result back into the CUDA-graph storage (vllm-project/vllm#54699).
         """
-        import torch
         from vllm.config import set_current_vllm_config
         from vllm.model_executor.model_loader.reload import initialize_layerwise_reload
 
-        with set_current_vllm_config(self.vllm_config), torch.device(self.device):
+        with set_current_vllm_config(self.vllm_config):
             initialize_layerwise_reload(self.model_runner.model)
 
     def end_weight_update(self):
         """Process the layers the broadcast left incomplete; restore the ones it never touched."""
-        import torch
         from vllm.config import set_current_vllm_config
         from vllm.model_executor.model_loader.reload import finalize_layerwise_reload
 
-        with set_current_vllm_config(self.vllm_config), torch.device(self.device):
+        with set_current_vllm_config(self.vllm_config):
             finalize_layerwise_reload(self.model_runner.model, self.model_config)
 
     def reset_weight_update_check(self):

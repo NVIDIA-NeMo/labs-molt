@@ -59,7 +59,6 @@ def reload_calls(monkeypatch):
 
 def _worker():
     worker = WorkerWrap()
-    worker.device = "cpu"
     worker.vllm_config = object()
     worker.model_config = object()
     worker.model_runner = SimpleNamespace(model=object())
