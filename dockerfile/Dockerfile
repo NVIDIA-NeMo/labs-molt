@@ -113,8 +113,9 @@ RUN T=$(python -c "import torch; print(torch.__version__)") && \
 # --no-deps is REQUIRED (else pip hits ResolutionImpossible on torch). CPATH exposes torch's bundled
 # cudnn / nccl / mathdx headers; nvidia/cu13/include stays out: its CUDA runtime headers shadow the
 # toolkit's and nvcc 13.0's sm_103a host stubs then fail ("__cudaLaunch passed 2 arguments").
+# TE 2.19 dropped its cudnn-frontend submodule: setup.py needs the nvidia-cudnn-frontend wheel (header-only).
 ARG TE_COMMIT=v2.19.0
-RUN python -m pip install nvidia-mathdx==25.1.1 && \
+RUN python -m pip install nvidia-mathdx==25.1.1 nvidia-cudnn-frontend==1.31.0 && \
     git clone https://github.com/NVIDIA/TransformerEngine.git /opt/TransformerEngine && \
     cd /opt/TransformerEngine && git fetch origin "${TE_COMMIT}" && git checkout FETCH_HEAD && \
     git submodule update --init --recursive && \
