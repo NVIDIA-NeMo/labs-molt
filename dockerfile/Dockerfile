@@ -180,7 +180,7 @@ RUN apt-get update && apt-get install -y --allow-change-held-packages rdma-core 
     rm -rf /var/lib/apt/lists/* /opt/deepep.patch && cd / && rm -rf /opt/DeepEP
 # RDMA_CORE_HOME=/opt/rdma-core/build symlinks to the system (apt) rdma-core at runtime.
 
-# --- (e) vLLM 0.29.0 (cu130) ----------------------------------------------------
+# --- (e) vLLM 0.32.0 (cu130) ----------------------------------------------------
 # Pin the base cu130 torch trio via a constraints file so pip can never swap it; let pip
 # pull vLLM's cu13 kernel deps (flashinfer-cu13, nvidia-cutlass-dsl, etc.).
 # vllm[audio] (not bare vllm): the official Nemotron-Omni GA model carries a Parakeet
@@ -189,7 +189,7 @@ RUN apt-get update && apt-get install -y --allow-change-held-packages rdma-core 
 # vision-only RL and the encoder is frozen — but the weights must load. Torch-pinned so the
 # [audio] extra (librosa/soundfile; torchaudio already in base) can't swap the torch trio.
 # Baking it here removes the per-run, per-node rl_omni3 MOLT_INSTALL_AUDIO install.
-RUN python -m pip install -c /opt/torch-pin.txt "vllm[audio]==0.31.0"
+RUN python -m pip install -c /opt/torch-pin.txt "vllm[audio]==0.32.0"
 
 # --- VLM modeling-code runtime deps + molt requirements + fla -----------
 # setup.py resolves requirements.txt plus the AutoModel source selected by MOLT_AUTOMODEL (upstream,
