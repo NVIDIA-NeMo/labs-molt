@@ -17,7 +17,6 @@
 import gc
 import os
 from pathlib import Path
-import re
 import sys
 import time
 
@@ -45,8 +44,9 @@ class _Runner:
 
 
 def _plasma_mib():
-    summary = ray._private.internal_api.memory_summary(stats_only=True)
-    return int(re.search(r"Plasma memory usage (\d+) MiB", summary).group(1))
+    # The raylet debits the object_store_memory resource as objects are created and credits it as they are freed.
+    total = ray.cluster_resources()["object_store_memory"]
+    return (total - ray.available_resources()["object_store_memory"]) / 2**20
 
 
 def test_a_consumed_group_releases_its_heavy_objects():
