@@ -24,11 +24,16 @@ that expects its own and generate garbage, although every weight "loaded". Two G
 
 import argparse
 import glob
+import os
 import socket
 import sys
 import threading
 
-import torch
+# The packed-broadcast metas carry torch dtypes, which vLLM's default RPC serializer refuses (molt's
+# engine actor sets the same).
+os.environ.setdefault("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+import torch  # noqa: E402
 from safetensors import safe_open
 from vllm import LLM, SamplingParams
 
