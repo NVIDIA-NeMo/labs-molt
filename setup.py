@@ -24,7 +24,7 @@ _build_mode = os.getenv("MOLT_BUILD_MODE", "")
 # upstream commit trimmed to the backend molt uses, on this repo's automodel-slim branch; same package
 # name and API; the install follows that branch's head.
 AUTOMODEL = {
-    "upstream": "nemo-automodel @ git+https://github.com/NVIDIA-NeMo/Automodel.git@30dbab03194f6dc1e7f40c51c787dd721dce129a",
+    "upstream": "nemo-automodel @ git+https://github.com/NVIDIA-NeMo/Automodel.git@b9377eeeadbfd4f60a9ae579833924e42d5aeb8b",
     "slim": "nemo-automodel @ git+https://github.com/NVIDIA-NeMo/labs-molt.git@automodel-slim",
 }
 

@@ -109,15 +109,18 @@ RUN T=$(python -c "import torch; print(torch.__version__)") && \
     (python -m pip uninstall -y xgboost pynvml opencv-python-headless || true) && \
     python -m pip install -c /opt/torch-pin.txt "dion @ git+https://github.com/microsoft/dion.git"
 
-# --- (a) Transformer Engine release_v2.14 (source) ------------------------------
+# --- (a) Transformer Engine v2.19.0 (source; AutoModel main's TE_COMMIT and build flags) ----
 # --no-deps is REQUIRED (else pip hits ResolutionImpossible on torch). CPATH exposes
-# torch's bundled nvidia includes so cudnn.h / nccl.h resolve.
+# torch's bundled nvidia includes so cudnn.h / nccl.h resolve. The NVTE_* flags are AutoModel's
+# (docker/Dockerfile): framework build only, no metapackage, NCCL-EP off, no local version tag.
+ARG TE_COMMIT=v2.19.0
 RUN python -m pip install nvidia-mathdx==25.1.1 && \
     git clone https://github.com/NVIDIA/TransformerEngine.git /opt/TransformerEngine && \
-    cd /opt/TransformerEngine && git fetch origin release_v2.14 && git checkout FETCH_HEAD && \
-    git submodule init && git submodule update && \
+    cd /opt/TransformerEngine && git fetch origin "${TE_COMMIT}" && git checkout FETCH_HEAD && \
+    git submodule update --init --recursive && \
     CPATH="$(for d in ${SITE}/nvidia/*/include; do printf '%s:' "$d"; done)${CPATH:-}" \
-    NVTE_CUDA_ARCHS="${NVTE_CUDA_ARCHS}" NVTE_BUILD_THREADS_PER_JOB=8 \
+    NVTE_FRAMEWORK=pytorch NVTE_RELEASE_BUILD=0 NVTE_BUILD_METAPACKAGE=0 NVTE_WITH_NCCL_EP=0 NVTE_NO_LOCAL_VERSION=1 \
+    NVTE_CUDA_ARCHS="${NVTE_CUDA_ARCHS}" NVTE_BUILD_MAX_JOBS=8 NVTE_BUILD_THREADS_PER_JOB=8 \
         python -m pip install --no-cache-dir --no-build-isolation --no-deps -v . && \
     cd / && rm -rf /opt/TransformerEngine
 
@@ -206,7 +209,7 @@ RUN if [ "$INSTALL_TEST_DEPS" = "1" ]; then python -m pip install coverage pytes
         grep -ivE '^[[:space:]]*(dion|vllm|torch|torchvision|torchaudio|transformer[-_]engine|flash[-_]attn|flash[-_]linear[-_]attention|fla([-_]core)?|mamba[-_]ssm|causal[-_]conv1d|deep[-_]ep|ray)([=<>!~ ]|$)' \
         > /tmp/req.txt && cd / && \
     python -m pip install -c /opt/torch-pin.txt -r /tmp/req.txt && \
-    python -m pip install "ray[default]==2.55.0" && \
+    python -m pip install "ray[default]==2.59.0" && \
     python -m pip install --no-cache-dir --no-deps "flash-linear-attention==0.4.2" "fla-core==0.4.2" && \
     python -c "import importlib.util as u; assert u.find_spec('fla.ops.cp') and u.find_spec('fla.modules.convolution') and u.find_spec('fla.ops.gated_delta_rule'), 'fla CP ops missing'" && \
     rm -rf /tmp/molt /tmp/req.txt
