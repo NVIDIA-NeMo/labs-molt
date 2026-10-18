@@ -230,6 +230,8 @@ class RolloutRayActor:
         )
 
     async def begin_weight_update(self):
+        # The reload tears the model down layer by layer, so a step during the refit would be a bug.
+        assert await self.llm.is_paused(), "begin_weight_update needs pause_generation first"
         await self.llm.collective_rpc("begin_weight_update")
 
     async def end_weight_update(self):
