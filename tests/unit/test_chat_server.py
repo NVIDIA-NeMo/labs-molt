@@ -745,3 +745,10 @@ def test_chatml_turn_cut_by_length_gets_the_template_end_of_turn_in_the_feedback
     _drive(state, session, msgs)
     canonical = proc.encode(proc.apply_chat_template(msgs, add_generation_prompt=True))
     assert session.trajectories[0].observation_tokens[: len(canonical)] == canonical
+
+
+def test_chat_request_cannot_change_rollout_temperature_or_top_p():
+    base = SimpleNamespace(max_tokens=64, temperature=1.0, top_p=1.0, logprobs=None, min_tokens=0)
+    with pytest.warns(UserWarning, match="ignored"):
+        sp = cs._build_sampling_params(base, {"temperature": 0.2, "top_p": 0.5, "max_tokens": 7})
+    assert (sp.temperature, sp.top_p, sp.max_tokens, sp.logprobs) == (1.0, 1.0, 7, 1)
