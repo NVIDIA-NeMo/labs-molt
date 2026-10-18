@@ -229,6 +229,12 @@ class RolloutRayActor:
             args=(metas,),
         )
 
+    async def begin_weight_update(self):
+        await self.llm.collective_rpc("begin_weight_update")
+
+    async def end_weight_update(self):
+        await self.llm.collective_rpc("end_weight_update")
+
     async def reset_weight_update_check(self):
         await self.llm.collective_rpc("reset_weight_update_check")
 
@@ -290,6 +296,7 @@ def create_vllm_engines(
     mm_encoder_attn_backend: Optional[str] = None,
     gdn_prefill_backend: Optional[str] = None,
     attention_backend: Optional[str] = None,
+    moe_backend: Optional[str] = None,
     mamba_ssm_cache_dtype: Optional[str] = None,
     distributed_executor_backend: Optional[str] = None,
     enable_expert_parallel: bool = False,
@@ -467,6 +474,9 @@ def create_vllm_engines(
             # backend must be passed via EngineArgs (e.g. "TRITON_ATTN" to
             # avoid AOT-compiled FlashAttention 2 PTX kernels on older drivers).
             actor_kwargs["attention_backend"] = attention_backend
+
+        if moe_backend:
+            actor_kwargs["moe_backend"] = moe_backend
 
         if block_size:
             # KV cache block size (tokens). MiniMax-M3's MSA sparse attention

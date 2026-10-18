@@ -100,6 +100,7 @@ def train(args):
             mm_encoder_attn_backend=args.vllm.mm_encoder_attn_backend,
             gdn_prefill_backend=args.vllm.gdn_prefill_backend,
             attention_backend=args.vllm.attention_backend,
+            moe_backend=args.vllm.moe_backend,
             mamba_ssm_cache_dtype=args.vllm.mamba_ssm_cache_dtype,
             distributed_executor_backend=args.vllm.distributed_executor_backend,
             enable_expert_parallel=args.vllm.enable_expert_parallel,
@@ -734,6 +735,14 @@ if __name__ == "__main__":
         default=None,
         help="Optional vLLM attention backend (FLASH_ATTN/FLASHINFER/TRITON_ATTN/FLEX_ATTENTION). "
         "Pass TRITON_ATTN to bypass AOT-compiled FA2/FlashInfer kernels on older drivers.",
+    )
+    parser.add_argument(
+        "--vllm.moe_backend",
+        type=str,
+        default=None,
+        help="Optional vLLM fused-MoE kernel backend (triton, flashinfer_trtllm, flashinfer_cutlass, ...; "
+        "default lets vLLM choose, FlashInfer TRT-LLM for bf16 MoE on Blackwell). `triton` keeps the "
+        "checkpoint weight layout and needs no JIT.",
     )
     parser.add_argument(
         "--vllm.block_size",

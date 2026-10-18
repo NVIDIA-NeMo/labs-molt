@@ -947,7 +947,11 @@ class TrainingActor(BaseRLTrainer):
         _t0 = time.time()
         try:
             batch_vllm_engine_call(self.vllm_engines, "pause_generation")
+            # Post-load weight processing (MoE kernel layouts) is deferred across the
+            # flushes and run once the whole model has arrived; see WorkerWrap.
+            batch_vllm_engine_call(self.vllm_engines, "begin_weight_update")
             super().broadcast_to_vllm()
+            batch_vllm_engine_call(self.vllm_engines, "end_weight_update")
             if self._prefix_caching_enabled:
                 batch_vllm_engine_call(self.vllm_engines, "reset_prefix_cache")
             batch_vllm_engine_call(self.vllm_engines, "resume_generation")
