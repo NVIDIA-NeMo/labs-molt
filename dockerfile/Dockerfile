@@ -110,15 +110,15 @@ RUN T=$(python -c "import torch; print(torch.__version__)") && \
     python -m pip install -c /opt/torch-pin.txt "dion @ git+https://github.com/microsoft/dion.git"
 
 # --- (a) Transformer Engine v2.19.0 (source; AutoModel main's TE_COMMIT and build flags) ----
-# --no-deps is REQUIRED (else pip hits ResolutionImpossible on torch). CPATH exposes
-# torch's bundled nvidia includes so cudnn.h / nccl.h resolve. The NVTE_* flags are AutoModel's
-# (docker/Dockerfile): framework build only, no metapackage, NCCL-EP off, no local version tag.
+# --no-deps is REQUIRED (else pip hits ResolutionImpossible on torch). CPATH exposes torch's bundled
+# cudnn / nccl / mathdx headers; nvidia/cu13/include stays out: its CUDA runtime headers shadow the
+# toolkit's and nvcc 13.0's sm_103a host stubs then fail ("__cudaLaunch passed 2 arguments").
 ARG TE_COMMIT=v2.19.0
 RUN python -m pip install nvidia-mathdx==25.1.1 && \
     git clone https://github.com/NVIDIA/TransformerEngine.git /opt/TransformerEngine && \
     cd /opt/TransformerEngine && git fetch origin "${TE_COMMIT}" && git checkout FETCH_HEAD && \
     git submodule update --init --recursive && \
-    CPATH="$(for d in ${SITE}/nvidia/*/include; do printf '%s:' "$d"; done)${CPATH:-}" \
+    CPATH="$(for d in ${SITE}/nvidia/*/include; do case "$d" in */cu13/include) ;; *) printf '%s:' "$d";; esac; done)${CPATH:-}" \
     NVTE_FRAMEWORK=pytorch NVTE_RELEASE_BUILD=0 NVTE_BUILD_METAPACKAGE=0 NVTE_WITH_NCCL_EP=0 NVTE_NO_LOCAL_VERSION=1 \
     NVTE_CUDA_ARCHS="${NVTE_CUDA_ARCHS}" NVTE_BUILD_MAX_JOBS=8 NVTE_BUILD_THREADS_PER_JOB=8 \
         python -m pip install --no-cache-dir --no-build-isolation --no-deps -v . && \
