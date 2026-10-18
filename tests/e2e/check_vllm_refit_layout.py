@@ -42,11 +42,17 @@ def greedy_logprobs(llm):
 
 
 def rpc_during(llm, method, args, trainer_side):
-    """The worker's RPC blocks on the collective, so the trainer side must run concurrently."""
-    rpc = threading.Thread(target=llm.collective_rpc, args=(method,), kwargs={"args": args})
-    rpc.start()
-    trainer_side()
-    rpc.join()
+    """The worker's RPC blocks on the collective, so the trainer side runs on a helper thread; the
+    engine client's sockets are not thread-safe, so the RPC itself stays on the main thread."""
+
+    def on_trainer_gpu():
+        torch.cuda.set_device(1)  # the CUDA device is per thread
+        trainer_side()
+
+    thread = threading.Thread(target=on_trainer_gpu)
+    thread.start()
+    llm.collective_rpc(method, args=args)
+    thread.join()
 
 
 def refit_from_checkpoint(llm, group, model_dir, bracket):
