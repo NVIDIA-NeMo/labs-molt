@@ -220,18 +220,17 @@ RUN if [ "$INSTALL_TEST_DEPS" = "1" ]; then python -m pip install coverage pytes
 # real keys with the -1 sentinel, which causal top-k always produces. vLLM 0.28+ hard-pins
 # tilelang==0.1.12; this step deliberately downgrades it back (pip warns) — 0.1.12 is
 # unvalidated for the DSA backward, so keep this step AFTER the vLLM install.
-RUN python -m pip install --no-cache-dir "tilelang==0.1.11" "tile-kernels==1.0.0" "apache-tvm-ffi<=0.1.11"
+RUN python -m pip install --no-cache-dir "tilelang==0.1.12" "tile-kernels==1.0.0" "apache-tvm-ffi<=0.1.11"
 # Keep the kernel JIT cache under the bind-mounted /root/.cache; the default ~/.tilelang
 # is container-local, so every job would recompile the DSA kernels from scratch.
 ENV TILELANG_CACHE_DIR=/root/.cache/tilelang
 
-# vLLM pins nvidia-cutlass-dsl (0.28/0.29 -> 4.6.2); the cutlass.cute DSL API moves between
-# releases, and the quack-kernels that dion pulls can lag it and then AttributeError at
-# import, taking `import mamba_ssm` (mamba3 -> quack) down with it. Pin quack to the
-# 4.6.2-compatible 0.6.4 (AutoModel pins the same version since 67393519).
-# -c reuses the torch-trio pin from build start + cutlass 4.6.2 so this can't perturb the stack.
-RUN { cat /opt/torch-pin.txt; echo 'nvidia-cutlass-dsl==4.6.2'; } > /tmp/pin.txt && \
-    python -m pip install -c /tmp/pin.txt "quack-kernels==0.6.4" && rm -f /tmp/pin.txt
+# vLLM 0.32 pins nvidia-cutlass-dsl 4.8.0 and quack-kernels 0.6.5; AutoModel's nemo-automodel metadata still asks for
+# quack 0.6.4 (cutlass 4.6.2), which the molt step above installed last. A 4.6.2 DSL under vLLM 0.32's CuTe router
+# GEMM fails MLIR verification at engine warmup on Hopper/Blackwell ("nvvm.mbarrier.arrive op operand count"), so
+# the runtime wins: re-pin both to vLLM's versions (quack 0.6.5 accepts cutlass >= 4.7). -c keeps the torch trio.
+RUN { cat /opt/torch-pin.txt; echo 'nvidia-cutlass-dsl==4.8.0'; } > /tmp/pin.txt && \
+    python -m pip install -c /tmp/pin.txt "nvidia-cutlass-dsl[cu13]==4.8.0" "quack-kernels==0.6.5" && rm -f /tmp/pin.txt
 
 # --- restore DeepEP's NVSHMEM ABI ----------------------------------------------
 # DeepEP (step c) built deep_ep_cpp.so against nvidia-nvshmem-cu13==3.6.5, but vLLM's dep set
