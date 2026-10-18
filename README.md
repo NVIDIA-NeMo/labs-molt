@@ -564,7 +564,7 @@ Molt targets AutoModel custom models with FSDP2.
 
 | Mode | Flag | Note |
 |---|---|---|
-| Router replay (R3) | `--train.routing_replay` | details in [Deep dives](#-deep-dives) |
+| Router replay (R3) | `--train.routing_replay` | turns on prefix caching (vLLM's capture requires it); details in [Deep dives](#-deep-dives) |
 | Router freeze | `--actor.freeze_moe_router` | |
 
 Context parallelism is delegated to AutoModel's `ContextParallelSharder`, so each model gets the sharding

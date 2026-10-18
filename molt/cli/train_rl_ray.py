@@ -922,7 +922,8 @@ if __name__ == "__main__":
         default=False,
         help="R3: capture the rollout router's per-token expert selection (vLLM) and replay it in "
         "the training forward (AutoModel RouterReplay) so MoE training/rollout routing match. "
-        "MoE models only; incompatible with --train.partial_rollout_enable (preemption drops routing).",
+        "MoE models only; turns on --vllm.enable_prefix_caching (the capture requires it); incompatible "
+        "with --train.partial_rollout_enable (preemption drops routing).",
     )
     # Debug / repro: dump a rollout batch and replay it train-only (skip generation) to
     # iterate on the training+refit path in isolation; check_weight_update_equal checks every broadcast.
@@ -1170,6 +1171,12 @@ if __name__ == "__main__":
         # rollout preempts in-flight requests at every weight sync -> the routing
         # for those tokens would be lost. Keep partial rollout off under R3.
         raise ValueError("--train.routing_replay is incompatible with --train.partial_rollout_enable.")
+
+    if args.train.routing_replay and not args.vllm.enable_prefix_caching:
+        # vLLM's routed-experts capture (the AuxOutput connector) refuses to start without prefix
+        # caching; the trainer invalidates the cache after every weight broadcast either way.
+        print("[routing_replay] enabling --vllm.enable_prefix_caching: vLLM's routed-experts capture requires it.")
+        args.vllm.enable_prefix_caching = True
 
     if args.train.routing_replay and args.vllm.mtp_num_speculative_tokens > 0:
         # The engine's routed-experts capture misaligns under speculative decoding:
