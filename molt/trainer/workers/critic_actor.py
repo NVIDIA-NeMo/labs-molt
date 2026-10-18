@@ -362,6 +362,19 @@ class CriticModelActor(BaseModelActor):
     def get_checkpoint_states(self):
         return self.checkpoint_states
 
+    def promote_best_checkpoint(self, step, tag, client_states, metric_value, metric_key):
+        """Link the rolling checkpoint of ``step`` as ``tag``; True (from rank 0) when it was still on disk."""
+        promoted = torch.distributed.get_rank() != 0 or self.strategy.checkpoint.promote_best(
+            os.path.join(self.strategy.args.ckpt.path, "_critic"),
+            f"global_step{step}",
+            tag,
+            client_states,
+            metric_value,
+            metric_key,
+        )
+        torch_dist_barrier_and_cuda_sync()
+        return promoted
+
     def save_checkpoint(self, tag, client_states=None, metric_value=None, metric_key=None):
         args = self.strategy.args
         # Resumable DCP checkpoint only — the critic is a value model, never an

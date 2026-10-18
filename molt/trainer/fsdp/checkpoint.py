@@ -289,6 +289,25 @@ class CheckpointManager:
                 break
             shutil.rmtree(candidates[0][0], ignore_errors=True)
 
+    def promote_best(
+        self, ckpt_path: str, src_tag: str, dst_tag: str, client_states, metric_value, metric_key
+    ) -> bool:
+        """Hard-link the rolling checkpoint ``src_tag`` as ``dst_tag`` (same bytes, no copy; rank 0 only) and
+        stamp it with the eval result. False when that rolling checkpoint is no longer on disk."""
+        import shutil
+
+        src, dst = os.path.join(ckpt_path, src_tag), os.path.join(ckpt_path, dst_tag)
+        if not self._is_loadable_ckpt_dir(src):
+            return False
+        shutil.copytree(src, dst, copy_function=os.link, dirs_exist_ok=True)
+        extra = torch.load(os.path.join(src, "extra_state.pt"), weights_only=False)
+        extra["client_state"].update(client_states)
+        # atomic writes replace the directory entries, so the linked source files stay untouched
+        self._atomic_write_torch(os.path.join(dst, "extra_state.pt"), extra)
+        self._write_ckpt_metric(dst, metric_value, metric_key)
+        self._prune_checkpoints(ckpt_path, dst_tag, 0, 0, is_best=True)
+        return True
+
     def save_ckpt(
         self,
         model: nn.Module,

@@ -16,6 +16,7 @@
 import asyncio
 import copy
 import os
+import shutil
 import statistics
 import time
 from typing import Dict, Tuple
@@ -515,6 +516,34 @@ class BaseRLTrainer:
             client_states["checkpoint_metric_key"] = metric_key
 
             tag = f"best_global_step{global_step}"
+            # The eval scored the policy of `global_step`, but training has moved on since (up to async_queue_size
+            # steps), so the best checkpoint is that step's rolling checkpoint, not the live weights.
+            groups = [g for g in (self.actor_model_group, self.critic_model_group) if g is not None]
+            best_keys = ("best_eval_metric_key", "best_eval_metric_value", "checkpoint_metric_key")
+            promoted = [
+                ray.get(
+                    g.async_run_method(
+                        method_name="promote_best_checkpoint",
+                        step=global_step,
+                        tag=tag,
+                        client_states={k: client_states[k] for k in best_keys},
+                        metric_value=current_value,
+                        metric_key=metric_key,
+                    )
+                )[0]
+                for g in groups
+            ]
+            if all(promoted):
+                logger.info(
+                    f"Saved best checkpoint: {tag} ({metric_key}={current_value:.4f}, linked from global_step{global_step})"
+                )
+                return
+            for sub in ("_actor", "_critic"):
+                shutil.rmtree(os.path.join(self.args.ckpt.path, sub, tag), ignore_errors=True)
+            logger.warning(
+                f"[best] no rolling checkpoint for step {global_step} (--ckpt.save_steps / --ckpt.dcp_max_num); saving the "
+                f"live weights of step {client_states.get('global_step')} as {tag} instead"
+            )
             refs = self.actor_model_group.async_run_method(
                 method_name="save_checkpoint",
                 tag=tag,
