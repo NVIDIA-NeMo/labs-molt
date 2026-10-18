@@ -146,14 +146,14 @@ RUN for repo in "https://github.com/Dao-AILab/causal-conv1d.git@v1.6.2@/opt/caus
             python -m pip install --no-build-isolation --no-deps . && cd /; \
     done && rm -rf /opt/causal-conv1d /opt/mamba
 
-# --- (c) DeepEP — AutoModel automodel_dep recipe (NVIDIA-NeMo/Automodel PR#2614, #2678) -
-# Build DeepEP at commit 42144303 (== 17cfb817 + DeepEP #638) against the NVSHMEM wheel
-# (3.6.5). #638 pads the HybridEP max_num_of_tokens_per_rank up to the combine-kernel chunk
-# size, so a per-rank token count not a multiple of 64 (e.g. 672) no longer fails the
-# combine-kernel static_assert (MAX_NUM_OF_TOKENS_PER_RANK % NUM_OF_TOKENS_PER_CHUNK == 0).
-# The NVSHMEM wheel (3.6.5) MATCHES the
-# apt rdma-core/libibverbs runtime (the prior 3.4.5-vs-source-rdma-core mismatch made
-# the cross-node EP>8 / EP16 internode IBGDA transport fail to init -> dispatch hang).
+# --- (c) DeepEP — AutoModel automodel_dep recipe (NVIDIA-NeMo/Automodel docker/Dockerfile) -----------
+# Same DeepEP commit and patch as the AutoModel pin: its HybridEP dispatcher (fused_a2a.py, molt's default
+# MOLT_MOE_DISPATCHER) is tested against this commit, which carries the HybridEP fixes (overflow flag
+# zero-init, ragged dispatch, C++ standard inherited from torch; #638's padding of max_num_of_tokens_per_rank
+# to the combine-kernel chunk size is included). deepep.patch is AutoModel's: CUDA 13 CCCL include dir,
+# nvidia-ml-py, and the NVSHMEM >= 3.5.19 RC-QP layout of the 3.6.5 wheel built against here.
+# The NVSHMEM wheel (3.6.5) MATCHES the apt rdma-core/libibverbs runtime (the prior 3.4.5-vs-source-rdma-core
+# mismatch made the cross-node EP>8 / EP16 internode IBGDA transport fail to init -> dispatch hang).
 # RDMA_CORE_HOME is symlinked to the system (apt) install so build==runtime libibverbs,
 # plus the libnvshmem_host.so->.so.3 + libmlx5.so->.so.1 symlinks DeepEP's fabric-handle
 # ops require. nvshmem cu13.
@@ -167,14 +167,14 @@ RUN apt-get update && apt-get install -y --allow-change-held-packages rdma-core 
     ln -sfn /usr/lib/${ARCH_LIB} ${RDMA_CORE_HOME}/lib && \
     git clone https://github.com/deepseek-ai/DeepEP.git /opt/DeepEP && \
     cd /opt/DeepEP && \
-    git fetch origin 42144303752422ade37f24bca9e2dde12df70e09 && git checkout FETCH_HEAD && \
+    git fetch origin 10d4dd7377d5bce900fbb4b80cce863764892b95 && git checkout FETCH_HEAD && \
     patch -p1 < /opt/deepep.patch && \
     python -m pip install --no-cache-dir nvidia-nvshmem-cu13==3.6.5 && \
     NVSHMEM_LIB_PATH=$(pip show nvidia-nvshmem-cu13 | grep "Location:" | cut -d' ' -f2)/nvidia/nvshmem/lib && \
     ln -sf ${NVSHMEM_LIB_PATH}/libnvshmem_host.so.3 ${NVSHMEM_LIB_PATH}/libnvshmem_host.so && \
     env RDMA_CORE_HOME=${RDMA_CORE_HOME} HYBRID_EP_MULTINODE=1 \
         LD_LIBRARY_PATH=/usr/local/cuda/lib64/:${LD_LIBRARY_PATH:-} \
-        TORCH_CUDA_ARCH_LIST="${DEEPEP_ARCH_LIST}" MAX_JOBS=8 \
+        CPLUS_INCLUDE_PATH=/usr/local/cuda/include/cccl TORCH_CUDA_ARCH_LIST="${DEEPEP_ARCH_LIST}" MAX_JOBS=8 \
         python -m pip install --no-cache-dir --no-build-isolation -v . && \
     apt-get purge -y libnvidia-ml-dev && apt-get autoremove -y && \
     rm -rf /var/lib/apt/lists/* /opt/deepep.patch && cd / && rm -rf /opt/DeepEP
