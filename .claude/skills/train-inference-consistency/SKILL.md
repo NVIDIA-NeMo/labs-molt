@@ -1,13 +1,15 @@
 ---
 name: train-inference-consistency
-description: Make molt's training forward produce bitwise-identical per-token logprobs to vLLM's rollout (true on-policy RL) for a given model, validate it with the gate workflow (C0–C10), diagnose train/rollout mismatch, and recover throughput. Invoke for any "mismatch/bitwise_frac is not 0", "vllm_kl is not 0", "batch-invariant", "aligned kernels", or new-model consistency task.
+description: Make molt's training forward produce bitwise-identical per-token logprobs to vLLM's rollout (true on-policy RL) for a given model, validate it with the gate workflow (C0–C10), diagnose train/rollout mismatch, and recover throughput to within the 20 % rollout budget. Invoke for any "mismatch/bitwise_frac is not 0", "vllm_kl is not 0", "batch-invariant", "aligned kernels", or new-model consistency task.
 ---
 
 # Train–inference consistency
 
 Goal: for every valid response token, the logprob the trainer recomputes under the same weights equals the
 logprob vLLM returned when it sampled the token — the same bytes in the original dtype,
-`mismatch/bitwise_frac = 0`, at every RL step. Then bring throughput back toward the BI=0 baseline.
+`mismatch/bitwise_frac = 0`, at every RL step. Then bring rollout throughput back to within the
+[performance budget](acceptance.md#performance-budget): the aligned arm loses at most 20 % of the BI=0
+arm's rollout tokens/s.
 
 Where the code is: `main` has the measurement side — the `mismatch/*` metrics, rollout dump and replay, the
 engine and trainer flags in molt-integration.md. The aligned kernels behind `--train.batch_invariant` exist
@@ -66,6 +68,9 @@ An inference-only or forward-parity task runs a subset of the gates: [task scope
 - Never change tokens, weights, geometry, precision or tolerances to make a comparison pass.
 - Inference defines the value: never detach an inference output and train on it, and never rewrite
   arithmetic to imitate a kernel — call the kernel.
+- Performance budget: the BI=1 arm's rollout deficit `1 − T_BI1/T_BI0` is at most 20 % at every formal `c`
+  ([performance budget](acceptance.md#performance-budget)); over budget is `fail`, and only a human
+  tightens or waives it, in writing.
 - Human stop points: freeze the BI=0 baseline (after C1) and review the full-model recipe (before C9). Ask
   before requesting GPUs, stopping jobs, publishing images or writing to other repos.
 - Code changes follow `simplicity-first`; with the switch off, the BI=0 path stays byte-identical to before.
@@ -79,6 +84,7 @@ One sense per term, used in every file.
 | A/A | the same input scored twice on one side: run-to-run determinism |
 | A/C | the same sequences scored with other neighbours, order or packing: batch and layout invariance |
 | AC | activation checkpointing (`--actor.gradient_checkpoint`) |
+| aligned mode | the `--train.batch_invariant` path: invariant engine kernels plus the aligned trainer forward; the BI=1 arm runs it |
 | arm | one side of a paired run: the BI=0 arm and the BI=1 arm of the recipe; the three SFT arms of C7 |
 | BI | batch invariance: a request's bytes do not depend on batch-mates; BI=0 / BI=1 = the switch off / on |
 | BI=0 baseline | the human-frozen C1 measurement of the BI=0 arm (config, throughput, mismatch) |
@@ -86,6 +92,7 @@ One sense per term, used in every file.
 | candidate | the build under evaluation — code, image, resolved config; one ledger row per closure |
 | closure | execution closure: the fields that bound a result — geometry, weights, source/image, precision, layout, graph/eager, cache state |
 | DCP | torch distributed checkpoint, the format molt saves under `--ckpt.path` |
+| deficit | the paired rollout throughput loss `1 − T_BI1/T_BI0` at one `c`; the budget caps it at 20 % |
 | false green | a `pass` that is not evidence: nothing executed, 0 by construction, the wrong path ran |
 | IS | importance sampling: the per-token ratio π_old/μ the loss multiplies (`--algo.advantage.is_correction_*`) |
 | k3 | the `exp(d) − 1 − d` KL estimator behind `mismatch/k3_kl` |
