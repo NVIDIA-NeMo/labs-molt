@@ -11,7 +11,7 @@ recorded, in molt terms; the operational short form — planted error and false 
 |---|---|---|
 | `pass` | every declared item of the scope completed and met its criterion | — |
 | `fail` | a numerical comparison or a criterion failed | the first failing item |
-| `inconclusive` | the check did not answer | *invalid*: the target path did not run (aligned kernel not dispatched, patched class not instantiated, forward skipped, rollout logprobs never requested); *vacuous*: zero hits (no valid tokens, no sequence crossed the boundary, no token reached the expert); *fault*: Ray actor lost, NCCL timeout, OOM |
+| `inconclusive` | the check did not answer | *invalid*: the target path did not run (aligned kernel not dispatched, patched class not instantiated, forward skipped, rollout logprobs never reached the trainer); *vacuous*: zero hits (no valid tokens, no sequence crossed the boundary, no token reached the expert); *fault*: Ray actor lost, NCCL timeout, OOM |
 | `not run` | out of scope or not executed; never `pass` | the scope decision |
 
 The [ledger](#candidate-evidence-ledger) additionally marks rows *superseded* (closure changed since) or
@@ -91,7 +91,7 @@ control. Recipe and coverage record (recover missing items from the existing con
 | Hardware | GPU count, memory, interconnect; trainer `--fsdp.{tp,cp,ep}_size` and engine `--vllm.tensor_parallel_size` / `--vllm.enable_expert_parallel` separately |
 | Numerics | fp32 masters, `--fsdp.param_dtype`, activation, KV and `--vllm.mamba_ssm_cache_dtype`, accumulation and gradient dtype; [FP8](contracts.md#fp8) route if any |
 | Scope | Sampled-token logprob or full vocabulary; graph/eager, cache, lengths and layouts covered |
-| Budget | Throughput, peak memory, quality and gradient criteria, experiment count, stop condition; unknown threshold → report, no pass |
+| Budget | Throughput (rollout deficit ≤ 20 % unless a human set another: [performance budget](acceptance.md#performance-budget)), peak memory, quality and gradient criteria, experiment count, stop condition; unknown threshold → report, no pass |
 
 - Measure the config at hand first; the fixed-workload bench ([acceptance.md](acceptance.md#performance))
   never replaces the target context and natural lengths. The proxy records full-model feature → proxy

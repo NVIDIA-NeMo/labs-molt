@@ -13,9 +13,9 @@ only difference is `--train.batch_invariant` and what it implies (engine kernels
 | BI=0 arm | default kernels, graphs on | default `BackendConfig` | identical to BI=1 | the recipe's measured `bitwise_frac` (≈ 1) and `abs_diff_mean`: the BI=0 baseline |
 | BI=1 arm | invariant kernels, `TRITON_ATTN`, R3 on for MoE | aligned forward | the recipe's own, else the non-binding token rule | `bitwise_frac` 0 at every synchronous step; the lag floor when asynchronous |
 
-- One correction rule: both arms run identical IS settings — the recipe's own, else the non-binding token
-  rule — so rollout logprobs and `mismatch/*` exist in both arms; the report declares the ratio-weight
-  confounder and checks the sequence-mask false green ([rollout
+- One correction rule: both arms run the recipe's own IS settings. `mismatch/*` exist either way — molt
+  requests rollout logprobs on every path — so the rule is about the loss: when a ratio is in it the report
+  declares the ratio-weight confounder and checks the sequence-mask false green ([rollout
   logprobs](molt-integration.md#rollout-logprobs)).
 - Preconditions: the reference implementation guards `--fsdp.cp_size 1`; CP > 1 needs the [CP
   note](training-side.md#layout-length-and-world-size). An EP/TP pair is supported only with the
@@ -52,7 +52,7 @@ FORCE_ON_POLICY=<as frozen>   # 1 in the shipped recipe: then C5 path (a) is `no
 # Steps: ceil(max_samples / rollout.batch_size) × num_episodes × max_epochs (rl_trainer.py).
 # Three rollouts give the θ0, θ1, θ2 compares: --data.max_samples = steps × --rollout.batch_size.
 MAX_SAMPLES=24 NUM_EPISODES=1
-# IS rule, identical in both arms: the recipe's own (geo mask here), else the non-binding token rule
+# IS rule, identical in both arms: the recipe's own (geo mask here)
 --algo.advantage.is_correction_level geo --algo.advantage.is_correction_threshold 0.95 1.05
 # Engine: R3 may need prefix caching (molt-integration.md#facts-bound-to-the-pinned-vllm); explicit
 # defaults so the arm diff shows only the switch
@@ -76,7 +76,7 @@ BI=0 integration pitfalls, re-checked per model:
 |---|---|
 | A default that silently changes with the switch (attention backend, `enforce_eager`, prefix caching, `logprobs_mode`, compile mode) | Resolve every default explicitly so the diff shows only the switch |
 | A cache or graph setting that differs (CUDA-graph mode, prefix cache, compile cache) | Same in both arms, or a quantified confounder |
-| A metric that exists in one arm only (`mismatch/*` need rollout logprobs; a blank cell reads as 0) | The one correction rule above: both arms request them every step |
+| A metric that exists in one arm only (a blank cell reads as 0) | Same agent path and logging flags in both arms; `mismatch/*` come with every molt rollout path |
 | A packing path that differs (`cu_seqlens`, THD style, HybridEP padding) | Same path in both arms; a stateful layer scans the pack as one sequence |
 | Training-only model defaults (router training vs `--actor.freeze_moe_router`, MTP head, frozen modules) | Pinned for both arms; trainable set listed |
 
@@ -179,6 +179,38 @@ chain](contracts.md#weights-and-precision-chain)).
   gain; gains of A and B do not add; skipping the old-logprob forward (`--train.force_on_policy` with
   `--algo.kl.init_coef 0`) is an algorithm choice, not a BI gain.
 
+### Performance budget
+
+The target is fixed: on the delivered image the BI=1 arm keeps at least 80 % of the BI=0 arm's rollout
+tokens/s — `deficit = 1 − T_BI1/T_BI0 ≤ 20 %` at every formal `c`, as the paired median of [pairing and
+computation](#pairing-and-computation) on the fixed workload. It goes into the C1 freeze; a human may
+tighten it, and only a human may waive it, in writing with the reason. The trainer forward+backward
+overhead has no default budget: measured, reported and agreed at C1.
+
+Over budget the candidate is not delivered: C10 stays open (E2E profile → micro bench → paired E2E, the
+breakdown and order of work below), each change regressed bitwise; if the budget still does not hold, the
+report says `fail` with the per-`c` numbers and the smallest next experiment.
+
+Where the budget usually goes — the unoptimised aligned arm starts near 2× slower ([reference
+measurements](molt-integration.md#reference-measurements)) — in the order to spend effort:
+
+1. Graphs first: the BI=1 engine captures and replays the same CUDA-graph mode as BI=0
+   (`cudagraph_mode=FULL`); eager decode alone typically costs more than the whole budget, so the C3 graph
+   cell precedes any kernel work.
+2. Structural defects (C4): per-token launches, host syncs (`.item()`, `max()` of token counts), workspace
+   or index allocation per call, repeated copies.
+3. Attention: segment constants chosen on the end-to-end A/B, not the micro bench (micro-best lost 8–11 %
+   end to end); fp32 partial buffers sized once by the context ceiling.
+4. MoE: one pinned tile config per shape class, single-tactic grouped GEMM, the router gate GEMM pinned to
+   one path on both sides ([operator details](molt-integration.md#operator-details)).
+5. Linear: the Triton persistent matmul's tile table tuned per M class; when the generic batch-invariant
+   mode cannot fit, the blog route — the deployment kernels made invariant (DeepGEMM batch-invariant mode,
+   fixed split-KV) — is the C1/C10 cost decision per model ([the aligned
+   mode](molt-integration.md#the-aligned-mode)).
+6. What remains goes upstream to vLLM as one shared implementation ([kernel
+   rules](contracts.md#kernel-changes-rules-for-an-operator-author)); a trainer-only kernel closes no
+   rollout gap.
+
 Fair A/B:
 
 - Two kinds, never mixed: the causal comparison of the switch (same software, scheduling, cache; only the
@@ -227,6 +259,9 @@ Ablation:
   after rollout when only rollout is measured. Segment-by-segment isolation: arms enabled up to each
   boundary (all off / capture only / worker data plane / IPC / return path / all on) whose differences add
   back up to all on − all off, else interaction or dirty cut.
+
+Order of work:
+
 - Priorities: idle and repeated work → host sync and launches, graph restored → fused boundaries keeping
   rounding, order and sentinels → only then algorithms, chunking or collectives (new equivalence evidence).
 - Gates per candidate: same-input kernel comparison (real dtype/shape, masked layout, empty experts, ties,
@@ -427,7 +462,7 @@ evidence stays `unknown`.
 | C8 θ0 / θ1 / θ2 compares; two effective updates (per θ: mask identity, valid tokens, `bitwise_frac`, forward executed, update norm) | | | | | |
 | C9 first post-resume refit and compare | | | | | |
 | C10 paired quality | | | | | |
-| C10 paired performance per `c` | | | | | |
+| C10 paired performance per `c`: deficit ≤ 20 % | | | | | |
 | Clean exit (recipe exit code; worker exit at final shutdown) | | | | | |
 | Final immutable image, no overlays | | | | | |
 
@@ -450,7 +485,8 @@ evidence stays `unknown`.
 
 ## Performance
 - Basis (rollout tok/s | fwd+bwd | makespan); matched work; node, order, repeats
-- Formula and aggregate per `c`; raw pairs; exclusions and the invalid-leg rule
+- Formula and aggregate per `c` against the 20 % budget (waiver id if any); raw pairs; exclusions and the
+  invalid-leg rule
 - Speed vs numerical switches; causal vs each-side-best; peak memory
 
 ## Remaining work and corrections

@@ -13,8 +13,8 @@ precision. One variable per experiment; a path that did not execute is `inconclu
    multi-turn under R3 are not ([not covered](molt-integration.md#not-covered)).
 3. One optimizer step per rollout and the synchronous flags ([synchronous
    run](molt-integration.md#synchronous-run)).
-4. Rollout logprobs requested, so `mismatch/*` exists ([rollout
-   logprobs](molt-integration.md#rollout-logprobs)).
+4. `mismatch/*` present in the step log — molt requests rollout logprobs on every path, so absent means
+   they never reached the trainer ([rollout logprobs](molt-integration.md#rollout-logprobs)).
 
 Only then the controls below.
 
@@ -261,10 +261,10 @@ Premise: one request is bitwise identical on hit, miss and cache off.
   states the engine copies: vLLM's Mamba cache mode `align` copies only the conv and SSM state, so any extra
   state a decode kernel keeps must be in the layer's declared state list or hit ≠ miss; where `align` splits
   the prefill: [Mamba hybrid](molt-integration.md#mamba-hybrid).
-- molt: off by default; when on, `reset_prefix_cache(reset_running_requests=True, reset_connector=True)`
-  after every refit (an engine that ignores them returns False and molt warns), so a
-  request straddling the refit also loses old-policy KV; keep partial rollout off anyway so no rollout spans
-  two policies.
+- molt: off by default, on under R3; when on, `reset_prefix_cache(reset_running_requests=True,
+  reset_connector=True)` after every refit (an engine that ignores them returns False and molt warns), so
+  a request straddling the refit also loses old-policy KV; keep partial rollout off anyway so no rollout
+  spans two policies.
 - A hit changes the step's token count and may change the graph bucket. Diagnose with cache off; hit,
   preemption and recompute paths get their own gate, on every engine and DP rank and including chunks
   truncated by the token budget; two fixes passing alone may fail stacked.
@@ -302,9 +302,10 @@ Premise: one request is bitwise identical on hit, miss and cache off.
 
 ### Lifecycle, memory, metrics
 
-- molt refits under the vLLM lock: `pause_generation(mode="keep")` → broadcast → `reset_prefix_cache` (if
-  on) → resume; in-flight must be 0 before pause, the queue empty after resume. Requests queued during pause
-  run on the new weights and belong to no version.
+- molt refits under the vLLM lock: `pause_generation(mode="keep")` → `begin_weight_update` → broadcast →
+  `end_weight_update` (post-load processing re-run, [refit](molt-integration.md#refit)) →
+  `reset_prefix_cache` (if on) → resume; in-flight must be 0 before pause, the queue empty after resume.
+  Requests queued during pause run on the new weights and belong to no version.
 - Sleep levels, if added: 1 drops KV and prefix cache and backs weights on host, 2 leaves GPU weights
   uninitialized until reloaded. Per-engine request counts follow `--vllm.router_policy` (default
   `cache_aware`: a rollout's turns stay on one engine while load is even): an idle engine is routing, not a

@@ -34,7 +34,9 @@ another. Trainer-side order of work:
 - Do:
   1. Freeze the recipe: data, lengths, batch, parallelism, precision, optimizer, offload ([one recipe, one
      switch](acceptance.md#one-recipe-one-switch)).
-  2. Agree the scoring scope, the consistency standard and the performance budget.
+  2. Agree the scoring scope, the consistency standard and the performance budget: rollout deficit ≤ 20 %
+     unless a human tightens it or waives it in writing ([performance
+     budget](acceptance.md#performance-budget)).
   3. State whether θ0 bytes equal the released checkpoint.
   4. Tune the BI=0 arm over its real knobs ([paired acceptance](acceptance.md#paired-acceptance)); measure
      several rounds.
@@ -72,8 +74,8 @@ another. Trainer-side order of work:
   readbacks, repeated copies, quantization or allocation, abnormal workspace, whether the target CUDA-graph
   mode captures and replays; remove the structural defects.
 - Pass when: no per-token launch or synchronous readback in prefill or the training forward (decode's one
-  step per token does not count); the graph captures; a cost estimate within the agreed budget; the
-  consistency cells still pass after each fix.
+  step per token does not count); the graph captures; a cost estimate inside the [performance
+  budget](acceptance.md#performance-budget); the consistency cells still pass after each fix.
 - Keep: profile, defect list, cost estimate.
 
 ### C5 Training forward vs rollout
@@ -147,7 +149,8 @@ another. Trainer-side order of work:
   paired E2E, [acceptance.md](acceptance.md#performance)); regress bitwise and the affected gradients after
   each change.
 - Pass when, on the final image and commit: θ0/θ1/θ2 bitwise through the real entry; paired quality level;
-  performance within the agreed budget. The run stops there — no extra steps or gates.
+  rollout deficit ≤ 20 % at every formal `c` ([performance budget](acceptance.md#performance-budget)). The
+  run stops there — no extra steps or gates.
 - Keep: the report ([template](acceptance.md#report-template)).
 
 ## Entry gate to the full model
@@ -162,7 +165,7 @@ zero-update θ0 compare on the real workload comes first.
 |---|---|
 | Proxy coverage (C2) | Operator types, adjacency, state and parallel paths listed; uncovered items named |
 | Engine invariance (C3) | Every cell bitwise on the proxy; proves inference only — a C3 pass says nothing about C5 |
-| Structural performance (C4) | Proxy profile on real shapes: no structural defect left; cost estimate within the budget |
+| Structural performance (C4) | Proxy profile on real shapes: no structural defect left; cost estimate inside the performance budget |
 | Training forward (C5) | Both paths on the same proxy, weights and fixed tokens; per path valid tokens, mismatch, executed backend |
 | Backward and quality (C6–C7) | Verdict and contract per module; oracle dX/dW comparison with tolerances and raw results; SFT per scope, or `quality not covered` |
 | Real update (C8) | θ0/θ1/θ2 at 0, two effective updates, clean exit |
