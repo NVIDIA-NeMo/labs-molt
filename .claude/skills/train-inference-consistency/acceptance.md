@@ -13,9 +13,9 @@ only difference is `--train.batch_invariant` and what it implies (engine kernels
 | BI=0 arm | default kernels, graphs on | default `BackendConfig` | identical to BI=1 | the recipe's measured `bitwise_frac` (≈ 1) and `abs_diff_mean`: the BI=0 baseline |
 | BI=1 arm | invariant kernels, `TRITON_ATTN`, R3 on for MoE | aligned forward | the recipe's own, else the non-binding token rule | `bitwise_frac` 0 at every synchronous step; the lag floor when asynchronous |
 
-- One correction rule: both arms run identical IS settings — the recipe's own, else the non-binding token
-  rule — so rollout logprobs and `mismatch/*` exist in both arms; the report declares the ratio-weight
-  confounder and checks the sequence-mask false green ([rollout
+- One correction rule: both arms run the recipe's own IS settings. `mismatch/*` exist either way — molt
+  requests rollout logprobs on every path — so the rule is about the loss: when a ratio is in it the report
+  declares the ratio-weight confounder and checks the sequence-mask false green ([rollout
   logprobs](molt-integration.md#rollout-logprobs)).
 - Preconditions: the reference implementation guards `--fsdp.cp_size 1`; CP > 1 needs the [CP
   note](training-side.md#layout-length-and-world-size). An EP/TP pair is supported only with the
@@ -52,7 +52,7 @@ FORCE_ON_POLICY=<as frozen>   # 1 in the shipped recipe: then C5 path (a) is `no
 # Steps: ceil(max_samples / rollout.batch_size) × num_episodes × max_epochs (rl_trainer.py).
 # Three rollouts give the θ0, θ1, θ2 compares: --data.max_samples = steps × --rollout.batch_size.
 MAX_SAMPLES=24 NUM_EPISODES=1
-# IS rule, identical in both arms: the recipe's own (geo mask here), else the non-binding token rule
+# IS rule, identical in both arms: the recipe's own (geo mask here)
 --algo.advantage.is_correction_level geo --algo.advantage.is_correction_threshold 0.95 1.05
 # Engine: R3 may need prefix caching (molt-integration.md#facts-bound-to-the-pinned-vllm); explicit
 # defaults so the arm diff shows only the switch
@@ -76,7 +76,7 @@ BI=0 integration pitfalls, re-checked per model:
 |---|---|
 | A default that silently changes with the switch (attention backend, `enforce_eager`, prefix caching, `logprobs_mode`, compile mode) | Resolve every default explicitly so the diff shows only the switch |
 | A cache or graph setting that differs (CUDA-graph mode, prefix cache, compile cache) | Same in both arms, or a quantified confounder |
-| A metric that exists in one arm only (`mismatch/*` need rollout logprobs; a blank cell reads as 0) | The one correction rule above: both arms request them every step |
+| A metric that exists in one arm only (a blank cell reads as 0) | Same agent path and logging flags in both arms; `mismatch/*` come with every molt rollout path |
 | A packing path that differs (`cu_seqlens`, THD style, HybridEP padding) | Same path in both arms; a stateful layer scans the pack as one sequence |
 | Training-only model defaults (router training vs `--actor.freeze_moe_router`, MTP head, frozen modules) | Pinned for both arms; trainable set listed |
 

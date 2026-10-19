@@ -11,7 +11,7 @@ recorded, in molt terms; the operational short form — planted error and false 
 |---|---|---|
 | `pass` | every declared item of the scope completed and met its criterion | — |
 | `fail` | a numerical comparison or a criterion failed | the first failing item |
-| `inconclusive` | the check did not answer | *invalid*: the target path did not run (aligned kernel not dispatched, patched class not instantiated, forward skipped, rollout logprobs never requested); *vacuous*: zero hits (no valid tokens, no sequence crossed the boundary, no token reached the expert); *fault*: Ray actor lost, NCCL timeout, OOM |
+| `inconclusive` | the check did not answer | *invalid*: the target path did not run (aligned kernel not dispatched, patched class not instantiated, forward skipped, rollout logprobs never reached the trainer); *vacuous*: zero hits (no valid tokens, no sequence crossed the boundary, no token reached the expert); *fault*: Ray actor lost, NCCL timeout, OOM |
 | `not run` | out of scope or not executed; never `pass` | the scope decision |
 
 The [ledger](#candidate-evidence-ledger) additionally marks rows *superseded* (closure changed since) or

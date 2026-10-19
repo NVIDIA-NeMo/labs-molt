@@ -44,7 +44,10 @@ equal: [contracts.md](contracts.md); how to build the trainer side: [training-si
 - `--train.check_weight_update_equal` lists vLLM parameters the broadcast never assigned (stale weights); it
   does not compare bytes. Prove refit bytes by hashing the same tensor on both sides after `load_weights`,
   or by the logprob comparison itself.
-- `load_weights` copies in place (`param.data.copy_`), so graph-captured addresses stay valid.
+- The broadcast runs inside vLLM's layerwise-reload bracket (`WorkerWrap.begin_weight_update` /
+  `end_weight_update`): `load_weights` copies in place, so graph-captured addresses stay valid, and the
+  bracket re-runs vLLM's post-load weight processing (kernel layouts such as the FlashInfer MoE block
+  layout) once the whole update has landed, never on half-updated weights.
 - Under `--actor.lora_dim > 0` the refit merges `W + scale·B·A` in fp32 while the training forward runs the
   unmerged `W·x + scale·B(A·x)` — one rounding apart by construction, so LoRA is off the bitwise contract.
 
@@ -65,13 +68,14 @@ equal: [contracts.md](contracts.md); how to build the trainer side: [training-si
 
 ### Rollout logprobs
 
-- Requested only when `--algo.advantage.is_correction_level` ≠ `off` or score centering is on: then
-  `logprobs=1` (IS correction) or `logprobs=--algo.advantage.score_centering_top_k` (score centering), with
-  `logprobs_mode=processed_logprobs`; otherwise vLLM returns no logprobs and no mismatch metric exists.
-- Non-binding request: `--algo.advantage.is_correction_level token --algo.advantage.is_correction_threshold
-  0 1e9`. The gate never masks, but the loss is still multiplied by the per-token ratio π_old/μ, which is
-  exactly 1 only when `bitwise_frac` = 0: under default kernels it changes the BI=0 gradient. Both arms run
-  the same correction settings and the report declares the confounder
+- Always requested: every molt rollout path sends `logprobs=1` (the `/inference/v1/generate` client in
+  `molt/trainer/rollout/router.py`, and the chat server forces it on), `logprobs=k` under score centering
+  (`--algo.advantage.score_centering_top_k`), with `logprobs_mode=processed_logprobs`. `mismatch/*` therefore
+  exist in every arm; the IS setting decides only what the loss does with the ratio.
+- `--algo.advantage.is_correction_level off` leaves the ratio out of the loss. Any other level multiplies
+  the loss by the per-token ratio π_old/μ — a `token` gate with threshold `0 1e9` never masks but still
+  weights — which is exactly 1 only when `bitwise_frac` = 0: under default kernels it changes the BI=0
+  gradient. Both arms run the same correction settings and the report declares the confounder
   ([arms](acceptance.md#one-recipe-one-switch)).
 - Sequence gates: `--algo.advantage.is_correction_level seq|geo` accept only
   `--algo.advantage.is_correction_mode mask` (`loss.py`). One flag per sequence zeroes every token of an
@@ -91,7 +95,8 @@ equal: [contracts.md](contracts.md); how to build the trainer side: [training-si
 - The pass signal is `mismatch/bitwise_frac` = 0 at every step; the replay comparison in debugging.md adds
   the count, max and first failing position. `vllm_kl` cannot tell a last-bit difference from 0 (positive
   and negative differences cancel) and is diagnostic only.
-- Absent is not zero: `mismatch/*` missing from the log means rollout logprobs were not requested.
+- Absent is not zero: `mismatch/*` missing from the log means no rollout logprob reached the trainer (a
+  replay without them, an agent path of its own) — find out why before reading a 0.
   `policy_kl` is 0 by construction under `--train.force_on_policy` with `--algo.kl.init_coef 0` (then the
   old logprob is the detached training forward) and is not evidence. Check the producer before trusting any
   0.
@@ -137,8 +142,8 @@ equal: [contracts.md](contracts.md); how to build the trainer side: [training-si
 
 - `--vllm.attention_backend TRITON_ATTN`: the only backend the aligned attention kernel patches;
   auto-selection picks FA3/FlashInfer and aligns nothing, without an error.
-- `--vllm.enforce_eager`; `--vllm.enable_prefix_caching` (default off; molt resets the cache after every
-  refit; routing replay may force it on — [pinned facts](#facts-bound-to-the-pinned-vllm));
+- `--vllm.enforce_eager`; `--vllm.enable_prefix_caching` (default off, on under `--train.routing_replay`;
+  molt resets the cache after every refit — [pinned facts](#facts-bound-to-the-pinned-vllm));
   `--vllm.enable_chunked_prefill` (vLLM's default; a hybrid may be unable to turn it off — pinned facts);
   `--vllm.max_num_batched_tokens`; `--vllm.mamba_ssm_cache_dtype`; `--vllm.block_size` (KV page; read the
   resolved value in the engine log). Their interaction on a state-layer model: [Mamba
@@ -167,10 +172,10 @@ equal: [contracts.md](contracts.md); how to build the trainer side: [training-si
   fewer layer rows than the highest MoE gate's global id needs. The trainer has no pipeline parallelism, so
   no stage offset applies.
 - The engine returns the ids through a connector whose requirements are version-bound (a model runner, a
-  MoE generate model, prefix caching — [pinned facts](#facts-bound-to-the-pinned-vllm)). On `main`,
-  `--train.routing_replay` sets `enable_return_routed_experts` while `--vllm.enable_prefix_caching` stays
-  off by default, so an engine that requires it fails at init until the flag is passed; then C3 must verify
-  cache hit == miss.
+  MoE generate model, prefix caching — [pinned facts](#facts-bound-to-the-pinned-vllm)). `main` turns
+  `--vllm.enable_prefix_caching` on under `--train.routing_replay` (`train_rl_ray.py` prints
+  `[routing_replay] enabling --vllm.enable_prefix_caching`), so an R3 recipe always runs with the cache and
+  C3 must verify hit == miss.
 
 ### Seed determinism
 
