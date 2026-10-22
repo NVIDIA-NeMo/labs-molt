@@ -131,7 +131,10 @@ equal: [contracts.md](contracts.md); how to build the trainer side: [training-si
   `--train.full_determinism_enable`, `VLLM_ENABLE_V1_MULTIPROCESSING=0`; the aligned mode adds
   `VLLM_BATCH_INVARIANT=1` and the workspace/NCCL pins here.
 - `worker_extension_cls="molt.trainer.vllm.vllm_worker_wrap.WorkerWrap"` is imported in every worker before
-  CUDA-graph capture: the place for kernel patches that must be identical to the trainer's.
+  CUDA-graph capture: the place for kernel patches that must be identical to the trainer's, and for switching
+  off a kernel the installed vLLM selects by GPU architecture (the sm_103 router row of the [pinned
+  facts](#facts-bound-to-the-pinned-vllm)). A kernel choice that differs by architecture is a closure field:
+  record the architecture with every result.
 - Standalone engine for C3: export the same env, then `vllm.LLM(model,
   worker_extension_cls="molt.trainer.vllm.vllm_worker_wrap.WorkerWrap", seed=<--train.seed + i>,
   logprobs_mode="processed_logprobs", **<the recipe's --vllm.* flags>)` and
@@ -202,6 +205,7 @@ numerical property no grep proves — re-verify it with the probe named.
 | Mamba hybrid + prefix caching: cache mode `align` asserts chunked prefill on; `mamba_block_size` = attention block, raised to the Mamba page; without prefix caching it is `max_model_len` | 0.31.0 | `grep -n -e align -e mamba_block_size $V/model_executor/models/config.py`; `grep -n "attn_block_size =" $V/platforms/interface.py`; resolved sizes: engine log | [Mamba hybrid](#mamba-hybrid), [chunked prefill](debugging.md#chunked-prefill) |
 | CUDA-graph capture fails at engine init for gated delta net and Mamba hybrids, so they run eager | 0.31.0 | start the engine with `--vllm.enforce_eager` off; the init error reproduces, or the row is stale | [Mamba hybrid](#mamba-hybrid) |
 | `GateLinear` (MoE router GEMM) switches kernel by M: a small-M CuteDSL kernel at M ≤ 16, cuBLAS above | 0.31.0 | `grep -n "LL_BF16_MAX_TOKENS" $V/model_executor/layers/fused_moe/router/gate_linear.py` | [operator details](#operator-details) |
+| On sm_103 (GB300) the small-M CuteDSL router kernel (`cute_dsl/ll_bf16.py`) fails to compile at engine warmup (compiler ICE) and every MoE engine dies at init; `ll_bf16._cutedsl_available = False` set from the worker hook sends every M through cuBLAS | 0.32.0, sm_103 | start one engine on the target GPU: the warmup error reproduces, or the row is stale; `grep -n _cutedsl_available $V/model_executor/kernels/linear/cute_dsl/ll_bf16.py` | [engine environment and worker hook](#engine-environment-and-worker-hook) |
 | Stock `_C.rms_norm` switches its CUDA block size at 256 tokens (`num_tokens < 256 ? 1024 : 256`) | 0.31.0 | compiled, not in the wheel: `grep -rn "num_tokens < 256" csrc/` at the pinned tag, or compare 255/256/257 rows alone vs batched | [operator details](#operator-details), [norm contract](contracts.md#per-operator-contract) |
 | TRITON_ATTN takes its 3D split only in decode-only steps with at most `seq_threshold_3D` sequences, never under `VLLM_BATCH_INVARIANT=1` | 0.31.0 | `grep -n -A 10 "use_3d = not" $V/v1/attention/ops/triton_unified_attention.py` | [default-kernel A/A](debugging.md#isolate-the-side-first) |
 | A `prompt_logprobs` request skips the prefix-cache read by default (`skip_reading_prefix_cache`) and scores only the positions this prefill computed, so cached positions are omitted on a hit | 0.31.0 | `grep -n -A 4 "skip_reading_prefix_cache =" $V/sampling_params.py`; `grep -n num_computed_prefill_tokens $V/v1/worker/gpu/sample/prompt_logprob.py` | [prompt-logprob scoring](debugging.md#isolate-the-side-first) |
@@ -272,7 +276,11 @@ facts](#facts-bound-to-the-pinned-vllm); re-verify every row against the install
 Not covered by upstream batch-invariant mode and not in the reference implementation: Mamba2/SSM layers
 (table below), sliding window, logit softcap, attention sinks, fp8 KV, multimodal encoders, mRoPE,
 multi-turn/tool runs under R3 ([R3](#routing-replay-r3)). Each needs its own row in the C0 inventory with a
-verdict before the model is declared supportable.
+verdict before the model is declared supportable. For a multimodal model the compared path starts at the
+image bytes: the trainer's processor must reproduce the engine's pixel tensors and placeholder layout byte
+for byte (hash both sides), and the engine's multimodal processor cache is a batch-composition dependency
+to inventory — with prefix caching and that cache off, vLLM 0.31 keyed images by a per-renderer counter
+rather than by content, and engines reused each other's image embeddings (observed live; re-verify on the pin).
 
 ### Mamba hybrid
 
@@ -309,7 +317,9 @@ alignment; the version-bound reasons are rows of the [pinned facts](#facts-bound
 - Only identical weights are bitwise. Under any lag ≥ 1 the rollout came from older weights and sits on the
   lag floor whatever the learning rate or kernels — `bitwise_frac` reads ≈ 1 ([reference
   measurements](#reference-measurements)); alignment removes kernel noise, not staleness. An asynchronous
-  recipe is accepted on quality and performance and reads the lag floor, never 0.
+  recipe is accepted on quality and performance and reads the lag floor, never 0. In a multi-turn agentic
+  recipe with episodes in flight across refits, one episode's turns were sampled under several weight
+  versions; its `mismatch/*` mixes lag with kernel noise and is kernel evidence only from a synchronous run.
 
 ## Adding an architecture
 
