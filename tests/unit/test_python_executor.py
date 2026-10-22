@@ -73,6 +73,14 @@ def test_run_python_decodes_unicode_split_across_reads(monkeypatch):
     assert run_python("print('é', end='')") == "é"
 
 
+def test_run_python_replaces_invalid_output_bytes():
+    code = "import os; os.write(1, b'answer: \\xff42'); os.write(2, b'error: \\xe2\\x82'); raise SystemExit(1)"
+
+    out = run_python(code)
+
+    assert out == "Exit code 1.\nstdout:\nanswer: \ufffd42\nstderr:\nerror: \ufffd"
+
+
 def test_run_python_normalizes_newlines_split_across_reads(monkeypatch):
     read = python_executor.os.read
     monkeypatch.setattr(python_executor.os, "read", lambda fd, _size: read(fd, 1))
@@ -126,6 +134,7 @@ def test_run_python_timeout_terminates_spawned_children(tmp_path):
         "import os, subprocess, sys, time\n"
         f"subprocess.Popen([sys.executable, '-c', {child!r}])\n"
         f"while not os.path.exists({str(ready)!r}): time.sleep(0.01)\n"
+        "os.write(1, b'\\xff')\n"
         "time.sleep(30)\n"
     )
 
