@@ -17,6 +17,7 @@
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
 import logging
+import math
 import os
 import socket
 from typing import Dict, Type
@@ -28,6 +29,7 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from tqdm import tqdm
 
 from molt.models import Actor
+from molt.trainer.algorithm.experience import make_experience_batch, split_experience_batch
 from molt.trainer.fsdp import FsdpStrategy
 from molt.trainer.placement import get_bundle_indices, ray_noset_visible_devices
 
@@ -73,6 +75,13 @@ class BaseModelActor(BaseDistributedActor):
         # configure strategy
         self.strategy = strategy
         strategy.setup_distributed()
+        args = strategy.args
+        cp_multiple = 2 * args.fsdp.cp_size if args.fsdp.cp_size > 1 else 1
+        self.dynamic_batch_pad_to_multiple = (
+            math.lcm(cp_multiple, args.train.dynamic_batch_pad_to_multiple)
+            if args.train.dynamic_batch_enable and not args.fsdp.packing_samples
+            else 1
+        )
 
     def init_model_from_pretrained(self, *args, **kwargs):
         raise NotImplementedError()
@@ -119,6 +128,20 @@ class BaseModelActor(BaseDistributedActor):
             results.append(result)
 
         return results
+
+
+def _make_forward_batch(experiences, pad_to_multiple=1):
+    rows = []
+    for experience in experiences:
+        rows.extend(split_experience_batch(experience.reload()))
+    return make_experience_batch(rows, pad_to_multiple)
+
+
+def _split_forward_batch(output, experiences):
+    return [
+        output[index : index + 1, : experience.action_mask.shape[-1]].to("cpu")
+        for index, experience in enumerate(experiences)
+    ]
 
 
 @ray.remote(num_gpus=1)
@@ -170,6 +193,24 @@ class ReferenceModelActor(BaseModelActor):
             )
         return output["action_log_probs"].to("cpu")
 
+    def forward_batch(self, experiences) -> list[torch.Tensor]:
+        batch = _make_forward_batch(experiences, self.dynamic_batch_pad_to_multiple)
+        device = torch.cuda.current_device()
+        mm_inputs = {}
+        if batch.mm_train_inputs and getattr(self.model, "is_vlm", False):
+            from molt.utils.vlm_utils import merge_mm_train_inputs
+
+            mm_inputs = merge_mm_train_inputs(batch.mm_train_inputs, device)
+
+        with torch.no_grad():
+            output = self.model(
+                batch.sequences.to(device),
+                batch.action_mask.to(device),
+                batch.attention_mask.to(device),
+                **mm_inputs,
+            )
+        return _split_forward_batch(output["action_log_probs"], experiences)
+
 
 class RayActorGroup:
     """
@@ -208,6 +249,10 @@ class RayActorGroup:
         self._num_resources_per_node = num_resources_per_node
 
         self._initiate_actors(pg, num_gpus_per_actor)
+
+    @property
+    def effective_actors(self) -> int:
+        return len(self._actor_handlers) // self.duplicate_actors
 
     def _initiate_actors(self, pg, num_gpus_per_actor):
         world_size = self._num_nodes * self._num_gpus_per_node
@@ -308,8 +353,7 @@ class RayActorGroup:
                 )
 
         # Calculate chunk size based on number of effective actors (considering ring groups)
-        num_actors = len(self._actor_handlers)
-        effective_actors = num_actors // self.duplicate_actors
+        effective_actors = self.effective_actors
         if total_length == 0 or total_length < effective_actors:
             raise ValueError(
                 f"Insufficient batch size for async_run_method_batch: total_length={total_length}, "
