@@ -277,13 +277,19 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
     loop = asyncio.get_running_loop()
 
     # Does this turn continue the running segment, or did the agent rewrite/shorten the history
-    # (compaction)? A normal turn only appends (assistant + new user/tool) onto the SAME prefix, so
-    # its messages extend last_messages; a compaction changes that prefix. Also false on turn 1.
-    extends = bool(session.trajectories) and messages[: len(session.last_messages)] == session.last_messages
+    # (compaction)? A normal turn appends the reply it answers (messages[n]) and then any number of new
+    # user/tool messages (parallel tool results, an observation plus a reminder) onto the SAME prefix,
+    # so its messages extend last_messages; a compaction changes that prefix. Also false on turn 1.
+    n = len(session.last_messages or [])
+    extends = (
+        bool(session.trajectories) and messages[:n] == session.last_messages and messages[n].get("role") == "assistant"
+    )
     chat, pil_images = await loop.run_in_executor(_TOKENIZE_EXECUTOR, _messages_to_chat, state, messages)
     full = state.processor.apply_chat_template(chat, tokenize=False, add_generation_prompt=True, **kwargs)
     if extends:
-        prefix = state.processor.apply_chat_template(chat[:-1], tokenize=False, add_generation_prompt=False, **kwargs)
+        prefix = state.processor.apply_chat_template(
+            chat[: n + 1], tokenize=False, add_generation_prompt=False, **kwargs
+        )
         # The suffix slice below is only sound when the prior turns render the same in `full` and
         # `prefix`. A template can instead rewrite history in place — e.g. Qwen3 re-renders a prior
         # assistant turn WITHOUT its <think> block once a newer user query follows — and the slice
@@ -322,8 +328,8 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
         gen_tokens = traj.observation_tokens
     else:
         # Continuation: the new turn's tokens are the chat-template STRING suffix — the prior-turn
-        # renders land in the shared prefix and cancel (verified above), so the suffix is the new
-        # user/tool turn + generation prompt (committed as masked feedback -> token-exact segment).
+        # renders land in the shared prefix and cancel (verified above), so the suffix is every new
+        # user/tool message + generation prompt (committed as masked feedback -> token-exact segment).
         traj = session.trajectories[-1]
         # The template closes the prior assistant turn with markup the model did not generate (ChatML:
         # "<|im_end|>\n" after an action that ends at <|im_end|>, the whole close when the action was
@@ -331,15 +337,11 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
         # feedback, so the stream stays the template's exact token sequence. A template that re-renders
         # the assistant text (trim, wrap) does not start with the generated action -> plain suffix.
         prev_action_text = session.last_action_text  # as generated, end-of-turn token included
-        generated = state.processor.apply_chat_template(
-            chat[:-2], tokenize=False, add_generation_prompt=True, **kwargs
-        )
+        generated = state.processor.apply_chat_template(chat[:n], tokenize=False, add_generation_prompt=True, **kwargs)
         generated += prev_action_text  # history + generation prompt + the action exactly as generated
         closing = prefix[len(generated) :] if prefix.startswith(generated) else ""
         delta_text = closing + full[len(prefix) :]
-        _, new_pil = await loop.run_in_executor(
-            _TOKENIZE_EXECUTOR, _content_to_text_and_images, messages[-1].get("content")
-        )
+        _, new_pil = await loop.run_in_executor(_TOKENIZE_EXECUTOR, _messages_to_chat, state, messages[n + 1 :])
         delta_ids = await loop.run_in_executor(
             _TOKENIZE_EXECUTOR, _tokenize_feedback, state.processor, delta_text, new_pil, traj, state.max_length
         )
