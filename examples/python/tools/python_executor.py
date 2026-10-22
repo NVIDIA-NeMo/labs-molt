@@ -92,6 +92,7 @@ def run_python(
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                errors="replace",
                 cwd=workdir,
                 start_new_session=True,
             )
