@@ -90,7 +90,7 @@ One sense per term, used in every file.
 | BI=0 baseline | the human-frozen C1 measurement of the BI=0 arm (config, throughput, mismatch) |
 | `c` | concurrent requests per engine in the fixed-workload bench |
 | candidate | the build under evaluation — code, image, resolved config; one ledger row per closure |
-| closure | execution closure: the fields that bound a result — geometry, weights, source/image, precision, layout, graph/eager, cache state |
+| closure | execution closure: the fields that bound a result — GPU architecture, geometry, weights, source/image, precision, layout, graph/eager, cache state |
 | DCP | torch distributed checkpoint, the format molt saves under `--ckpt.path` |
 | deficit | the paired rollout throughput loss `1 − T_BI1/T_BI0` at one `c`; the budget caps it at 20 % |
 | false green | a `pass` that is not evidence: nothing executed, 0 by construction, the wrong path ran |

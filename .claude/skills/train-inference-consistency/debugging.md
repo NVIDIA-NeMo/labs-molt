@@ -29,6 +29,7 @@ Only then the controls below.
 | Identical operator inputs still differ | Kernel or arguments differ: executed kernel name, accumulation dtype, splits, tile, epilogue, fusion boundary, quantizer dispatch (compiled native vs CUDA op); [operator table](molt-integration.md#operator-table) |
 | Constant logprob offset on every token | An fp32-kept parameter downcast by the FSDP `param_dtype` policy, or temperature divided in bf16 ([precision chain](contracts.md#weights-and-precision-chain)) |
 | Difference survives a precision change | It was never quantization: back to the semantic / discrete / weights classes ([order](#classification-and-handling-order)) |
+| Grad norm NaN/Inf while every logprob is finite | The per-token IS ratio overflowed: a long multi-turn rollout under mismatch or lag with unbounded `--algo.advantage.is_correction_*`; read the max of `logprobs_diff` (not its mean) and the ratio bounds before blaming a kernel |
 | Only under graph / compile / cache | [Execution state](#execution-state) |
 | Fails after changing packing / CP / TP / EP | Trainer packing A/C and the [layout rules](molt-integration.md#layout-rules); a C failure may be a page, tile, segment or expert boundary rather than the packing code |
 | Many identical samples in a group | [Sampling seed collision](#sampling-seed-collision): a sampling defect the mismatch metric cannot see |

@@ -226,7 +226,7 @@ waiting):
 
 | Item | Content |
 |---|---|
-| Identity | model and weight version; GPUs and nodes; image digest; molt / vLLM / nemo-automodel commits |
+| Identity | model and weight version; GPU model and architecture (sm), nodes; image digest; molt / vLLM / nemo-automodel commits |
 | Execution | launch and bench commands; precision, parallel layout, scheduling, graph/cache state, executed kernels |
 | Isolation proof | alignment patches leave BI=0 bytes unchanged (replay before/after with the switch off) |
 | Tuning table | configs tried and why, warmup, repeats, throughput and its variation, failed and uncovered items |
