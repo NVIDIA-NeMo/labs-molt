@@ -48,6 +48,7 @@ def compute_approx_kl(
     log_probs: torch.Tensor,
     log_probs_base: torch.Tensor,
     kl_estimator: str = "k1",
+    kl_ref: str = "model",
 ) -> torch.Tensor:
     """
     Compute the approximate KL divergence between two distributions.
@@ -56,6 +57,9 @@ def compute_approx_kl(
     Args:
         log_probs: Log probabilities of the new distribution.
         log_probs_base: Log probabilities of the base distribution.
+        kl_ref: --algo.kl.ref -- "model" (a frozen reference; the policy sampled the tokens) or
+            "rollout" (the reference itself sampled them). k3 is unbiased for the KL from the sampler
+            to the other side, so its form follows this.
     """
 
     log_ratio = torch.nan_to_num(
@@ -79,10 +83,15 @@ def compute_approx_kl(
         # Approximately equivalent to one-step KL penalty with k1
         # used in https://arxiv.org/pdf/2310.10505.
         log_ratio = log_ratio**2 / 2.0
-    elif kl_estimator == "k3":
-        # Non-negative KL approximation: exp(q - p) - 1 - (q - p)
+    elif kl_estimator == "k3" and kl_ref == "model":
+        # Non-negative KL approximation of KL(policy || base): exp(q - p) - 1 - (q - p)
         # http://joschu.net/blog/kl-approx.html
         log_ratio = (-log_ratio).exp() - 1 + log_ratio
+    elif kl_estimator == "k3":
+        # The rollout policy sampled the tokens: the roles swap, exp(p - q) - 1 - (p - q) is unbiased for
+        # KL(rollout || policy) and its gradient is (pi/mu - 1) * grad log pi on the sampled token --
+        # exact in expectation, zero where pi == mu (https://huggingface.co/blog/NormalUhr/sfc-kl).
+        log_ratio = log_ratio.exp() - 1 - log_ratio
     else:
         raise ValueError(f"Unknown kl_estimator: {kl_estimator}")
 

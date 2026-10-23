@@ -541,6 +541,7 @@ class PolicyTrainer:
                     action_log_probs,
                     base_action_log_probs,
                     kl_estimator=self.args.algo.kl.estimator,
+                    kl_ref=self.args.algo.kl.ref,
                 )
                 logprob_diff = torch.nan_to_num(
                     action_log_probs.float() - base_action_log_probs.float(),

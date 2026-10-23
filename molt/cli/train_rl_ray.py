@@ -94,7 +94,9 @@ def train(args):
             max_len,
             args.vllm.gpu_memory_utilization,
             "processed_logprobs"
-            if args.algo.advantage.is_correction_level != "off" or args.algo.advantage.score_centering_top_k
+            if args.algo.advantage.is_correction_level != "off"
+            or args.algo.advantage.score_centering_top_k
+            or args.algo.kl.ref == "rollout"
             else None,
             max_images_per_prompt=getattr(args.data, "max_images_per_prompt", 0),
             mm_encoder_attn_backend=args.vllm.mm_encoder_attn_backend,
@@ -164,7 +166,7 @@ def train(args):
     # time-slice one shared placement group sized to the actor. vLLM rollout
     # engines keep their own placement group.
     pg = None
-    has_ref = args.algo.kl.init_coef > 0
+    has_ref = args.algo.kl.init_coef > 0 and args.algo.kl.ref == "model"
     has_critic = args.algo.advantage.estimator == "gae"
     colocate_fsdp_models = args.train.colocate_fsdp_models and (has_ref or has_critic)
 
@@ -548,14 +550,29 @@ if __name__ == "__main__":
         default="k1",
         choices=["k1", "k2", "k3"],
         help=(
-            "In GRPO, k3 is utilized as the loss function, while k2, when used as the loss, is nearly equivalent to k1."
+            "In GRPO, k3 is utilized as the loss function, while k2, when used as the loss, is nearly equivalent to k1. "
+            "The KL runs from the distribution that sampled the tokens to the other one: the policy with "
+            "--algo.kl.ref model, the rollout policy with --algo.kl.ref rollout (k3 takes the matching form)."
+        ),
+    )
+    parser.add_argument(
+        "--algo.kl.ref",
+        type=str,
+        default=None,
+        choices=["model", "rollout"],
+        help=(
+            "What the KL term compares the policy to. rollout (default): the policy that generated the samples, "
+            "read from the log-probs vLLM returns with them -- no reference workers, so no extra memory; the "
+            "trainer-generator KL of https://huggingface.co/blog/NormalUhr/sfc-kl (pair with --algo.kl.use_loss "
+            "--algo.kl.estimator k3). model: a frozen reference model on its own GPUs (--ref.*); on_policy_distill "
+            "always uses it (the teacher)."
         ),
     )
     parser.add_argument(
         "--algo.kl.init_coef",
         type=float,
         default=None,
-        help="KL coefficient. Defaults to 0.01 (KL-to-init RL) or 1.0 (on_policy_distill reverse-KL reward).",
+        help="KL coefficient. Defaults to 0 (no KL term, no reference workers); on_policy_distill defaults to 1.0.",
     )
     parser.add_argument(
         "--algo.kl.target",
@@ -1048,6 +1065,7 @@ if __name__ == "__main__":
             raise ValueError("on_policy_distill requires --ref.model_name_or_path (the teacher checkpoint).")
         args.algo.kl.estimator = "k1"  # ctx.kls = log pi_student - log pi_teacher (the reverse-KL reward)
         args.algo.kl.use_loss = False  # KL flows through the advantage, not a separate loss term
+        args.algo.kl.ref = "model"  # the teacher is the reference
         if args.algo.kl.init_coef is None:
             args.algo.kl.init_coef = 1.0  # pull onto the teacher at unit scale
         if not args.train.agent_path:
@@ -1057,9 +1075,12 @@ if __name__ == "__main__":
 
             args.train.agent_path = distill_agent.__file__
 
-    # Standard KL-to-init RL default (on_policy_distill set its own coefficient above).
+    # No KL term by default (on_policy_distill set its own coefficient above); when one is asked for,
+    # the rollout policy is the reference unless --algo.kl.ref model is given.
     if args.algo.kl.init_coef is None:
-        args.algo.kl.init_coef = 0.01
+        args.algo.kl.init_coef = 0.0
+    if args.algo.kl.ref is None:
+        args.algo.kl.ref = "rollout"
 
     # --- Agent / rollout ---
     if not args.train.agent_path:
@@ -1085,6 +1106,12 @@ if __name__ == "__main__":
             f"{args.algo.advantage.estimator} requires n_samples_per_prompt > 1"
         )
 
+    if args.algo.kl.ref == "rollout" and args.algo.kl.use_loss and args.algo.kl.estimator == "k1":
+        # The tokens came from the reference, so minimising log pi - log mu over them RAISES
+        # KL(rollout || policy); k2 / k3 descend it.
+        raise ValueError(
+            "--algo.kl.estimator k1 as a loss has the wrong sign under --algo.kl.ref rollout; use k3 (or k2)."
+        )
     if args.algo.kl.use_loss and args.algo.kl.estimator not in ("k2", "k3"):
         print(f"Recommend setting {args.algo.kl.estimator} to 'k2' or 'k3' when using KL as a loss")
     elif not args.algo.kl.use_loss and args.algo.kl.estimator != "k1":
@@ -1142,13 +1169,15 @@ if __name__ == "__main__":
             "mid-request weight swap. Per-token IS is correcting those tokens instead."
         )
 
-    if args.algo.advantage.is_correction_level != "off" and args.rollout.top_p < 1.0:
+    if (
+        args.algo.advantage.is_correction_level != "off" or args.algo.kl.ref == "rollout"
+    ) and args.rollout.top_p < 1.0:
         # vLLM computes `processed_logprobs` AFTER the top-p mask, so they are renormalized over the
         # kept nucleus while training recomputes over the full vocabulary. Every rollout log-prob is
-        # then offset by -log(kept mass), biasing vllm_kl and the IS ratio on every token.
+        # then offset by -log(kept mass), biasing vllm_kl, the IS ratio and a rollout-referenced KL.
         raise ValueError(
-            f"--rollout.top_p {args.rollout.top_p} biases the rollout log-probs the IS correction "
-            "consumes; use --rollout.top_p 1.0, or --algo.advantage.is_correction_level off."
+            f"--rollout.top_p {args.rollout.top_p} biases the rollout log-probs the IS correction / "
+            "--algo.kl.ref rollout consume; use --rollout.top_p 1.0, or turn those off."
         )
 
     # --- Data ---
