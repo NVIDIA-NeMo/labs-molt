@@ -134,6 +134,13 @@ class RemoteExperienceMaker:
             self._dispatch_forward(experiences, self.critic_model_group, "values")
         if self.initial_model_group is not None:
             self._dispatch_forward(experiences, self.initial_model_group, "base_action_log_probs")
+        elif args.algo.kl.ref == "rollout":
+            # The rollout policy is the KL reference: vLLM returned its log-probs of the sampled tokens
+            # with the samples, so no reference model exists or runs.
+            for experience in experiences:
+                if experience.rollout_log_probs is None:
+                    raise ValueError("--algo.kl.ref rollout needs the rollout log-probs, but the samples carry none")
+                experience.base_action_log_probs = experience.rollout_log_probs
 
         # Old actor log-probs. Force-on-policy with no KL reward (kl_coef==0): old == the training
         # forward, so the PPO ratio is 1 (REINFORCE) and policy_train recomputes old itself — skip
@@ -149,7 +156,7 @@ class RemoteExperienceMaker:
             # loss): the advantage's per-token signal is the student->teacher KL. With KL in the loss
             # (or no ref) the advantage sees no KL reward, so kl stays zero.
             if (
-                self.initial_model_group is not None
+                experience.base_action_log_probs is not None
                 and not args.algo.kl.use_loss
                 and experience.action_log_probs is not None
             ):
@@ -157,6 +164,7 @@ class RemoteExperienceMaker:
                     experience.action_log_probs,
                     experience.base_action_log_probs,
                     kl_estimator=args.algo.kl.estimator,
+                    kl_ref=args.algo.kl.ref,
                 )
                 logprobs_diff = experience.action_log_probs.float() - experience.base_action_log_probs.float()
             else:

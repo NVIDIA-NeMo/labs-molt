@@ -15,6 +15,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 import molt.trainer.algorithm.experience as experience_mod
@@ -173,3 +174,45 @@ def test_experience_offload_reload_roundtrip(monkeypatch):
     assert torch.equal(exp.sequences, torch.arange(6).view(1, 6))
     assert torch.equal(exp.mm_train_inputs[0]["pixel_values"], torch.zeros(2, 3))
     exp.reload()  # idempotent — second call is a no-op
+
+
+def _kl_args(ref, use_loss):
+    return SimpleNamespace(
+        algo=SimpleNamespace(
+            kl=SimpleNamespace(ref=ref, use_loss=use_loss, estimator="k1", init_coef=0.1),
+            advantage=SimpleNamespace(estimator="reinforce"),
+        ),
+        train=SimpleNamespace(force_on_policy=False),
+    )
+
+
+def _make_experience_with_rollout_reference(monkeypatch, use_loss, rollout_log_probs):
+    """make_experience with --algo.kl.ref rollout: no reference group exists; the actor forward is
+    stubbed, and asking for a reference forward is the failure the test guards against."""
+    maker = RemoteExperienceMaker(object(), None, None, SimpleNamespace(args=_kl_args("rollout", use_loss)), None)
+    action_log_probs = torch.tensor([[-1.0, -2.0, -0.5]])
+
+    def _fake_dispatch(experiences, group, result_attr):
+        assert result_attr == "action_log_probs", f"unexpected reference forward for {result_attr}"
+        for experience in experiences:
+            experience.action_log_probs = action_log_probs
+
+    monkeypatch.setattr(maker, "_dispatch_forward", _fake_dispatch)
+    exp = Experience(action_mask=torch.ones(1, 3, dtype=torch.bool), rollout_log_probs=rollout_log_probs, info={})
+    return maker.make_experience([exp])[0], action_log_probs
+
+
+def test_rollout_reference_kl_uses_the_rollout_log_probs_without_a_reference_model(monkeypatch):
+    rollout = torch.tensor([[-1.5, -1.0, -0.5]])
+
+    exp, action = _make_experience_with_rollout_reference(monkeypatch, use_loss=False, rollout_log_probs=rollout)
+    torch.testing.assert_close(exp.kl, action - rollout)  # k1 reward signal against the rollout policy
+    assert exp.base_action_log_probs is None  # KL-as-reward: the loss needs no reference log-probs
+
+    exp, _ = _make_experience_with_rollout_reference(monkeypatch, use_loss=True, rollout_log_probs=rollout)
+    torch.testing.assert_close(exp.base_action_log_probs, rollout)  # KL-in-loss: policy_train reads them
+
+
+def test_rollout_reference_kl_requires_rollout_log_probs(monkeypatch):
+    with pytest.raises(ValueError, match="rollout log-probs"):
+        _make_experience_with_rollout_reference(monkeypatch, use_loss=True, rollout_log_probs=None)

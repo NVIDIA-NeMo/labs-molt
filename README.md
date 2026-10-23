@@ -179,7 +179,6 @@ python3 -m molt.cli.train_rl_ray \
   --train.batch_size 128 \
   --train.micro_batch_size 1 \
   --algo.advantage.estimator reinforce \
-  --algo.kl.init_coef 0 \
   --fsdp.attn_implementation te \
   --ckpt.output_dir ./ckpt/rl
 ```
@@ -188,8 +187,8 @@ Common RL switches:
 
 | Goal | Flags |
 |---|---|
-| Disable reference workers | `--algo.kl.init_coef 0` |
-| Enable KL regularization | Set `--algo.kl.init_coef` above zero and place reference workers with `--ref.num_nodes`, `--ref.num_gpus_per_node`, or `--train.colocate_fsdp_models` |
+| Enable KL regularization (off by default) | `--algo.kl.init_coef 0.3 --algo.kl.use_loss --algo.kl.estimator k3`: the reference is the policy that generated the samples (`--algo.kl.ref rollout`, the default), read from the log-probs vLLM returns with them — no reference workers, no extra memory ([SFC+KL](https://huggingface.co/blog/NormalUhr/sfc-kl); needs `--rollout.top_p 1.0` like the IS correction) |
+| KL to a frozen reference model instead | `--algo.kl.ref model` plus reference workers via `--ref.num_nodes`, `--ref.num_gpus_per_node`, or `--train.colocate_fsdp_models` (`--ref.model_name_or_path` defaults to the actor checkpoint) |
 | Compare samples per prompt | `--rollout.n_samples_per_prompt 8` plus `reinforce_baseline`, `rloo`, `grpo`, or `dr_grpo` |
 | Weigh every prompt the same in the loss | `--actor.loss_agg_mode prompt-mean-token-mean` (token mean inside each prompt's rollouts, then mean over prompts; `seq-mean-token-mean` weighs every rollout the same, the default `token-mean` every token) |
 | Decouple rollout and training | `--train.async_queue_size 2` |
@@ -268,7 +267,7 @@ RL on vLLM. Read every line that touches your gradients, in plain PyTorch.
 - **PPO critic** — `--algo.advantage.estimator gae` adds a value model: its own Ray group (`CriticModelActor`), colocated on the actor's GPUs by default or disaggregatable, GAE advantages (`--algo.advantage.lam`) + clipped value loss (`--critic.value_clip`), own optimizer/LR (`--critic.adam.lr`) and resumable `_critic` checkpoint. Built on `NeMoAutoModelForCausalLM` + a scalar value head, so it keeps the native TP / EP / CP path
 - **Distillation** — On-policy distillation — per-token reverse KL to a frozen teacher, via `--algo.advantage.estimator on_policy_distill` + `--ref.model_name_or_path`
 - **IS correction** — Train/rollout logprob-mismatch correction for off-policy / async rollout: `is_correction_level {off,token,seq,geo}` × `is_correction_mode {mask,clip,trunc}` (covers TIS, IcePop, seq-mask-tis; see *IS correction* below)
-- **KL** — Optional reference workers when `--algo.kl.init_coef > 0` (the reference doubles as the distillation teacher)
+- **KL** — Optional: against the rollout policy by default (no extra workers), or against a frozen reference model with `--algo.kl.ref model` (reference workers; they double as the distillation teacher)
 ### 🎯 MoE routing stability
 | Area | Support |
 |---|---|
@@ -667,6 +666,7 @@ per-candidate correction exists — `PolicyLoss` rejects the pair.
 | You want | Flags |
 |---|---|
 | Score centering alone (replaces the IS correction) | `--algo.advantage.score_centering_top_k 32 --algo.advantage.is_correction_level off` |
+| Score centering + KL to the rollout policy (SFC+KL) | `... --algo.kl.use_loss --algo.kl.estimator k3 --algo.kl.init_coef 0.3` — the KL's reference is the sampler itself (`--algo.kl.ref rollout`, the default; its log-probs come back with the samples), so no reference model is loaded; the post uses β 0.3 (0.03 for a quantized sampler) |
 | Score centering + TIS | `... --algo.advantage.is_correction_level token --algo.advantage.is_correction_mode trunc` |
 | Score centering + IcePop | `... --algo.advantage.is_correction_level token --algo.advantage.is_correction_mode mask` |
 | The `seq`/`geo` gate (FlashREINFORCE recipe) | keep the gate, do not add score centering (`PolicyLoss` rejects the pair) |

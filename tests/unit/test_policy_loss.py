@@ -512,3 +512,24 @@ def test_seq_mean_token_mean_weighs_every_sequence_the_same():
     torch.testing.assert_close(loss, torch.tensor(-1.5))
     loss.backward()
     torch.testing.assert_close(logp.grad, torch.tensor([[-0.5, -0.5], [-0.5, 0.0]]))
+
+
+def test_k3_direction_follows_the_sampler():
+    """k3 is unbiased for the KL from the distribution that sampled the tokens to the other one, and
+    with the reference as the sampler (--algo.kl.ref rollout) its gradient on the logits is exactly
+    grad KL(ref || policy) = p - q, the SFC+KL estimator."""
+    torch.manual_seed(0)
+    z = torch.randn(6, requires_grad=True)
+    log_p = torch.log_softmax(z, dim=-1)
+    log_q = torch.log_softmax(torch.randn(6), dim=-1)
+    p, q = log_p.exp(), log_q.exp()
+
+    # Reference sampled the tokens: average the per-token estimate under q.
+    kl_from_q = (q * compute_approx_kl(log_p, log_q, "k3", kl_ref="rollout")).sum()
+    torch.testing.assert_close(kl_from_q, (q * (log_q - log_p)).sum())
+    (grad,) = torch.autograd.grad(kl_from_q, z)
+    torch.testing.assert_close(grad, (p - q).detach(), atol=1e-6, rtol=0)
+
+    # Policy sampled the tokens (the frozen-reference case): the existing k3 estimates KL(policy || ref).
+    kl_from_p = (p.detach() * compute_approx_kl(log_p, log_q, "k3")).sum()
+    torch.testing.assert_close(kl_from_p, (p * (log_p - log_q)).sum().detach())
