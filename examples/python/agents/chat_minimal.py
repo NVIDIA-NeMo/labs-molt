@@ -25,6 +25,7 @@ code. Useful as a starting template for tool-using chat agents
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 from pathlib import Path
 
@@ -51,7 +52,7 @@ class MathAgent(ChatAgent):
             temperature=ctx.sampling_params.temperature,
         )
         text = resp.choices[0].message.content or ""
-        graded = _GRADER.score_response(text, "", ctx.label or "")
+        graded = await asyncio.to_thread(_GRADER.score_response, text, "", ctx.label or "")
         reward = torch.tensor(float(graded.get("reward", 0.0)), dtype=torch.float32)
         return Result(reward=reward, info={"math_exact": reward})
 
