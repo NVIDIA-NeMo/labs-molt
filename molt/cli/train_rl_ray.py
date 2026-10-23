@@ -96,7 +96,7 @@ def train(args):
             "processed_logprobs"
             if args.algo.advantage.is_correction_level != "off"
             or args.algo.advantage.score_centering_top_k
-            or args.algo.kl.ref == "rollout"
+            or (args.algo.kl.init_coef > 0 and args.algo.kl.ref == "rollout")
             else None,
             max_images_per_prompt=getattr(args.data, "max_images_per_prompt", 0),
             mm_encoder_attn_backend=args.vllm.mm_encoder_attn_backend,
@@ -1169,9 +1169,8 @@ if __name__ == "__main__":
             "mid-request weight swap. Per-token IS is correcting those tokens instead."
         )
 
-    if (
-        args.algo.advantage.is_correction_level != "off" or args.algo.kl.ref == "rollout"
-    ) and args.rollout.top_p < 1.0:
+    kl_to_rollout = args.algo.kl.init_coef > 0 and args.algo.kl.ref == "rollout"
+    if (args.algo.advantage.is_correction_level != "off" or kl_to_rollout) and args.rollout.top_p < 1.0:
         # vLLM computes `processed_logprobs` AFTER the top-p mask, so they are renormalized over the
         # kept nucleus while training recomputes over the full vocabulary. Every rollout log-prob is
         # then offset by -log(kept mass), biasing vllm_kl, the IS ratio and a rollout-referenced KL.

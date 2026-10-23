@@ -134,7 +134,7 @@ class RemoteExperienceMaker:
             self._dispatch_forward(experiences, self.critic_model_group, "values")
         if self.initial_model_group is not None:
             self._dispatch_forward(experiences, self.initial_model_group, "base_action_log_probs")
-        elif args.algo.kl.ref == "rollout":
+        elif args.algo.kl.ref == "rollout" and args.algo.kl.init_coef > 0:
             # The rollout policy is the KL reference: vLLM returned its log-probs of the sampled tokens
             # with the samples, so no reference model exists or runs.
             for experience in experiences:
