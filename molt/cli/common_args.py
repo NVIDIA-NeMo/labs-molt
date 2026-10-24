@@ -61,6 +61,12 @@ def add_fsdp_args(parser) -> None:
         help="Attention implementation (e.g., sdpa, eager, flex, te, flash_attention_2)",
     )
     parser.add_argument("--fsdp.packing_samples", action="store_true", default=False)
+    parser.add_argument(
+        "--fsdp.use_liger_kernel",
+        action="store_true",
+        default=False,
+        help="Enable Liger MLP/RMSNorm kernels for dense text Qwen3; TP/CP/EP/VLM and fused loss are not enabled.",
+    )
 
 
 def add_ckpt_args(parser, default_ckpt_path: str) -> None:
