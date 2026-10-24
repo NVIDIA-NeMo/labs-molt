@@ -368,6 +368,7 @@ def test_agent_runner_reports_each_failed_rollout():
     actor._tokenizer = None
     actor._client = None
     actor._media_ids = set()
+    actor._experience_lock = asyncio.Lock()
 
     results = asyncio.run(actor.run_group("prompt", "label", None, SimpleNamespace(), 128, 2, group_id="group"))
 
@@ -391,6 +392,7 @@ def test_agent_runner_drops_unconvertible_trajectory(monkeypatch):
     actor._tokenizer = None
     actor._client = None
     actor._media_ids = set()
+    actor._experience_lock = asyncio.Lock()
 
     results = asyncio.run(actor.run_group("prompt", "label", None, SimpleNamespace(), 128, 2, group_id="group"))
 
@@ -533,3 +535,123 @@ def test_generate_skips_frontend_detokenization_unless_stop_strings_need_it():
     asyncio.run(RouterGenerateClient(http).generate([1, 2], sp))
     spp = http.calls[0][1]["sampling_params"]
     assert "detokenize" not in spp and "flat_logprobs" not in spp and spp["stop"] == ["</answer>"]
+
+
+def test_agent_runner_conversion_and_offload_do_not_block_event_loop(monkeypatch):
+    from molt.trainer.rollout.samples_generator import SamplesGenerator
+
+    convert_started = threading.Event()
+    convert_release = threading.Event()
+    offload_started = threading.Event()
+    offload_release = threading.Event()
+
+    class _Runner:
+        async def execute(self, **kwargs):
+            return SimpleNamespace()
+
+    class _Experience:
+        def offload(self):
+            offload_started.set()
+            assert offload_release.wait(timeout=1), "event loop could not release experience offload"
+            return self
+
+    experience = _Experience()
+
+    def _convert(*_args):
+        convert_started.set()
+        assert convert_release.wait(timeout=1), "event loop could not release trajectory conversion"
+        return experience, None
+
+    monkeypatch.setattr(SamplesGenerator, "_process_response_into_experience", staticmethod(_convert))
+    actor_cls = getattr(AgentRunnerActor, "__ray_actor_class__", AgentRunnerActor)
+    actor = object.__new__(actor_cls)
+    actor._runner = _Runner()
+    actor._tokenizer = None
+    actor._client = None
+    actor._media_ids = set()
+    actor._experience_lock = asyncio.Lock()
+
+    async def _run():
+        task = asyncio.create_task(
+            actor.run_group("prompt", "label", None, SimpleNamespace(), 128, 1, group_id="group")
+        )
+        while not convert_started.is_set():
+            await asyncio.sleep(0)
+        convert_release.set()
+        while not offload_started.is_set() and not task.done():
+            await asyncio.sleep(0)
+        assert offload_started.is_set()
+        offload_release.set()
+        assert await task == [(experience, None)]
+
+    asyncio.run(_run())
+
+
+def test_agent_runner_cancellation_keeps_experience_work_serial(monkeypatch):
+    from molt.trainer.rollout.samples_generator import SamplesGenerator
+
+    first_started = threading.Event()
+    first_release = threading.Event()
+    second_started = threading.Event()
+    state_lock = threading.Lock()
+    state = {"active": 0, "max_active": 0}
+
+    class _Runner:
+        calls = 0
+
+        async def execute(self, **kwargs):
+            self.calls += 1
+            return SimpleNamespace(call=self.calls)
+
+    class _Experience:
+        def offload(self):
+            with state_lock:
+                state["active"] += 1
+                state["max_active"] = max(state["max_active"], state["active"])
+                state["active"] -= 1
+            return self
+
+    def _convert(traj, *_args):
+        with state_lock:
+            state["active"] += 1
+            state["max_active"] = max(state["max_active"], state["active"])
+        try:
+            if traj.call == 1:
+                first_started.set()
+                assert first_release.wait(timeout=1), "first conversion was not released"
+            else:
+                second_started.set()
+            return _Experience(), None
+        finally:
+            with state_lock:
+                state["active"] -= 1
+
+    monkeypatch.setattr(SamplesGenerator, "_process_response_into_experience", staticmethod(_convert))
+    actor_cls = getattr(AgentRunnerActor, "__ray_actor_class__", AgentRunnerActor)
+    actor = object.__new__(actor_cls)
+    actor._runner = _Runner()
+    actor._tokenizer = None
+    actor._client = None
+    actor._media_ids = set()
+    actor._experience_lock = asyncio.Lock()
+
+    async def _run():
+        first = asyncio.create_task(
+            actor.run_group("prompt", "label", None, SimpleNamespace(), 128, 1, group_id="first")
+        )
+        while not first_started.is_set():
+            await asyncio.sleep(0)
+        first.cancel()
+        second = asyncio.create_task(
+            actor.run_group("prompt", "label", None, SimpleNamespace(), 128, 1, group_id="second")
+        )
+        await asyncio.sleep(0.05)
+        overlapped = second_started.is_set()
+        first_release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert len(await second) == 1
+        assert not overlapped
+        assert state["max_active"] == 1
+
+    asyncio.run(_run())
