@@ -482,7 +482,10 @@ subprocess and feeds the captured stdout back as a `<tool_response>` turn.
 The loop runs up to `MAX_AGENT_TURNS` (agent default 5; the shipped Qwen3.6
 recipes set 4 for the quick start and 10 on Slurm); the final
 `<answer>ANSWER</answer>` (or `\boxed{ANSWER}` for legacy distributions) is
-graded against the ground truth and becomes the reward.
+graded against the ground truth and becomes the reward. Parsing the tool call
+needs the policy's tokenizer, so both multi-turn tool agents (`geo3k.py`,
+`chat_geo3k.py`) also read `MODEL_PATH` — the checkpoint the rollout engine
+runs from; every shipped recipe that uses them already sets it.
 
 ### 🌐 OpenAI- / Anthropic-compatible server agent
 
