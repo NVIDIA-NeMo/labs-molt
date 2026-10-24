@@ -15,13 +15,20 @@ tensor/record, metric, and test without reconstructing hidden control flow.
    of simplicity — knobs default ON stay ON.
 5. A "bug" that cannot trigger under the shipped recipes is not worth fixing.
 
-Details: `.claude/skills/simplicity-first` (invoke before any code change).
+Details: `.agents/skills/simplicity-first` (invoke before any code change).
 
 ## Comments
 
 Concise "why" only, 2-4 lines, written for an external reader: no job ids,
 commit hashes, single-run metrics, or internal cluster paths; keep upstream
 issue/PR links.
+
+## Layout
+
+Skills live once in `.agents/skills/<name>/SKILL.md`, the cross-tool location Codex, Cursor and
+Gemini CLI read directly; `.claude/skills` (Claude Code) and `.codex/skills` (older Codex, Cursor)
+are symlinks to that directory, and `CLAUDE.md` is a symlink to this file. A new skill is just its
+directory under `.agents/skills/`.
 
 ## Workflow
 
@@ -30,4 +37,4 @@ issue/PR links.
 - Verify with `python -m compileall -q molt examples/python tests` and
   `python -m pytest -q`; shell scripts with `bash -n`.
 - Train–inference consistency work (bitwise rollout vs. trainer logprobs, mismatch
-  debugging, aligned kernels): `.claude/skills/train-inference-consistency`.
+  debugging, aligned kernels): `.agents/skills/train-inference-consistency`.
