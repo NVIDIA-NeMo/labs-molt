@@ -312,11 +312,16 @@ def gae(
         running = torch.zeros(token_reward.size(0), device=token_reward.device)
         next_value = torch.zeros_like(running)  # V(s_{T+1}) = 0
         m = mask.float()
+        reward_steps = token_reward.unbind(1)
+        value_steps = values.unbind(1)
+        masked_value_steps = (values * m).unbind(1)
+        mask_steps = m.unbind(1)
+        inverse_mask_steps = (1 - m).unbind(1)
         for t in reversed(range(token_reward.size(1))):
-            delta = token_reward[:, t] + ctx.gamma * next_value - values[:, t]
+            delta = reward_steps[t] + ctx.gamma * next_value - value_steps[t]
             running_t = delta + ctx.gamma * ctx.lam * running
-            next_value = values[:, t] * m[:, t] + (1 - m[:, t]) * next_value
-            running = running_t * m[:, t] + (1 - m[:, t]) * running
+            next_value = masked_value_steps[t] + inverse_mask_steps[t] * next_value
+            running = running_t * mask_steps[t] + inverse_mask_steps[t] * running
             adv[:, t] = running
         advantages.append(adv * mask)
         returns.append((adv + values) * mask)  # value-regression target: returns = A + V(s)
