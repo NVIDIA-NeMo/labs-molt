@@ -44,7 +44,14 @@ def _load(modname: str, relpath: str):
 # parent packages + the by-path modules in sys.modules, then restore it so these
 # stubs don't shadow the real molt.models when a sibling test is collected next.
 _MISSING = object()
-_MODULE_NAMES = ("molt", "molt.models", "molt.models.utils", "molt.models.loss", "advantage")
+_MODULE_NAMES = (
+    "molt",
+    "molt.models",
+    "molt.models.utils",
+    "molt.models.score_centering",
+    "molt.models.loss",
+    "advantage",
+)
 _saved_modules = {name: sys.modules.get(name, _MISSING) for name in _MODULE_NAMES}
 try:
     for _pkg in ("molt", "molt.models"):
@@ -54,6 +61,9 @@ try:
             sys.modules[_pkg] = _m
 
     _load("molt.models.utils", "molt/models/utils.py")
+    # loss.py does `from .score_centering import ...`; the stub parent package has an empty
+    # __path__, so the submodule has to be registered by path first or the import fails.
+    _load("molt.models.score_centering", "molt/models/score_centering.py")
     loss_mod = _load("molt.models.loss", "molt/models/loss.py")
     adv_mod = _load("advantage", "molt/trainer/algorithm/advantage.py")
 
