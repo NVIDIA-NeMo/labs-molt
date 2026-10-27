@@ -128,7 +128,7 @@ def test_math_env_grading_keeps_event_loop_responsive(monkeypatch):
     assert loop_remained_responsive
 
 
-def main() -> None:
+def test_answer_equivalence() -> None:
     fails = []
     for a, b in MATCH:
         if not mg.answers_match(a, b):
@@ -162,4 +162,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    test_answer_equivalence()
