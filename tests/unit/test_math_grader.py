@@ -31,13 +31,6 @@ _spec = importlib.util.spec_from_file_location("math_grader", _MG)
 mg = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(mg)
 
-try:
-    import sympy  # noqa: F401
-
-    HAVE_SYMPY = True
-except Exception:
-    HAVE_SYMPY = False
-
 # Must be judged EQUAL (resolvable by string/normalization, no sympy).
 MATCH = [
     ("36", r"36^\circ"),
@@ -142,24 +135,24 @@ def test_answer_equivalence() -> None:
     if r["reward"] != 1.0:
         fails.append(f"score_response boxed-degree reward={r['reward']} (expected 1.0)")
 
-    if HAVE_SYMPY:
-        for a, b in MATCH_SYMPY:
-            if not mg.answers_match(a, b):
-                fails.append(f"EXPECTED MATCH (sympy) but differ: {a!r} vs {b!r}")
-        rs = mg.score_response(r"\boxed{\frac{1}{2}}", "", {"ground_truth": "0.5"})
-        if rs["reward"] != 1.0:
-            fails.append(f"score_response nested-boxed reward={rs['reward']} (expected 1.0)")
-        note = "sympy cases RAN"
-    else:
-        note = "sympy cases SKIPPED"
+    assert not fails, "\n".join(fails)
 
-    if fails:
-        print(f"FAILED ({len(fails)}):")
-        for f in fails:
-            print("  -", f)
-        raise SystemExit(1)
-    print(f"ALL GRADER TESTS PASSED. {note}")
+
+def test_answer_equivalence_sympy() -> None:
+    """The cases that need sympy's symbolic comparison: skipped, not silently passed, without it."""
+    pytest.importorskip("sympy")
+    fails = []
+    for a, b in MATCH_SYMPY:
+        if not mg.answers_match(a, b):
+            fails.append(f"EXPECTED MATCH (sympy) but differ: {a!r} vs {b!r}")
+
+    rs = mg.score_response(r"\boxed{\frac{1}{2}}", "", {"ground_truth": "0.5"})
+    if rs["reward"] != 1.0:
+        fails.append(f"score_response nested-boxed reward={rs['reward']} (expected 1.0)")
+
+    assert not fails, "\n".join(fails)
 
 
 if __name__ == "__main__":
     test_answer_equivalence()
+    test_answer_equivalence_sympy()
