@@ -28,6 +28,8 @@ path with a version fallback (Qwen3XMLToolParser on vLLM <=0.23,
 Qwen3EngineToolParser on >=0.24); override via `VLLM_TOOL_PARSER_CLS`.
 
 Environment variables:
+  MODEL_PATH              (required)        — the checkpoint the rollout engine
+                                              runs from; builds the tool parser's tokenizer.
   MAX_AGENT_TURNS         (default 5)       — caps tool_call iterations.
   VLLM_TOOL_PARSER_CLS    — full dotted class path of a vLLM ToolParser.
   PYTHON_EXECUTOR_TIMEOUT (default 10)      — wall-clock per tool call (s).
@@ -75,9 +77,19 @@ _PARSER = None
 
 
 def _load_parser():
+    # MODEL_PATH is the checkpoint the rollout engine was launched from: the tool parser is
+    # constructed with its tokenizer. Read here, not at import — the trainer imports every agent
+    # module only to read PRERENDER_PROMPT.
+    model_path = os.environ.get("MODEL_PATH")
+    if not model_path:
+        raise RuntimeError(
+            "MODEL_PATH is not set. Point it at the checkpoint the rollout engine runs from (the same "
+            "value as --actor.model_name_or_path), e.g. MODEL_PATH=/path/to/Qwen3-4B."
+        )
+
     from transformers import AutoTokenizer
 
-    tok = AutoTokenizer.from_pretrained(os.environ["MODEL_PATH"], trust_remote_code=True)
+    tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     for path in _PARSER_CLS_PATHS:
         module_path, _, cls_name = path.rpartition(".")
         try:

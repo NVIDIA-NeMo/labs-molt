@@ -21,6 +21,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 _AGENT_PATH = Path(__file__).resolve().parents[2] / "examples" / "python" / "agents" / "geo3k.py"
 
 
@@ -251,3 +253,13 @@ def test_step_reuses_generated_turn_end_for_feedback(monkeypatch):
 
     assert final.observation.startswith("\n<|im_start|>user")
     assert tool.observation.startswith("\n<|im_start|>user")
+
+
+def test_missing_model_path_names_the_variable_to_set(monkeypatch):
+    """Both tool agents load the parser on every rollout's first turn, so an unset MODEL_PATH kills
+    the run inside a worker: name the variable instead of raising a bare KeyError."""
+    monkeypatch.delenv("MODEL_PATH", raising=False)
+    with pytest.raises(RuntimeError, match="MODEL_PATH is not set"):
+        geo3k._load_parser()
+    with pytest.raises(RuntimeError, match="MODEL_PATH is not set"):
+        _load_chat_geo3k(monkeypatch)._load_parser()
