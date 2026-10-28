@@ -175,6 +175,7 @@ def _fix_sqrt(string: str) -> str:
 
 
 def _strip_string(string: str) -> str:
+    string = _inject_implicit_mixed_number(string)
     string = string.replace("\n", "")
     string = string.replace("\\!", "")
     string = string.replace("\\\\", "\\")
@@ -289,8 +290,9 @@ def _str_to_int(x: str) -> int:
 
 
 def _inject_implicit_mixed_number(step: str) -> str:
-    # e.g. "7 3/4" => "7+3/4"
-    return re.compile("([0-9]) +([0-9])").sub("\\1+\\2", step)
+    # Preserve the mixed-number boundary before stripping whitespace; parentheses
+    # keep a leading minus on the whole value: "-7 3/4" => "-(7+3/4)".
+    return re.sub(r"(?<![\w.])(-?)(\d+)\s+(\d+\s*/\s*\d+)", r"\1(\2+\3)", step)
 
 
 def _strip_properly_formatted_commas(expr: str) -> str:
