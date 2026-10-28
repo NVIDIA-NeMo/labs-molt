@@ -356,6 +356,9 @@ class AgentRunnerActor:
 
         self._runner = load_agent_runner(agent_path)
         self._tokenizer = get_tokenizer(model_path, None) if model_path else None
+        # Keep conversion and object-store offload serial so simultaneous completions do not
+        # multiply large routing copies while that work runs outside the shared event loop.
+        self._experience_lock = asyncio.Lock()
         # Image/video placeholder ids, cached once — _process_response_into_experience uses them to
         # detect an image dropped by max_len truncation (vit-embed misalignment) and count tokens.
         self._media_ids = media_token_ids(self._tokenizer) if self._tokenizer else set()
@@ -418,19 +421,53 @@ class AgentRunnerActor:
             rollout_id = uuid4().hex
             for traj in r if isinstance(r, list) else [r]:
                 traj.group_id, traj.rollout_id = group_id, rollout_id
-                try:
-                    exp, drop_reason = SamplesGenerator._process_response_into_experience(
-                        traj, self._media_ids, max_length
-                    )
-                except Exception as e:  # a malformed trajectory must not sink the group either
-                    print(f"[runner] dropping unconvertible rollout in group {group_id}: {e!r}", flush=True)
-                    exp, drop_reason = None, "convert_error"
-                if exp is None:
-                    results.append((None, drop_reason))
-                    continue
-                # Offload the heavy tensors into THIS runner's object store; the controller receives
-                # a lazy Experience (a handle) and only its consuming rank calls reload() to fetch them.
-                results.append((exp.offload(), None))
+                async with self._experience_lock:
+                    try:
+                        conversion = asyncio.create_task(
+                            asyncio.to_thread(
+                                SamplesGenerator._process_response_into_experience,
+                                traj,
+                                self._media_ids,
+                                max_length,
+                            )
+                        )
+                        # A cancelled to_thread await leaves its worker running. Delay cancellation
+                        # until it exits so the lock still prevents overlapping routing copies.
+                        cancellation = None
+                        while not conversion.done():
+                            try:
+                                await asyncio.shield(conversion)
+                            except asyncio.CancelledError as exc:
+                                cancellation = exc
+                        if cancellation is not None:
+                            try:
+                                conversion.result()
+                            except BaseException:
+                                pass
+                            raise cancellation
+                        exp, drop_reason = conversion.result()
+                    except Exception as e:  # a malformed trajectory must not sink the group either
+                        print(f"[runner] dropping unconvertible rollout in group {group_id}: {e!r}", flush=True)
+                        exp, drop_reason = None, "convert_error"
+                    if exp is not None:
+                        # Offload the heavy tensors into THIS runner's object store; the controller receives
+                        # a lazy Experience (a handle) and only its consuming rank calls reload() to fetch them.
+                        offload = asyncio.create_task(asyncio.to_thread(exp.offload))
+                        cancellation = None
+                        while not offload.done():
+                            try:
+                                await asyncio.shield(offload)
+                            except asyncio.CancelledError as exc:
+                                cancellation = exc
+                        if cancellation is not None:
+                            try:
+                                offload.result()
+                            except BaseException:
+                                pass
+                            raise cancellation
+                        exp = offload.result()
+                        drop_reason = None
+                results.append((exp, drop_reason))
         return results
 
 
