@@ -134,6 +134,12 @@ def run_python(
                 except subprocess.TimeoutExpired:
                     if proc.poll() is None:
                         raise
+                # A normally exiting snippet can leave background children whose redirected
+                # pipes reached EOF. The session is per-call, so no child should outlive it.
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
             except subprocess.TimeoutExpired:
                 # Kill descendants that remain in the interpreter's process group.
                 try:
