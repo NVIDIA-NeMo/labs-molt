@@ -89,6 +89,31 @@ def test_score_response_grades_the_response_with_or_without_a_prompt(prompt, res
     assert result["missing_answer"] == 0.0
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize(
+    "answer,target,reward",
+    [
+        ("7 3/4", "31/4", 1.0),
+        ("7 3/4", "73/4", 0.0),
+        ("7  3 / 4", "73/4", 0.0),
+        ("-7 3/4", "-31/4", 1.0),
+        ("-7 3/4", "-73/4", 0.0),
+        ("-7 3/4", "-25/4", 0.0),
+        ("17 13/14", "251/14", 1.0),
+        ("17 13/14", "1713/14", 0.0),
+    ],
+)
+def test_score_response_preserves_mixed_numbers(answer, target, reward, reverse):
+    if reward:
+        pytest.importorskip("sympy")
+    if reverse:
+        answer, target = target, answer
+
+    result = mg.score_response(r"\boxed{" + answer + "}", "", {"ground_truth": target})
+
+    assert result["reward"] == reward
+
+
 def test_math_env_grading_keeps_event_loop_responsive(monkeypatch):
     agent_path = Path(__file__).resolve().parents[2] / "examples" / "python" / "agents" / "math.py"
     spec = importlib.util.spec_from_file_location("math_agent", agent_path)
