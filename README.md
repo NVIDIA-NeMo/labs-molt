@@ -189,6 +189,7 @@ Common RL switches:
 |---|---|
 | Enable KL regularization (off by default) | `--algo.kl.init_coef 0.3 --algo.kl.use_loss --algo.kl.estimator k3`: the reference is the policy that generated the samples (`--algo.kl.ref rollout`, the default), read from the log-probs vLLM returns with them — no reference workers, no extra memory ([SFC+KL](https://huggingface.co/blog/NormalUhr/sfc-kl); needs `--rollout.top_p 1.0` like the IS correction) |
 | KL to a frozen reference model instead | `--algo.kl.ref model` plus reference workers via `--ref.num_nodes`, `--ref.num_gpus_per_node`, or `--train.colocate_fsdp_models` (`--ref.model_name_or_path` defaults to the actor checkpoint) |
+| Mini-batch / multi-epoch steps without the old-log-prob forward | `--algo.old_log_probs rollout`: the policy ratio is taken against the sampler's own log-probs (vLLM returns them with the samples), so no collection-time actor forward runs and the ratio corrects the off-policy tokens itself; keep `--algo.advantage.is_correction_level off` |
 | Compare samples per prompt | `--rollout.n_samples_per_prompt 8` plus `reinforce_baseline`, `rloo`, `grpo`, or `dr_grpo` |
 | Weigh every prompt the same in the loss | `--actor.loss_agg_mode prompt-mean-token-mean` (token mean inside each prompt's rollouts, then mean over prompts; `seq-mean-token-mean` weighs every rollout the same, the default `token-mean` every token) |
 | Decouple rollout and training | `--train.async_queue_size 2` |

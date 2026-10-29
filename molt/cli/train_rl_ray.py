@@ -96,6 +96,7 @@ def train(args):
             "processed_logprobs"
             if args.algo.advantage.is_correction_level != "off"
             or args.algo.advantage.score_centering_top_k
+            or args.algo.old_log_probs == "rollout"
             or (args.algo.kl.init_coef > 0 and args.algo.kl.ref == "rollout")
             else None,
             max_images_per_prompt=getattr(args.data, "max_images_per_prompt", 0),
@@ -566,6 +567,20 @@ if __name__ == "__main__":
             "trainer-generator KL of https://huggingface.co/blog/NormalUhr/sfc-kl (pair with --algo.kl.use_loss "
             "--algo.kl.estimator k3). model: a frozen reference model on its own GPUs (--ref.*); on_policy_distill "
             "always uses it (the teacher)."
+        ),
+    )
+    parser.add_argument(
+        "--algo.old_log_probs",
+        type=str,
+        default="actor",
+        choices=["actor", "rollout"],
+        help=(
+            "Whose log-probs stand in the denominator of the policy ratio (the 'old' policy). actor (default): a "
+            "forward of the training policy at collection time, one more pass per batch. rollout: the log-probs "
+            "vLLM returned with the samples, so the ratio is pi/mu against the policy that actually sampled and no "
+            "collection-time forward runs -- the way to take mini-batch or multi-epoch steps without paying for "
+            "old. The sampler then already corrects the off-policy tokens, so --algo.advantage.is_correction_level "
+            "must stay off (its own old/rollout ratio would be identically 1)."
         ),
     )
     parser.add_argument(
@@ -1140,9 +1155,22 @@ if __name__ == "__main__":
         if args.fsdp.tp_size > 1:
             raise ValueError("score centering requires --fsdp.tp_size 1 (the head is not vocab-parallel yet)")
 
+    old_from_rollout = args.algo.old_log_probs == "rollout"
+    if old_from_rollout and args.algo.advantage.is_correction_level != "off":
+        raise ValueError(
+            "--algo.old_log_probs rollout already divides by the sampler (ratio pi/mu); the IS correction's "
+            "own old/rollout ratio would be identically 1 and its gate would never fire -- set "
+            "--algo.advantage.is_correction_level off."
+        )
+
     # Score centering is itself the off-policy correction (the centered score is unbiased under the
-    # rollout policy), so it may train async / partial rollouts without an importance ratio.
-    if args.algo.advantage.is_correction_level == "off" and not args.algo.advantage.score_centering_top_k:
+    # rollout policy), and a ratio against the sampler corrects every off-policy token by construction,
+    # so either may train async / partial rollouts without the IS correction.
+    if (
+        args.algo.advantage.is_correction_level == "off"
+        and not args.algo.advantage.score_centering_top_k
+        and not old_from_rollout
+    ):
         # The HTTP router path can't observe a mid-request weight swap, so off_policy_len is always 0
         # (no slime-style masking of stale-weight tokens). Async rollout (crosses broadcasts between
         # requests) and partial rollout (preempts mid-request at every weight sync) both then feed
@@ -1170,13 +1198,15 @@ if __name__ == "__main__":
         )
 
     kl_to_rollout = args.algo.kl.init_coef > 0 and args.algo.kl.ref == "rollout"
-    if (args.algo.advantage.is_correction_level != "off" or kl_to_rollout) and args.rollout.top_p < 1.0:
+    if (
+        args.algo.advantage.is_correction_level != "off" or kl_to_rollout or old_from_rollout
+    ) and args.rollout.top_p < 1.0:
         # vLLM computes `processed_logprobs` AFTER the top-p mask, so they are renormalized over the
         # kept nucleus while training recomputes over the full vocabulary. Every rollout log-prob is
         # then offset by -log(kept mass), biasing vllm_kl, the IS ratio and a rollout-referenced KL.
         raise ValueError(
             f"--rollout.top_p {args.rollout.top_p} biases the rollout log-probs the IS correction / "
-            "--algo.kl.ref rollout consume; use --rollout.top_p 1.0, or turn those off."
+            "--algo.kl.ref rollout / --algo.old_log_probs rollout consume; use --rollout.top_p 1.0, or turn those off."
         )
 
     # --- Data ---

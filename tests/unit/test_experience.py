@@ -176,11 +176,12 @@ def test_experience_offload_reload_roundtrip(monkeypatch):
     exp.reload()  # idempotent — second call is a no-op
 
 
-def _kl_args(ref, use_loss):
+def _kl_args(ref, use_loss, init_coef=0.1, old_log_probs="actor"):
     return SimpleNamespace(
         algo=SimpleNamespace(
-            kl=SimpleNamespace(ref=ref, use_loss=use_loss, estimator="k1", init_coef=0.1),
+            kl=SimpleNamespace(ref=ref, use_loss=use_loss, estimator="k1", init_coef=init_coef),
             advantage=SimpleNamespace(estimator="reinforce"),
+            old_log_probs=old_log_probs,
         ),
         train=SimpleNamespace(force_on_policy=False),
     )
@@ -216,3 +217,33 @@ def test_rollout_reference_kl_uses_the_rollout_log_probs_without_a_reference_mod
 def test_rollout_reference_kl_requires_rollout_log_probs(monkeypatch):
     with pytest.raises(ValueError, match="rollout log-probs"):
         _make_experience_with_rollout_reference(monkeypatch, use_loss=True, rollout_log_probs=None)
+
+
+def _forwards_dispatched(monkeypatch, args):
+    """Which model forwards make_experience asks for under ``args`` (no reference / critic group)."""
+    maker = RemoteExperienceMaker(object(), None, None, SimpleNamespace(args=args), None)
+    dispatched = []
+
+    def _fake_dispatch(experiences, group, result_attr):
+        dispatched.append(result_attr)
+        for experience in experiences:
+            experience.action_log_probs = torch.tensor([[-1.0, -2.0, -0.5]])
+
+    monkeypatch.setattr(maker, "_dispatch_forward", _fake_dispatch)
+    exp = Experience(action_mask=torch.ones(1, 3, dtype=torch.bool), rollout_log_probs=torch.zeros(1, 3), info={})
+    maker.make_experience([exp])
+    return dispatched
+
+
+def test_old_log_probs_from_rollout_skips_the_collection_time_actor_forward(monkeypatch):
+    """--algo.old_log_probs rollout: the sampler's log-probs are old, so no actor forward runs at
+    collection time (the training rank substitutes them); a KL *reward* still needs it, because the
+    controller compares old to the reference right here."""
+    assert _forwards_dispatched(monkeypatch, _kl_args("rollout", False, init_coef=0.0)) == ["action_log_probs"]
+    assert _forwards_dispatched(monkeypatch, _kl_args("rollout", False, init_coef=0.0, old_log_probs="rollout")) == []
+    assert (
+        _forwards_dispatched(monkeypatch, _kl_args("rollout", True, old_log_probs="rollout")) == []
+    )  # KL in the loss
+    assert _forwards_dispatched(monkeypatch, _kl_args("rollout", False, old_log_probs="rollout")) == [
+        "action_log_probs"
+    ]

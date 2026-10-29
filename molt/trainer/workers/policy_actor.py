@@ -465,7 +465,17 @@ class PolicyTrainer:
             **multimodal_inputs,
         )
         action_log_probs = model_output["action_log_probs"]
-        if old_action_log_probs is None:
+        if self.args.algo.old_log_probs == "rollout":
+            # The sampler is the ratio's denominator: pi/mu straight from vLLM's log-probs of the
+            # sampled tokens, no collection-time forward. Substituted here rather than on the
+            # controller because rollout_log_probs is a heavy field that only the training rank
+            # materialises (Experience.reload).
+            if rollout_log_probs is None:
+                raise ValueError(
+                    "--algo.old_log_probs rollout needs the rollout log-probs, but the samples carry none"
+                )
+            old_action_log_probs = rollout_log_probs
+        elif old_action_log_probs is None:
             # force_on_policy: experience_maker skipped the redundant old-logprob forward.
             # The batch is trained for one on-policy step, so old == this forward -> PPO
             # ratio 1 -> REINFORCE gradient; the IS correction still runs vs rollout_log_probs.

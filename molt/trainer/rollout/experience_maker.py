@@ -144,9 +144,13 @@ class RemoteExperienceMaker:
 
         # Old actor log-probs. Force-on-policy with no KL reward (kl_coef==0): old == the training
         # forward, so the PPO ratio is 1 (REINFORCE) and policy_train recomputes old itself — skip
-        # the redundant pass. Otherwise (off-policy, or a KL/distill reward that compares old vs the
-        # ref) run the actor forward here.
-        skip_actor_old = args.train.force_on_policy and args.algo.kl.init_coef == 0
+        # the redundant pass. --algo.old_log_probs rollout: the sampler's log-probs are old (the
+        # training rank substitutes them), so the forward is only needed for a KL *reward*, which
+        # compares old to the reference here. Otherwise run the actor forward.
+        kl_reward = args.algo.kl.init_coef > 0 and not args.algo.kl.use_loss
+        skip_actor_old = (args.train.force_on_policy and args.algo.kl.init_coef == 0) or (
+            args.algo.old_log_probs == "rollout" and not kl_reward
+        )
         if not skip_actor_old:
             self._dispatch_forward(experiences, self.actor_model_group, "action_log_probs")
 
