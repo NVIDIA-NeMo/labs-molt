@@ -13,9 +13,48 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
 import torch
 
 from molt.models.utils import mismatch_metrics
+
+
+@pytest.mark.parametrize(
+    "kl,exit_code",
+    [(-0.5, 1), (0.5, 1), (-0.01, 0), (0.01, 0), (-0.009, 0), (0.009, 0), (0.0, 0), (None, 0)],
+)
+def test_e2e_summary_checks_magnitude_of_signed_kl(tmp_path, kl, exit_code):
+    metrics = {"reward": 1.0, "actor_grad_norm": 1.0}
+    if kl is not None:
+        metrics["vllm_kl"] = kl
+    log = tmp_path / "train.log"
+    log.write_text(f"Global step 1: {metrics!r}\nGlobal step 2: {metrics!r}\n")
+    summary = tmp_path / "summary.md"
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).resolve().parents[1] / "e2e/summarize_metrics.py"),
+            str(log),
+            "--out",
+            str(summary),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+
+    assert result.returncode == exit_code, result.stderr
+    assert summary.read_text().strip() == result.stdout.strip()
+    if exit_code:
+        assert f"vllm_kl mean {kl:.2e}" in result.stdout
+        assert "rollout and trainer log-probs disagree" in result.stdout
+    else:
+        assert "No alerts." in result.stdout
 
 
 def test_bitwise_frac_counts_last_bit_differences_that_a_printed_value_hides():

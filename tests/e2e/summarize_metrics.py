@@ -69,9 +69,10 @@ def main():
         alerts.append("actor_grad_norm is 0 on every update: no learning signal reaches the actor")
     if "actor_grad_norm" in series and max(series["actor_grad_norm"]) > 100:
         alerts.append(f"actor_grad_norm peaks at {max(series['actor_grad_norm']):.3g}: exploding gradient")
-    if (mean("vllm_kl") or 0) > 1e-2:
+    if abs(mean("vllm_kl") or 0) > 1e-2:
         alerts.append(
-            f"vllm_kl mean {mean('vllm_kl'):.2e} > 1e-2: rollout and trainer log-probs disagree (refit or log-prob path)"
+            f"vllm_kl mean {mean('vllm_kl'):.2e} has magnitude > 1e-2: "
+            "rollout and trainer log-probs disagree (refit or log-prob path)"
         )
     if (mean("is_filter_ratio") or 0) > 0.2:
         alerts.append(f"is_filter_ratio mean {mean('is_filter_ratio'):.2f}: the IS gate rejects too many sequences")
