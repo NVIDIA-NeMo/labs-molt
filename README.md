@@ -52,6 +52,8 @@ API, one trainable actor, clean enough to read end-to-end.
 
 ## 📰 News
 
+- **2026-11** · Molt powers [REINFORCE Zero](https://github.com/hijkzzz/REINFORCE-Zero), combining trainer–inference invariance (TII) with unclipped token-level importance sampling for stable asynchronous RL through **20,000 policy updates** — see the [kernel-alignment agent skill](.agents/skills/train-inference-consistency/SKILL.md).
+
 - **2026-09** · Molt now supports [FlashREINFORCE](https://www.alphaxiv.org/abs/2609.flashreinforce-asynchronous-rl-agentic-models), critic-free single-rollout RL with stable training beyond 6,000 steps — see the [quick start](examples/scripts/quick_start/rl_flash_reinforce_r1d_1p5b.sh).
 
 ## 🧩 Architecture
