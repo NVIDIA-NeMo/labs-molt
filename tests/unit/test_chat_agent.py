@@ -16,10 +16,57 @@
 """Unit tests for chat-agent prompt helpers."""
 
 import asyncio
+import runpy
+import sys
 import threading
+from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
+
+
+def test_math_agent_grading_keeps_event_loop_responsive(monkeypatch):
+    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=r"\boxed{42}"))])
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=SimpleNamespace(create=AsyncMock(return_value=response)))
+    )
+    monkeypatch.setitem(sys.modules, "openai", SimpleNamespace(AsyncOpenAI=lambda **kwargs: client))
+    agent = runpy.run_path(str(Path(__file__).resolve().parents[2] / "examples/python/agents/chat_minimal.py"))
+    started, release, timed_out = threading.Event(), threading.Event(), threading.Event()
+    score_response = agent["_GRADER"].score_response
+
+    def slow_grader(*args):
+        started.set()
+        if not release.wait(timeout=1):
+            timed_out.set()
+        return score_response(*args)
+
+    monkeypatch.setattr(agent["_GRADER"], "score_response", slow_grader)
+    ctx = SimpleNamespace(
+        base_url="http://localhost",
+        api_key="EMPTY",
+        model_name="policy",
+        messages=[],
+        sampling_params=SimpleNamespace(max_tokens=32, temperature=1.0),
+        label={"ground_truth": "42"},
+    )
+
+    async def run_agent():
+        task = asyncio.create_task(agent["MathAgent"]().run(ctx))
+        try:
+            while not started.is_set() and not task.done():
+                await asyncio.sleep(0)
+            loop_remained_responsive = not timed_out.is_set()
+        finally:
+            release.set()
+        return await task, loop_remained_responsive
+
+    result, loop_remained_responsive = asyncio.run(run_agent())
+
+    assert result.reward.item() == 1.0
+    assert result.info["math_exact"].item() == 1.0
+    assert loop_remained_responsive
 
 
 def _import_helpers():
