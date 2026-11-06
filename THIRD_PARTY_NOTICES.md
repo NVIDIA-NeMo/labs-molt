@@ -120,6 +120,7 @@ repository.
 | grpcio | Apache-2.0 | https://github.com/grpc/grpc |
 | huggingface_hub | Apache-2.0 | https://github.com/huggingface/huggingface_hub |
 | jsonlines | BSD-3-Clause | https://github.com/wbolster/jsonlines |
+| liger-kernel (extra) | BSD-2-Clause | https://github.com/linkedin/Liger-Kernel |
 | nemo-automodel | Apache-2.0 | https://github.com/NVIDIA-NeMo/Automodel |
 | optree | Apache-2.0 | https://github.com/metaopt/optree |
 | packaging | Apache-2.0 OR BSD-2-Clause | https://github.com/pypa/packaging |
