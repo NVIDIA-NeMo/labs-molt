@@ -21,6 +21,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import pytest
+
 _AGENT_PATH = Path(__file__).resolve().parents[2] / "examples" / "python" / "agents" / "geo3k.py"
 
 
@@ -86,6 +88,17 @@ def test_step_terminates_on_nested_boxed_answer_with_tool_call(monkeypatch):
     assert result.terminated is True
     assert result.reward.item() == 1.0
     assert env.tool_call_count == 0
+
+
+@pytest.mark.parametrize("module_name", ["geo3k", "chat_geo3k"])
+def test_final_answer_takes_the_last_box_whichever_command_it_uses(monkeypatch, module_name):
+    """Guards the grader helper both agents reach into: it was renamed under them once."""
+    mod = geo3k if module_name == "geo3k" else _load_chat_geo3k(monkeypatch)
+
+    assert mod._final_answer(r"\boxed{7} then \fbox{\frac{1}{2}}") == r"\frac{1}{2}"
+    assert mod._final_answer(r"\fbox{7} then \boxed{\frac{1}{2}}") == r"\frac{1}{2}"
+    assert mod._final_answer(r"\boxed{7} and an unfinished \fbox{9") == "7"
+    assert mod._final_answer("<answer>5</answer>") == "5"
 
 
 def test_step_parser_initialization_keeps_event_loop_responsive(monkeypatch):

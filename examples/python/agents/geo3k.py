@@ -113,7 +113,7 @@ def _final_answer(text: str) -> str:
     answers = _ANSWER_RE.findall(text)
     if answers:
         return answers[-1].strip()
-    boxed = _GRADER._last_braced_command(text, r"\boxed") or _GRADER._last_braced_command(text, r"\fbox")
+    boxed = _GRADER._last_braced_answer(text)
     return boxed.strip() if boxed else ""
 
 
