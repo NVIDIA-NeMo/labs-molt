@@ -800,3 +800,37 @@ def test_chat_request_cannot_change_rollout_temperature_or_top_p():
     with pytest.warns(UserWarning, match="ignored"):
         sp = cs._build_sampling_params(base, {"temperature": 0.2, "top_p": 0.5, "max_tokens": 7})
     assert (sp.temperature, sp.top_p, sp.max_tokens, sp.logprobs) == (1.0, 1.0, 7, 1)
+
+
+class _KnobThinkProc(_PositionalThinkProc):
+    """Nemotron-3-style template: drops earlier turns' <think> unless truncate_history_thinking=False."""
+
+    chat_template = "{% set truncate_history_thinking = truncate_history_thinking | default(true) %}..."
+
+    def __init__(self):
+        self.kwargs_seen = []
+
+    def apply_chat_template(self, chat, tokenize=False, add_generation_prompt=False, **kwargs):
+        self.kwargs_seen.append(kwargs)
+        if kwargs.get("truncate_history_thinking", True):
+            return super().apply_chat_template(chat, tokenize, add_generation_prompt)
+        return _DriftyProc.apply_chat_template(self, chat, tokenize, add_generation_prompt)
+
+
+def test_history_thinking_kept_when_the_template_has_the_knob():
+    a1, a2 = "<think>T</think>ANS", "A2"
+    engine = _DriftyEngine([_dact(_ids(a1), [-0.1] * len(a1)), _dact(_ids(a2), [-0.2] * len(a2))])
+    proc = _KnobThinkProc()  # chat_template mentions the knob -> rendered with it off
+    state = ChatServerState(engine, proc, "policy", 10000, _sampling())
+    state.open("sid", "P", "lab", None)
+    session = state.sessions["sid"]
+
+    msgs = [{"role": "user", "content": "Q0"}]
+    act1, _ = _drive(state, session, msgs)
+    msgs = msgs + [{"role": "assistant", "content": act1}, {"role": "user", "content": "OBS1"}]
+    _drive(state, session, msgs)
+
+    assert proc.kwargs_seen and all(k.get("truncate_history_thinking") is False for k in proc.kwargs_seen)
+    # History renders as generated -> prefix-stable -> one segment with two actions, not one segment per turn.
+    assert len(session.trajectories) == 1 and len(session.trajectories[0].action_ranges) == 2
+    assert "<think>T</think>" in proc.decode(engine.prompts[1])  # the policy sees its own earlier reasoning
