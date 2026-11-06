@@ -67,6 +67,17 @@ NOMATCH = [
 ]
 
 
+@pytest.mark.parametrize("first,last", [(r"\boxed", r"\fbox"), (r"\fbox", r"\boxed")])
+@pytest.mark.parametrize("trailing", ["", r" and an unfinished \boxed{9", r" and an unfinished \fbox{9"])
+def test_score_response_uses_last_balanced_answer_across_box_types(first, last, trailing):
+    response = first + "{7} then " + last + r"{\frac{1}{2}}" + trailing
+
+    result = mg.score_response(response, "", {"ground_truth": "0.5"})
+    assert result["prediction"] == r"\frac{1}{2}"
+    assert result["reward"] == 1.0
+    assert mg.score_response(response, "", {"ground_truth": "7"})["reward"] == 0.0
+
+
 @pytest.mark.parametrize("prompt", ["What is 1 * 7?", r"Check \boxed{7}."])
 @pytest.mark.parametrize("response", ["", "I do not know."])
 def test_score_response_does_not_extract_an_answer_from_the_prompt(prompt, response):

@@ -57,8 +57,8 @@ def _strip_prompt(query: str, prompt: Any) -> str:
     return query
 
 
-def _last_braced_command(text: str, command: str) -> str | None:
-    matches = list(re.finditer(rf"{re.escape(command)}\s*{{", text))
+def _last_braced_answer(text: str) -> str | None:
+    matches = list(re.finditer(r"\\(?:boxed|fbox)\s*{", text))
     for match in reversed(matches):
         start = match.end()
         depth = 1
@@ -80,10 +80,9 @@ def extract_answer(text: str) -> str | None:
     if not text:
         return None
 
-    for command in (r"\boxed", r"\fbox"):
-        boxed = _last_braced_command(text, command)
-        if boxed:
-            return boxed
+    boxed = _last_braced_answer(text)
+    if boxed:
+        return boxed
 
     answer_matches = list(
         re.finditer(
