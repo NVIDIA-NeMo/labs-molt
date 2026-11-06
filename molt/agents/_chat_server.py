@@ -211,11 +211,13 @@ class _Session:
     # template re-render of prior turns starts a fresh segment. Empty until the first turn generates.
     trajectories: list = field(default_factory=list)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # serialize turns within a session
-    # Idempotent replay: a stock client retries a turn whose response was lost (e.g. a weight
-    # broadcast stalled the loop). The retry re-sends the SAME messages; we return the cached
-    # reply WITHOUT recording a second action, so retries can't double-count a turn.
+    # The SAME messages posted again mean the agent discarded the reply (it did not parse) and wants
+    # another sample: the recorded action is dropped and the turn re-generated (see _run_turn).
+    # last_commit = (segment, truncated-before-that-action) of the last recorded action; None when
+    # the last post generated nothing (context full), which is replayed as is.
     last_messages: list | None = None
     last_response: tuple | None = None
+    last_commit: tuple | None = None
 
 
 class ChatServerState:
@@ -270,23 +272,38 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
     messages = body.get("messages") or []
     if not messages:
         raise HTTPException(status_code=400, detail="No messages provided")
-    if messages == session.last_messages:  # retry of an already-recorded turn -> replay, don't re-record
+    resample = messages == session.last_messages
+    if resample and session.last_commit is None:  # nothing was generated for these messages: same answer
         return session.last_response
     sp = _build_sampling_params(session.sampling_params or state.default_sampling, body)
     kwargs = {"tools": body["tools"]} if body.get("tools") else {}
     loop = asyncio.get_running_loop()
 
-    # Does this turn continue the running segment, or did the agent rewrite/shorten the history
-    # (compaction)? A normal turn appends the reply it answers (messages[n]) and then any number of new
-    # user/tool messages (parallel tool results, an observation plus a reminder) onto the SAME prefix,
-    # so its messages extend last_messages; a compaction changes that prefix. Also false on turn 1.
-    n = len(session.last_messages or [])
-    extends = (
-        bool(session.trajectories) and messages[:n] == session.last_messages and messages[n].get("role") == "assistant"
-    )
-    chat, pil_images = await loop.run_in_executor(_TOKENIZE_EXECUTOR, _messages_to_chat, state, messages)
-    full = state.processor.apply_chat_template(chat, tokenize=False, add_generation_prompt=True, **kwargs)
-    if extends:
+    if resample:
+        # The same messages again: the agent threw the reply away (it did not parse) and asks for
+        # another sample. Replaying the cached text would hand it the same unparseable reply on every
+        # retry, so drop the recorded action and generate afresh over the same context: the trained
+        # turn is the reply the agent goes on to act on. A client whose response was lost in transit
+        # lands here too and gets a fresh sample, recorded once.
+        traj, traj.truncated = session.last_commit
+        traj.pop_action()
+        extends = True  # the segment and this turn's feedback are already committed
+        gen_tokens = traj.observation_tokens
+        remaining = state.max_length - len(gen_tokens) - traj.image_budget
+    else:
+        # Does this turn continue the running segment, or did the agent rewrite/shorten the history
+        # (compaction)? A normal turn appends the reply it answers (messages[n]) and then any number of
+        # new user/tool messages (parallel tool results, an observation plus a reminder) onto the SAME
+        # prefix, so its messages extend last_messages; a compaction changes that prefix. False on turn 1.
+        n = len(session.last_messages or [])
+        extends = (
+            bool(session.trajectories)
+            and messages[:n] == session.last_messages
+            and messages[n].get("role") == "assistant"
+        )
+        chat, pil_images = await loop.run_in_executor(_TOKENIZE_EXECUTOR, _messages_to_chat, state, messages)
+        full = state.processor.apply_chat_template(chat, tokenize=False, add_generation_prompt=True, **kwargs)
+    if not resample and extends:
         prefix = state.processor.apply_chat_template(
             chat[: n + 1], tokenize=False, add_generation_prompt=False, **kwargs
         )
@@ -295,7 +312,9 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
         # assistant turn WITHOUT its <think> block once a newer user query follows — and the slice
         # would silently drop or garble this turn's feedback. Treat that like a compaction.
         extends = full.startswith(prefix)
-    if not extends:
+    if resample:
+        pass
+    elif not extends:
         # New segment (episode start OR post-compaction/re-render): render the prompt in full +
         # tokenize (image count self-consistent with the vision encoder). process_prompt_with_images
         # is a multi-second CPU op per image; run it off the loop so other sessions' generations overlap.
@@ -309,7 +328,7 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
         )
         remaining = state.max_length - len(prompt_ids) - image_budget
         if remaining <= 0:  # prompt alone fills the context -> generate nothing; stitch drops empty rollouts
-            session.last_messages, session.last_response = messages, ("", "length")
+            session.last_messages, session.last_response, session.last_commit = messages, ("", "length"), None
             return "", "length"
         # Built but NOT yet attached to the session: a failed generate below must leave the session
         # untouched (see the commit note) so a client retry re-runs cleanly.
@@ -350,7 +369,7 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
         remaining = state.max_length - len(gen_tokens) - traj.image_budget
         if remaining <= 0:  # grown context fills the window -> end truncated; prior turns are kept
             traj.truncated = True
-            session.last_messages, session.last_response = messages, ("", "length")
+            session.last_messages, session.last_response, session.last_commit = messages, ("", "length"), None
             return "", "length"
 
     # Clamp generation to the remaining budget (the step runner clamps the same way).
@@ -388,10 +407,13 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
     # Commit the turn only now that generate succeeded. A failed generate above left the session
     # untouched, so the stock client's retry (same messages) re-runs this turn cleanly — no
     # double-appended delta, and no half-built segment to trip the extends check / crash on turn 1.
-    if not extends:
+    if resample:
+        pass  # segment and feedback already in place; only the action is new
+    elif not extends:
         session.trajectories.append(traj)
     else:
         traj.append_feedback(prev_action_text, delta_text, delta_ids)
+    truncated_before = traj.truncated
     traj.truncated = traj.truncated or finish_reason == "length"
     # off_policy_len: leading tokens generated under stale weights when a broadcast landed
     # mid-request (per-token IS still corrects them); the transport reports it, same as the step runner.
@@ -405,6 +427,7 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
     # prefill covers the prior action's trailing token too, so the turn-boundary backfills naturally.
     traj.absorb_routing(request_output)
     session.last_messages, session.last_response = messages, (action_text, finish_reason)
+    session.last_commit = (traj, truncated_before)
     session.last_action_text = raw_action_text
     return action_text, finish_reason
 

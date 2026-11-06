@@ -173,6 +173,18 @@ class Trajectory:
             # placeholders; absorb_routing() fills them by absolute position (R3)
             self.routed_experts.extend([None] * len(action_tokens))
 
+    def pop_action(self):
+        """Drop the last action: the agent threw that reply away and asks for another sample."""
+        start, _ = self.action_ranges.pop()
+        self.off_policy_action_lens.pop()
+        del self.observation_tokens[start:]
+        if self.rollout_log_probs is not None:
+            del self.rollout_log_probs[start:]
+        if self.rollout_top_logprobs is not None:
+            self.rollout_top_logprobs.pop()
+        if self.routed_experts is not None:
+            del self.routed_experts[start:]
+
     def append_feedback(self, action_text: str, feedback_text: str, feedback_tokens):
         self.observation_text = self.observation_text + action_text + feedback_text
         self.observation_tokens.extend(feedback_tokens)

@@ -377,16 +377,46 @@ def test_turn_without_the_reply_starts_fresh_segment():
     assert engine.prompts[1] == _ids(proc.apply_chat_template(msgs, add_generation_prompt=True))
 
 
-def test_run_turn_replays_retried_turn_idempotently(monkeypatch):
+def test_run_turn_resamples_an_identical_repost(monkeypatch):
+    # The agent re-posts the SAME messages when the reply did not parse (its resample loop). A cached
+    # replay would feed it the same unparseable text every time; instead the recorded action is dropped
+    # and the turn sampled again over the same context, so only the reply the agent acts on is trained.
     _patch_prompts(monkeypatch, [[1, 2]])
-    state, tp = _state([_act([90], [-0.1])])
+    state, tp = _state([_act([90], [-0.1]), _act([91, 92], [-0.2, -0.3])])
     state.open("sid", "P", "l", None)
     session = state.sessions["sid"]
-    r1 = asyncio.run(_run_turn(state, session, _MSG))
-    r2 = asyncio.run(_run_turn(state, session, {"messages": [{"role": "user", "content": "P"}]}))
-    # cached, no 2nd generate: one trajectory with a single action range
-    assert r1 == r2 and len(session.trajectories) == 1
-    assert len(session.trajectories[0].action_ranges) == 1 and len(tp.calls) == 1
+    asyncio.run(_run_turn(state, session, _MSG))
+    asyncio.run(_run_turn(state, session, {"messages": [{"role": "user", "content": "P"}]}))
+    assert len(tp.calls) == 2 and tp.calls[1][0] == [1, 2]  # second sample over the same prompt
+    traj = session.trajectories[0]
+    assert len(session.trajectories) == 1 and traj.action_ranges == [(2, 4)]
+    assert traj.observation_tokens == [1, 2, 91, 92]
+    assert traj.rollout_log_probs == [0.0, 0.0, -0.2, -0.3]
+
+
+def test_continuation_resample_keeps_the_feedback(monkeypatch):
+    # On a later turn the re-post drops only the action; the feedback committed for that turn stays.
+    _patch_prompts(monkeypatch, [[1, 2, 3]])
+    monkeypatch.setattr(cs, "_tokenize_feedback", lambda proc, text, imgs, traj, ml: [50, 51])
+    state, tp = _state([_act([90], [-0.1]), _act([91], [-0.2], finish="length"), _act([92], [-0.3])])
+    state.open("sid", "P", "lab", None)
+    session = state.sessions["sid"]
+    asyncio.run(_run_turn(state, session, _MSG))
+    msgs2 = {
+        "messages": [
+            {"role": "user", "content": "P"},
+            {"role": "assistant", "content": "ACT"},
+            {"role": "user", "content": "obs"},
+        ]
+    }
+    asyncio.run(_run_turn(state, session, msgs2))
+    traj = session.trajectories[0]
+    assert traj.truncated  # the first turn-2 sample hit the length limit
+    asyncio.run(_run_turn(state, session, msgs2))  # same messages again -> resample turn 2
+    assert tp.calls[2][0] == [1, 2, 3, 90, 50, 51]  # over the committed context, feedback included once
+    assert traj.observation_tokens == [1, 2, 3, 90, 50, 51, 92] and traj.action_ranges == [(3, 4), (6, 7)]
+    assert traj.rollout_log_probs == [0.0, 0.0, 0.0, -0.1, 0.0, 0.0, -0.3]
+    assert not traj.truncated  # the dropped sample's truncation went with it
 
 
 class _FlakyTransport(_FakeTransport):
@@ -454,6 +484,8 @@ def test_run_turn_ends_truncated_on_context_overflow(monkeypatch):
     action, finish = asyncio.run(_run_turn(state, state.sessions["sid"], _MSG))
     assert (action, finish) == ("", "length")
     assert state.sessions["sid"].trajectories == [] and tp.calls == []
+    # nothing was generated, so an identical re-post has nothing to resample: same answer, no generate
+    assert asyncio.run(_run_turn(state, state.sessions["sid"], _MSG)) == ("", "length") and tp.calls == []
 
 
 def test_run_turn_marks_truncated_on_length_finish(monkeypatch):
