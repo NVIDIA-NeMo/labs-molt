@@ -88,6 +88,16 @@ def test_score_response_does_not_extract_an_answer_from_the_prompt(prompt, respo
     assert result["missing_answer"] == 1.0
 
 
+@pytest.mark.parametrize("answer,target", [(".5", "0.5"), ("-.5", "-0.5"), ("+.5", "0.5"), (".05", "0.05")])
+def test_numeric_fallback_preserves_leading_decimal_point(answer, target):
+    response = "Computing the ratio gives " + answer
+
+    result = mg.score_response(response, "", {"ground_truth": target})
+    assert result["prediction"] == answer
+    assert result["reward"] == 1.0
+    assert mg.score_response(response, "", {"ground_truth": "5"})["reward"] == 0.0
+
+
 @pytest.mark.parametrize("prompt", ["", "What is 1 * 7?"])
 @pytest.mark.parametrize(
     "response,target,reward",
