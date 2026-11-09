@@ -97,7 +97,7 @@ def extract_answer(text: str) -> str | None:
             return candidate
 
     numeric_matches = re.findall(
-        r"(?:[-+]?\d+(?:\.\d+)?\s*%?)|(?:\\frac\s*{[^{}]+}\s*{[^{}]+})",
+        r"(?:[-+]?(?:\d+(?:\.\d+)?|(?<![\w.])\.\d+)\s*%?)|(?:\\frac\s*{[^{}]+}\s*{[^{}]+})",
         text,
     )
     if numeric_matches:

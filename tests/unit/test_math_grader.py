@@ -45,6 +45,8 @@ MATCH = [
     ("30", "x=30"),  # short leading assignment
     ("100", "100"),
     ("3.0", "3"),
+    (".5", "0.5"),
+    (".05", "0.05"),
 ]
 
 # Must be judged EQUAL but only via sympy (skipped if sympy absent).
@@ -52,6 +54,8 @@ MATCH_SYMPY = [
     (r"\sqrt{12}", r"2\sqrt{3}"),
     (r"2\sqrt{3}", r"\sqrt{12}"),
     ("1/2", "0.50"),
+    ("-.5", "-0.5"),
+    ("+.5", "0.5"),
 ]
 
 # Must be judged DIFFERENT — over-count guard.
@@ -86,6 +90,35 @@ def test_score_response_does_not_extract_an_answer_from_the_prompt(prompt, respo
     assert result["reward"] == 0.0
     assert result["prediction"] == ""
     assert result["missing_answer"] == 1.0
+
+
+@pytest.mark.parametrize("answer", [".5", "-.5", "+.5", ".05"])
+def test_numeric_fallback_preserves_leading_decimal_point(answer):
+    response = "Computing the ratio gives " + answer
+
+    result = mg.score_response(response, "", {"ground_truth": "5"})
+    assert result["prediction"] == answer
+    assert result["reward"] == 0.0
+
+
+@pytest.mark.parametrize("response", ["That gives...5", "That gives..5", "That gives... 5"])
+def test_numeric_fallback_does_not_treat_ellipsis_as_decimal_point(response):
+    result = mg.score_response(response, "", {"ground_truth": "5"})
+    assert result["prediction"] == "5"
+    assert result["reward"] == 1.0
+    assert mg.score_response(response, "", {"ground_truth": "0.5"})["reward"] == 0.0
+
+
+@pytest.mark.parametrize(
+    "response,expected",
+    [("version 1.2.3 is out", "3"), ("See Theorem 2.3.1", "1"), ("see Fig.2", "2"), ("Option No.5", "5")],
+)
+def test_numeric_fallback_keeps_dotted_identifiers_as_integers(response, expected):
+    # A point glued to a digit or a letter is a separator, not a decimal point: the trailing part stays an integer.
+    result = mg.score_response(response, "", {"ground_truth": expected})
+    assert result["prediction"] == expected
+    assert result["reward"] == 1.0
+    assert mg.score_response(response, "", {"ground_truth": "0." + expected})["reward"] == 0.0
 
 
 @pytest.mark.parametrize("prompt", ["", "What is 1 * 7?"])
