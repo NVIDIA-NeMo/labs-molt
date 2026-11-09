@@ -16,6 +16,7 @@
 # Adapted from OpenRLHF (https://github.com/OpenRLHF/OpenRLHF),
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
+import copy
 import os
 import socket
 import time
@@ -85,6 +86,65 @@ def _lora_merge_map(model: torch.nn.Module, sd: dict) -> dict:
             )
         merge[w_name] = (name, b_name, scales[base])
     return merge
+
+
+@torch.no_grad()
+def _restart_adamw(optimizer: torch.optim.AdamW, *, loaded_global_step: int, reset_at: int) -> bool:
+    """Reset native Adam state once at a loaded checkpoint, retaining theta and q.
+
+    Adam update math remains in torch.optim.AdamW.step. The checkpointed phase
+    marker makes the restart idempotent across retries. Parameter storage,
+    FP32 master tensors, and the rounding counter remain unchanged.
+
+    Args:
+        optimizer: Exact native AdamW with checkpointed BF16 rounding groups and state.
+        loaded_global_step: Training step restored by the native checkpoint loader.
+        reset_at: Required boundary, or zero for the original optimizer phase.
+
+    Returns:
+        True only when native moments and step were reset by this call.
+    """
+    if type(optimizer) is not torch.optim.AdamW or reset_at < 0:
+        raise ValueError("BF16 rounding restart requires native AdamW and a nonnegative boundary")
+    phases = {(group["faircast_phase"], group["faircast_phase_start_global_step"]) for group in optimizer.param_groups}
+    if len(phases) != 1:
+        raise ValueError("BF16 rounding optimizer groups have inconsistent restart phases")
+    phase, origin = phases.pop()
+    if phase == 1:
+        if reset_at != origin or loaded_global_step < origin:
+            raise ValueError("Resumed optimizer phase requires its original restart boundary")
+        return False
+    if phase != 0 or origin != 0:
+        raise ValueError("Invalid BF16 rounding optimizer phase")
+    if reset_at == 0:
+        return False
+    if loaded_global_step != reset_at:
+        raise ValueError("Fresh Adam restart requires a checkpoint exactly at the requested boundary")
+    if not any(optimizer.state.get(p) for group in optimizer.param_groups for p in group["params"]):
+        raise ValueError("Cannot restart without initialized native Adam checkpoint state")
+    # Validate every state before mutating any of them. Empty state is legitimate
+    # for a parameter which has never had a gradient; native Adam initializes it later.
+    for group in optimizer.param_groups:
+        for parameter in group["params"]:
+            state = optimizer.state.get(parameter, {})
+            if not state:
+                continue
+            required = {"step", "exp_avg", "exp_avg_sq"}
+            if group["quantize"]:
+                required.add("master")
+            if group["amsgrad"]:
+                required.add("max_exp_avg_sq")
+            if set(state) != required or any(not isinstance(state[key], torch.Tensor) for key in required):
+                raise ValueError("Cannot restart incomplete or unrecognized native Adam state")
+    for group in optimizer.param_groups:
+        for parameter in group["params"]:
+            state = optimizer.state.get(parameter, {})
+            for key in ("step", "exp_avg", "exp_avg_sq", "max_exp_avg_sq"):
+                if key in state:
+                    state[key].zero_()
+        group["faircast_phase"] = 1
+        group["faircast_phase_start_global_step"] = reset_at
+    return True
 
 
 class PolicyTrainer:
@@ -943,6 +1003,10 @@ class PolicyModelActor(BaseModelActor):
         }
         self.actor, self.actor_optim, self.actor_scheduler = strategy.prepare((actor, actor_cfg))
 
+        if args.actor.reset_optimizer_at_step:
+            fresh_scheduler_state = copy.deepcopy(self.actor_scheduler.state_dict())
+            fresh_scheduler_lrs = self.actor_scheduler.get_last_lr()
+
         # load checkpoint
         self.checkpoint_states = {}
         ckpt_path = os.path.join(args.ckpt.path, "_actor")
@@ -959,6 +1023,22 @@ class PolicyModelActor(BaseModelActor):
                 scheduler=None if model_only else self.actor_scheduler,
             )
             self.checkpoint_states = states
+
+        if args.actor.optim == "faircast_adamw" or args.actor.adam.weight_rounding is not None:
+            restarted = _restart_adamw(
+                self.actor_optim,
+                loaded_global_step=self.checkpoint_states.get("global_step", 0),
+                reset_at=args.actor.reset_optimizer_at_step,
+            )
+            if restarted:
+                # Restore the native constructor's schedule, not a separate LR formula.
+                self.actor_scheduler.load_state_dict(fresh_scheduler_state)
+                for group, lr in zip(self.actor_optim.param_groups, fresh_scheduler_lrs, strict=True):
+                    group["lr"] = lr
+                strategy.print(
+                    f"Adam moments/step restarted at global_step={args.actor.reset_optimizer_at_step}; "
+                    "working weights, masters, and rounding counter retained"
+                )
 
         # configure Trainer
         self.trainer = PolicyTrainer(

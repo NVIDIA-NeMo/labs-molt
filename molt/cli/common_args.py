@@ -145,7 +145,7 @@ def add_optimizer_args(parser, prefix: str = "", default_adam_lr: float = 5e-6) 
     rather than skewing silently across the two launchers.
     """
     g = f"--{prefix}"
-    parser.add_argument(f"{g}optim", type=str, default="adam", choices=["adam", "muon"])
+    parser.add_argument(f"{g}optim", type=str, default="adam", choices=["adam", "muon", "faircast_adamw"])
     # Muon 2D-weight group
     parser.add_argument(f"{g}muon.lr", type=float, default=0.02, help="LR for the Muon 2D-weight group")
     parser.add_argument(f"{g}muon.momentum", type=float, default=0.95)
@@ -160,6 +160,14 @@ def add_optimizer_args(parser, prefix: str = "", default_adam_lr: float = 5e-6) 
     parser.add_argument(f"{g}adam.betas", type=float, nargs=2, default=(0.9, 0.95))
     parser.add_argument(f"{g}adam.eps", type=float, default=1e-8)
     parser.add_argument(f"{g}adam.weight_decay", type=float, default=0.0)
+    parser.add_argument(
+        f"{g}adam.weight_rounding",
+        f"{g}adam.rounding",
+        dest=f"{prefix}adam.weight_rounding",
+        choices=["nearest", "stochastic"],
+        default=None,
+        help="Optional BF16 working-weight rounding with FP32 masters (AutoModel/FSDP2 only).",
+    )
     # Scheduler
     parser.add_argument(f"{g}lr_scheduler", type=str, default="constant")
     parser.add_argument(f"{g}lr_warmup_ratio", type=float, default=0.03)
