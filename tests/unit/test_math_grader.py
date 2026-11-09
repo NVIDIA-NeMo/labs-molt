@@ -109,6 +109,18 @@ def test_numeric_fallback_does_not_treat_ellipsis_as_decimal_point(response):
     assert mg.score_response(response, "", {"ground_truth": "0.5"})["reward"] == 0.0
 
 
+@pytest.mark.parametrize(
+    "response,expected",
+    [("version 1.2.3 is out", "3"), ("See Theorem 2.3.1", "1"), ("see Fig.2", "2"), ("Option No.5", "5")],
+)
+def test_numeric_fallback_keeps_dotted_identifiers_as_integers(response, expected):
+    # A point glued to a digit or a letter is a separator, not a decimal point: the trailing part stays an integer.
+    result = mg.score_response(response, "", {"ground_truth": expected})
+    assert result["prediction"] == expected
+    assert result["reward"] == 1.0
+    assert mg.score_response(response, "", {"ground_truth": "0." + expected})["reward"] == 0.0
+
+
 @pytest.mark.parametrize("prompt", ["", "What is 1 * 7?"])
 @pytest.mark.parametrize(
     "response,target,reward",
