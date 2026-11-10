@@ -4,7 +4,7 @@
 
 **An agentic-first RL framework for research.**
 
-Ray · vLLM · NVIDIA AutoModel — the smallest PyTorch / HuggingFace-native stack for
+Ray · vLLM · NVIDIA AutoModel — the smallest Hugging Face-native stack for
 1T-class fully-async, multimodal, multi-turn agentic RL.
 
 <br/>
@@ -12,6 +12,7 @@ Ray · vLLM · NVIDIA AutoModel — the smallest PyTorch / HuggingFace-native st
 [![License](https://img.shields.io/badge/License-Apache_2.0-2563eb?style=flat-square)](LICENSE)
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)
 ![PyTorch](https://img.shields.io/badge/PyTorch-native-EE4C2C?style=flat-square&logo=pytorch&logoColor=white)
+![Hugging Face](https://img.shields.io/badge/Hugging_Face-native-FFD21E?style=flat-square&logo=huggingface&logoColor=black)
 ![NVIDIA AutoModel](https://img.shields.io/badge/Training-NVIDIA_AutoModel-76B900?style=flat-square&logo=nvidia&logoColor=white)
 ![vLLM](https://img.shields.io/badge/Rollout-vLLM-7c3aed?style=flat-square)
 ![Ray](https://img.shields.io/badge/Runtime-Ray-028CF0?style=flat-square)
@@ -40,12 +41,14 @@ Ray · vLLM · NVIDIA AutoModel — the smallest PyTorch / HuggingFace-native st
 
 </div>
 
-Molt is **agentic-first** and **PyTorch / HuggingFace-native**. The agent is the program;
+Molt is **agentic-first** and **Hugging Face-native**. The agent is the program;
 the trainer is a single actor; reward is any Python you write inside an `Env`
 or `ChatAgent` — graders, multi-turn tools, VLM environments, LLM-as-judge.
 Three components carry the rest — **Ray** for placement and async queues,
-**vLLM** for rollout, **NVIDIA AutoModel + FSDP2** for training in pure
-PyTorch. That is the whole stack: **~9.2K lines of RL code that scale to
+**vLLM** for rollout, **NVIDIA AutoModel + FSDP2** for training. The model
+stays an ordinary PyTorch module in the Hugging Face layout: one checkpoint
+directory feeds both vLLM and the trainer, with no bridge to write and no
+weights to convert. That is the whole stack: **~9.2K lines of RL code that scale to
 1T-class MoE** on vLLM with TP / EP / CP — think DeepSeek-V3 at
 `--fsdp.ep_size 256`, Adam CPU offload for the largest actors. One agent
 API, one trainable actor, clean enough to read end-to-end.
@@ -77,7 +80,7 @@ rollout.
 |---|---|---|
 | 🤖 **Agentic-first** | One Gymnasium-aligned API — `Env.step()` or `ChatAgent.run()` — covers graders, multi-turn tools, VLM environments, and OpenAI/Anthropic-compatible servers | The agent *is* the program — iterate on environments in plain Python, the trainer stays untouched |
 | ⚙️ **Fully-async runtime** | Ray placement, async rollout queues, vLLM engines, partial rollout, weight sync | Rollout, training, and weight sync overlap — a DeepSeek-V3-class actor stays fed without bespoke infra |
-| 🔥 **PyTorch-native, AutoModel-first** | FSDP2 + NVIDIA AutoModel, pure PyTorch end-to-end | Hack the model in the language you already write; no backend ceremony |
+| 🔥 **Hugging Face-native, PyTorch end-to-end** | The model is an ordinary PyTorch module in the Hugging Face layout (NVIDIA AutoModel + FSDP2); one checkpoint directory feeds both vLLM and the trainer | Models load as released — no bridge to write, no checkpoint to convert — and you change one by editing plain PyTorch |
 | 🎯 **Single-actor simplicity** | One actor, optional KL reference — the whole RL graph fits on a page | Every gradient is explicit; every loss term is one file away |
 | 🚀 **Frontier-scale MoE** | AutoModel + FSDP2 + TP / EP / CP + Adam CPU offload, MoE-native — e.g. DeepSeek-V3 with `--fsdp.ep_size 256` | The same script that trains 8B scales to 1T-class MoE — no rewrite between scales |
 | 🔗 **Token-first contract** | Aligned token ids, logprobs, action ranges, rewards, multimodal tensors | Multi-turn, VLM, and tool-call traces share one format end-to-end |
@@ -209,7 +212,7 @@ Common RL switches:
 ## 📊 How It Compares
 
 The RL ecosystem optimizes for breadth. Molt optimizes for
-**agentic research velocity at scale** — the smallest PyTorch-native stack
+**agentic research velocity at scale** — the smallest Hugging Face-native stack
 that still drives fully-async agentic RL at frontier MoE scale on vLLM.
 
 |  | **🦋 Molt** | OpenRLHF | verl | slime |
@@ -224,9 +227,10 @@ that still drives fully-async agentic RL at frontier MoE scale on vLLM.
 | RL code size¹ | **~9.2K LOC** | ~7.2K | ~62K | ~25K |
 | Design center | **agentic-first research** | RLHF coverage | production breadth | Megatron throughput |
 
-**One framework, one job.** Molt is the smallest PyTorch-native
-stack that takes an NVIDIA AutoModel from SFT to frontier-scale agentic
-RL on vLLM. Read every line that touches your gradients, in plain PyTorch.
+**One framework, one job.** Molt is the smallest Hugging Face-native
+stack that takes a checkpoint from SFT to frontier-scale agentic RL on
+vLLM, with no bridge in between. Read every line that touches your
+gradients, in plain PyTorch.
 
 <details>
 <summary>¹ How the RL-code line counts were measured</summary>
