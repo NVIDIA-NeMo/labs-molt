@@ -90,19 +90,9 @@ def _lora_merge_map(model: torch.nn.Module, sd: dict) -> dict:
 
 @torch.no_grad()
 def _restart_adamw(optimizer: torch.optim.AdamW, *, loaded_global_step: int, reset_at: int) -> bool:
-    """Reset native Adam state once at a loaded checkpoint, retaining theta and q.
+    """Reset native Adam moments/step, preserving working weights, masters, and rounding counters.
 
-    Adam update math remains in torch.optim.AdamW.step. The checkpointed phase
-    marker makes the restart idempotent across retries. Parameter storage,
-    FP32 master tensors, and the rounding counter remain unchanged.
-
-    Args:
-        optimizer: Exact native AdamW with checkpointed BF16 rounding groups and state.
-        loaded_global_step: Training step restored by the native checkpoint loader.
-        reset_at: Required boundary, or zero for the original optimizer phase.
-
-    Returns:
-        True only when native moments and step were reset by this call.
+    The saved phase prevents a second reset. Return whether a reset occurred.
     """
     if type(optimizer) is not torch.optim.AdamW or reset_at < 0:
         raise ValueError("BF16 rounding restart requires native AdamW and a nonnegative boundary")
