@@ -139,11 +139,12 @@ class Experience:
     # The fields offloaded to `heavy_ref` — everything the training forward needs (image bytes +
     # pixel_values, token ids, rollout routing) but the controller's advantage/length-balance logic
     # does not, so they never reach the controller. Rule: keep only what the controller reads light;
-    # offload the rest (a byte-embedded `images` dataset column can be large).
+    # offload the rest (a byte-embedded `images` dataset column can be large). rollout_log_probs is
+    # light like every other (B, T-1) step tensor: --algo.kl.ref rollout reads its KL reference off
+    # it on the controller, and offloading it there gave the controller None.
     HEAVY_FIELDS = (
         "sequences",
         "attention_mask",
-        "rollout_log_probs",
         "rollout_top_ids",
         "rollout_top_log_probs",
         "routed_experts",
