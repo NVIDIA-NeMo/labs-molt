@@ -18,11 +18,13 @@ Ray · vLLM · NeMo AutoModel — the smallest Hugging Face-native stack for
 ![Ray](https://img.shields.io/badge/Runtime-Ray-028CF0?style=flat-square)
 ![RL code](https://img.shields.io/badge/RL_code-~9.2K_LOC-10b981?style=flat-square)
 [![Tech Report](https://img.shields.io/badge/Tech_Report-ResearchGate-00CCBB?style=flat-square&logo=researchgate&logoColor=white)](https://www.researchgate.net/publication/409325071_Molt_A_Scalable_PyTorch-Native_Training_Framework_for_Agentic_Reinforcement_Learning)
+[![Demo Video](https://img.shields.io/badge/Demo_Video-YouTube-FF0000?style=flat-square&logo=youtube&logoColor=white)](https://youtu.be/3DqXGFIce0o)
 <a href="https://deepwiki.com/NVIDIA-NeMo/labs-molt"><img src="https://devin.ai/assets/deepwiki-badge.png" alt="Ask DeepWiki.com" style="height:20px;"></a>
 
 <br/>
 
 [**Paper**](https://arxiv.org/abs/2607.21653) ·
+[**Video**](https://youtu.be/3DqXGFIce0o) ·
 [**News**](#-news) ·
 [**Architecture**](#-architecture) ·
 [**Why Molt**](#-why-molt) ·
