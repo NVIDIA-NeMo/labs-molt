@@ -2,9 +2,9 @@
 
 # 🦋 Molt
 
-**An agentic-first RL framework for research.**
+**A Hugging Face-native, minimal, and scalable framework for agentic RL research.**
 
-Ray · vLLM · NVIDIA AutoModel — the smallest Hugging Face-native stack for
+Ray · vLLM · NeMo AutoModel — the smallest Hugging Face-native stack for
 1T-class fully-async, multimodal, multi-turn agentic RL.
 
 <br/>
@@ -13,11 +13,11 @@ Ray · vLLM · NVIDIA AutoModel — the smallest Hugging Face-native stack for
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)
 ![PyTorch](https://img.shields.io/badge/PyTorch-native-EE4C2C?style=flat-square&logo=pytorch&logoColor=white)
 ![Hugging Face](https://img.shields.io/badge/Hugging_Face-native-FFD21E?style=flat-square&logo=huggingface&logoColor=black)
-![NVIDIA AutoModel](https://img.shields.io/badge/Training-NVIDIA_AutoModel-76B900?style=flat-square&logo=nvidia&logoColor=white)
+![NeMo AutoModel](https://img.shields.io/badge/Training-NeMo_AutoModel-76B900?style=flat-square&logo=nvidia&logoColor=white)
 ![vLLM](https://img.shields.io/badge/Rollout-vLLM-7c3aed?style=flat-square)
 ![Ray](https://img.shields.io/badge/Runtime-Ray-028CF0?style=flat-square)
 ![RL code](https://img.shields.io/badge/RL_code-~9.2K_LOC-10b981?style=flat-square)
-[![Tech Report](https://img.shields.io/badge/Tech_Report-arXiv:2607.21653-b31b1b?style=flat-square)](https://www.researchgate.net/publication/409325071_Molt_A_Scalable_PyTorch-Native_Training_Framework_for_Agentic_Reinforcement_Learning)
+[![Tech Report](https://img.shields.io/badge/Tech_Report-ResearchGate-00CCBB?style=flat-square&logo=researchgate&logoColor=white)](https://www.researchgate.net/publication/409325071_Molt_A_Scalable_PyTorch-Native_Training_Framework_for_Agentic_Reinforcement_Learning)
 <a href="https://deepwiki.com/NVIDIA-NeMo/labs-molt"><img src="https://devin.ai/assets/deepwiki-badge.png" alt="Ask DeepWiki.com" style="height:20px;"></a>
 
 <br/>
@@ -41,21 +41,22 @@ Ray · vLLM · NVIDIA AutoModel — the smallest Hugging Face-native stack for
 
 </div>
 
-Molt is **agentic-first** and **Hugging Face-native**. The agent is the program;
+Molt is **agentic-first**, **Hugging Face-native**, **minimal**, and **scalable**. The agent is the program;
 the trainer is a single actor; reward is any Python you write inside an `Env`
 or `ChatAgent` — graders, multi-turn tools, VLM environments, LLM-as-judge.
 Three components carry the rest — **Ray** for placement and async queues,
-**vLLM** for rollout, **NVIDIA AutoModel + FSDP2** for training. The model
+**vLLM** for rollout, **NeMo AutoModel + FSDP2** for training. The model
 stays an ordinary PyTorch module in the Hugging Face layout: one checkpoint
 directory feeds both vLLM and the trainer, with no bridge to write and no
 weights to convert. That is the whole stack: **~9.2K lines of RL code that scale to
-1T-class MoE** on vLLM with TP / EP / CP — think DeepSeek-V3 at
-`--fsdp.ep_size 256`, Adam CPU offload for the largest actors. One agent
-API, one trainable actor, clean enough to read end-to-end.
+1T-class MoE** on vLLM with TP / EP / CP — the same command runs a 4B model on
+one node and GLM-5.2 (753B) at `--fsdp.ep_size 256`, with Adam CPU offload for
+the largest actors. One agent API, one trainable actor, clean enough to read
+end-to-end.
 
 ## 📰 News
 
-- **2026-11** · Molt powers [REINFORCE Zero](https://github.com/hijkzzz/REINFORCE-Zero), combining trainer–inference invariance (TII) with unclipped token-level importance sampling for stable asynchronous RL through **20,000 policy updates** — see the [kernel-alignment agent skill](.agents/skills/train-inference-consistency/SKILL.md).
+- **2026-11** · Molt powers [REINFORCE Zero](https://github.com/hijkzzz/REINFORCE-Zero), combining trainer–inference invariance (TII) with unclipped token-level importance sampling for stable asynchronous RL through **20,000 policy updates** — see the [deep dive](#-deep-dives) and the [kernel-alignment agent skill](.agents/skills/train-inference-consistency/SKILL.md).
 
 - **2026-09** · Molt now supports [FlashREINFORCE](https://www.alphaxiv.org/abs/2609.flashreinforce-asynchronous-rl-agentic-models), critic-free single-rollout RL with stable training beyond 6,000 steps — see the [quick start](examples/scripts/quick_start/rl_flash_reinforce_r1d_1p5b.sh).
 
@@ -80,11 +81,11 @@ rollout.
 |---|---|---|
 | 🤖 **Agentic-first** | One Gymnasium-aligned API — `Env.step()` or `ChatAgent.run()` — covers graders, multi-turn tools, VLM environments, and OpenAI/Anthropic-compatible servers | The agent *is* the program — iterate on environments in plain Python, the trainer stays untouched |
 | ⚙️ **Fully-async runtime** | Ray placement, async rollout queues, vLLM engines, partial rollout, weight sync | Rollout, training, and weight sync overlap — a DeepSeek-V3-class actor stays fed without bespoke infra |
-| 🔥 **Hugging Face-native, PyTorch end-to-end** | The model is an ordinary PyTorch module in the Hugging Face layout (NVIDIA AutoModel + FSDP2); one checkpoint directory feeds both vLLM and the trainer | Models load as released — no bridge to write, no checkpoint to convert — and you change one by editing plain PyTorch |
+| 🔥 **Hugging Face-native, PyTorch end-to-end** | The model is an ordinary PyTorch module in the Hugging Face layout (NeMo AutoModel + FSDP2); one checkpoint directory feeds both vLLM and the trainer | Models load as released — no bridge to write, no checkpoint to convert — and you change one by editing plain PyTorch |
 | 🎯 **Single-actor simplicity** | One actor, optional KL reference — the whole RL graph fits on a page | Every gradient is explicit; every loss term is one file away |
-| 🚀 **Frontier-scale MoE** | AutoModel + FSDP2 + TP / EP / CP + Adam CPU offload, MoE-native — e.g. DeepSeek-V3 with `--fsdp.ep_size 256` | The same script that trains 8B scales to 1T-class MoE — no rewrite between scales |
+| 🚀 **Frontier-scale MoE** | AutoModel + FSDP2 + TP / EP / CP + Adam CPU offload, MoE-native — e.g. GLM-5.2 (753B) with `--fsdp.ep_size 256` | The 4B and 753B recipes share the entry point, the agent, and the algorithm — no rewrite between scales |
 | 🔗 **Token-first contract** | Aligned token ids, logprobs, action ranges, rewards, multimodal tensors | Multi-turn, VLM, and tool-call traces share one format end-to-end |
-| 🪶 **Small, hackable surface** | ~9.2K LOC of RL code across 3 thin layers | Fork one layer without touching the others — read it in an afternoon |
+| 🪶 **Small, hackable surface** | ~9.2K LOC of RL code across 3 thin layers; each mechanism (advantage, loss, token capture, training loop) is one file | The function you edit is the function that runs — read it in an afternoon, or hand it whole to a coding agent |
 
 ## 📦 Installation
 
@@ -98,7 +99,7 @@ cd labs-molt
 ### 🐳 Container (recommended)
 
 `dockerfile/Dockerfile` bakes the whole CUDA-13 stack (torch 2.13, vLLM, TransformerEngine, flash-attn,
-mamba, DeepEP, NVIDIA AutoModel) for A100 / H100 / H200 / B200 / GB200. SFT and RL run in it as-is.
+mamba, DeepEP, NeMo AutoModel) for A100 / H100 / H200 / B200 / GB200. SFT and RL run in it as-is.
 
 ```bash
 docker pull hijkzzz/molt:latest                                 # or a pinned release: hijkzzz/molt:0.1.10
@@ -126,7 +127,7 @@ supported install path right now. Use the container or the local install.
 
 ### 🪶 Optional backend: AutoModel-Slim
 
-**The default is upstream NVIDIA AutoModel**, pinned in `setup.py`; every command above installs it, and
+**The default is upstream NeMo AutoModel**, pinned in `setup.py`; every command above installs it, and
 nothing in this subsection applies unless you opt in.
 
 [`automodel-slim`](https://github.com/NVIDIA-NeMo/labs-molt/tree/automodel-slim) is molt's own copy of that
@@ -217,7 +218,8 @@ that still drives fully-async agentic RL at frontier MoE scale on vLLM.
 
 |  | **🦋 Molt** | OpenRLHF | verl | slime |
 |---|:-:|:-:|:-:|:-:|
-| Training backend | **PyTorch / FSDP2 + NVIDIA AutoModel** | DeepSpeed ZeRO-3 | FSDP / FSDP2 / Megatron | Megatron (FSDP exp.) |
+| Training backend | **PyTorch / FSDP2 + NeMo AutoModel** | DeepSpeed ZeRO-3 | FSDP / FSDP2 / Megatron | Megatron (FSDP exp.) |
+| Hugging Face models | **native** | native | native on FSDP; bridged on Megatron | bridged (rebuilt in Megatron, weights mapped both ways) |
 | Rollout engine | vLLM (Ray) | vLLM (Ray) | vLLM / SGLang / TRT-LLM | SGLang only |
 | RL topology | **actor (+ optional PPO critic)** | actor + critic + RM | actor + critic + RM | actor + critic + RM |
 | Reward source | **agent Python** | agent / endpoint / RM | agent / RM / endpoint | rollout fn / RM |
@@ -259,7 +261,7 @@ gradients, in plain PyTorch.
 - **RL** — vLLM-backed online RL via `molt.cli.train_rl_ray`
 - **Runtime** — Ray placement, async rollout queues, vLLM engines, partial rollout sync
 - **Model scale** — AutoModel + FSDP2 with TP / EP / CP, MoE-native — e.g. DeepSeek-V3 at `--fsdp.ep_size 256`
-- **Model backend** — **NVIDIA AutoModel is the primary path** — native CP / EP / TP, custom MoE+EP parallelizer, TE fused attention; everything model-side aligns with AutoModel's own recipes. The HF transformers path is a **non-preferred fallback** (AutoModel drops to it only when a model has no native class) supporting **text + flash_attention_2 + packing only — no CP / EP / TP**
+- **Model backend** — **NeMo AutoModel is the primary path** — native CP / EP / TP, custom MoE+EP parallelizer, TE fused attention; everything model-side aligns with AutoModel's own recipes. The HF transformers path is a **non-preferred fallback** (AutoModel drops to it only when a model has no native class) supporting **text + flash_attention_2 + packing only — no CP / EP / TP**
 - **Optimizer** — `adam` (default), with CPU offload for the largest actors (`--fsdp.offload optimizer`). `muon` (Newton–Schulz via Dion: Muon for 2D weights and grouped MoE experts, AdamW for embeddings / head / norms) is **experimental** — runs distributed (FSDP / EP) but has shown no consistent win over `adam` yet, which stays the recommended default
 ### 🤖 Agents & rewards
 | Area | Support |
@@ -760,17 +762,24 @@ fixed router is acceptable.
 
 </details>
 
-### 🧪 Train–inference consistency — bitwise rollout vs. trainer logprobs
+### 🧪 REINFORCE Zero — aligned kernels + unclipped importance sampling
 
-IS correction and R3 re-weight or mask the train/rollout gap; the complementary route removes it:
-the training forward calls vLLM's own kernels for every value-producing operator and only adds a
-backward, so the trainer's per-token logprob is byte-identical to the one vLLM sampled with. Molt
-ships this as an agent skill, [`.agents/skills/train-inference-consistency`](.agents/skills/train-inference-consistency/SKILL.md):
-gates G0–G8, per-operator numerical contracts, molt flags and patch points, mismatch debugging and
-paired acceptance, written for the FSDP2 + AutoModel + vLLM stack and inspired by the vLLM blog post
-[Finish RL Training Faster: Bitwise-Consistent, High-Performance, Agent-Driven](https://vllm-project.github.io/2026/10/14/train-inference-consistency.html) (verl + Megatron).
+[REINFORCE Zero](https://github.com/hijkzzz/REINFORCE-Zero) is the asynchronous RL recipe built on
+Molt. Rollout and trainer disagree on token probabilities for two reasons: rollouts use older weights
+(*weight lag*), and the two run different GPU kernels (*kernel mismatch*). REINFORCE Zero removes the
+second and corrects the first, which keeps asynchronous training stable through 20,000 updates at
+2.40× the training-step throughput of synchronous training.
 
-Measure it with `mismatch/bitwise_frac` (fraction of valid response tokens whose fp32 logprob bytes
+- **Aligned kernels (trainer–inference invariance, TII).** The training forward calls vLLM's own
+  kernels for every value-producing operator and only adds a backward, so the trainer's per-token
+  logprob is byte-identical to the one vLLM sampled with. Molt ships this as an agent skill,
+  [`.agents/skills/train-inference-consistency`](.agents/skills/train-inference-consistency/SKILL.md):
+  gates C0–C10, per-operator numerical contracts, molt flags and patch points, mismatch debugging and
+  paired acceptance, written for the FSDP2 + AutoModel + vLLM stack.
+- **Unclipped token-level IS on a group-mean REINFORCE objective**, with no clipping and no rejection
+  gate: `--algo.advantage.estimator dr_grpo --algo.advantage.is_correction_level token --algo.advantage.is_correction_threshold inf --actor.loss_agg_mode seq-mean-token-mean --train.force_on_policy`.
+
+Measure alignment with `mismatch/bitwise_frac` (fraction of valid response tokens whose fp32 logprob bytes
 differ between vLLM and the training forward; logged whenever rollout logprobs exist, i.e.
 `--algo.advantage.is_correction_level` ≠ `off` or score centering), plus `mismatch/abs_diff_mean` and
 `mismatch/k3_kl`. Bitwise means `bitwise_frac = 0` at every step of a synchronous run
