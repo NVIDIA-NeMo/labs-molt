@@ -2,10 +2,10 @@
 
 # 🦋 Molt
 
-**An agentic-first RL framework for research.**
+**A Hugging Face-native, minimal, and scalable framework for agentic reinforcement learning.**
 
-Ray · vLLM · NVIDIA AutoModel — the smallest Hugging Face-native stack for
-1T-class fully-async, multimodal, multi-turn agentic RL.
+Ray · vLLM · NVIDIA AutoModel — ~9.2K lines of RL code that train a Hugging Face
+checkpoint as released, from a 4B model on one node to 1T-class MoE.
 
 <br/>
 
@@ -17,7 +17,7 @@ Ray · vLLM · NVIDIA AutoModel — the smallest Hugging Face-native stack for
 ![vLLM](https://img.shields.io/badge/Rollout-vLLM-7c3aed?style=flat-square)
 ![Ray](https://img.shields.io/badge/Runtime-Ray-028CF0?style=flat-square)
 ![RL code](https://img.shields.io/badge/RL_code-~9.2K_LOC-10b981?style=flat-square)
-[![Tech Report](https://img.shields.io/badge/Tech_Report-arXiv:2607.21653-b31b1b?style=flat-square)](https://www.researchgate.net/publication/409325071_Molt_A_Scalable_PyTorch-Native_Training_Framework_for_Agentic_Reinforcement_Learning)
+[![Tech Report](https://img.shields.io/badge/Tech_Report-ResearchGate-00CCBB?style=flat-square&logo=researchgate&logoColor=white)](https://www.researchgate.net/publication/409325071_Molt_A_Scalable_PyTorch-Native_Training_Framework_for_Agentic_Reinforcement_Learning)
 <a href="https://deepwiki.com/NVIDIA-NeMo/labs-molt"><img src="https://devin.ai/assets/deepwiki-badge.png" alt="Ask DeepWiki.com" style="height:20px;"></a>
 
 <br/>
@@ -26,8 +26,10 @@ Ray · vLLM · NVIDIA AutoModel — the smallest Hugging Face-native stack for
 [**News**](#-news) ·
 [**Architecture**](#-architecture) ·
 [**Why Molt**](#-why-molt) ·
+[**Results**](#-results) ·
 [**Installation**](#-installation) ·
 [**Quick Start**](#-quick-start) ·
+[**Comparison**](#-how-it-compares) ·
 [**Scope**](#-supported-scope) ·
 [**Agent Contract**](#-agent-contract) ·
 [**Recipes**](#-recipes) ·
@@ -41,21 +43,33 @@ Ray · vLLM · NVIDIA AutoModel — the smallest Hugging Face-native stack for
 
 </div>
 
-Molt is **agentic-first** and **Hugging Face-native**. The agent is the program;
-the trainer is a single actor; reward is any Python you write inside an `Env`
-or `ChatAgent` — graders, multi-turn tools, VLM environments, LLM-as-judge.
-Three components carry the rest — **Ray** for placement and async queues,
-**vLLM** for rollout, **NVIDIA AutoModel + FSDP2** for training. The model
-stays an ordinary PyTorch module in the Hugging Face layout: one checkpoint
-directory feeds both vLLM and the trainer, with no bridge to write and no
-weights to convert. That is the whole stack: **~9.2K lines of RL code that scale to
-1T-class MoE** on vLLM with TP / EP / CP — think DeepSeek-V3 at
-`--fsdp.ep_size 256`, Adam CPU offload for the largest actors. One agent
-API, one trainable actor, clean enough to read end-to-end.
+Molt trains LLM agents with reinforcement learning, and it is built for research:
+the code is small enough to read in full and edit directly, models load from
+Hugging Face as released, and the same command scales from one node to hundreds
+of GPUs.
+
+- **Hugging Face-native.** The policy is an ordinary PyTorch module in the Hugging
+  Face layout ([NVIDIA NeMo AutoModel](https://github.com/NVIDIA-NeMo/Automodel) +
+  FSDP2). One checkpoint directory feeds both vLLM and the trainer, with no bridge
+  to write and no weights to convert.
+- **Minimal.** The whole RL path is **~9.2K lines of Python**: one training backend,
+  one rollout engine, one trainable actor, and CLI flags as the only configuration.
+  The function you edit is the function that runs.
+- **Scalable.** Tensor, expert, and context parallelism (TP / EP / CP) are flags on
+  the native model. The recipes for a 4B model and a 753B MoE share the entry
+  point, the agent, and the algorithm; the largest MoE runs at `--fsdp.ep_size 256`
+  with Adam CPU offload.
+- **Agentic-first.** The agent is the program. An agent written against the OpenAI
+  or Anthropic SDK trains by pointing its client at Molt, and its reward is any
+  Python you write: graders, multi-turn tools, VLM environments, LLM-as-judge.
+  Rollout, training, and weight sync run fully asynchronously.
+
+Three components carry the rest: **Ray** for placement and async queues, **vLLM**
+for rollout, **NVIDIA AutoModel + FSDP2** for training.
 
 ## 📰 News
 
-- **2026-11** · Molt powers [REINFORCE Zero](https://github.com/hijkzzz/REINFORCE-Zero), combining trainer–inference invariance (TII) with unclipped token-level importance sampling for stable asynchronous RL through **20,000 policy updates** — see the [kernel-alignment agent skill](.agents/skills/train-inference-consistency/SKILL.md).
+- **2026-11** · Molt powers [REINFORCE Zero](https://github.com/hijkzzz/REINFORCE-Zero), combining trainer–inference invariance (TII) with unclipped token-level importance sampling for stable asynchronous RL through **20,000 policy updates** — see the [deep dive](#-deep-dives) and the [kernel-alignment agent skill](.agents/skills/train-inference-consistency/SKILL.md).
 
 - **2026-09** · Molt now supports [FlashREINFORCE](https://www.alphaxiv.org/abs/2609.flashreinforce-asynchronous-rl-agentic-models), critic-free single-rollout RL with stable training beyond 6,000 steps — see the [quick start](examples/scripts/quick_start/rl_flash_reinforce_r1d_1p5b.sh).
 
@@ -67,24 +81,144 @@ Three boxes. One async loop.
   <img src="assets/molt.jpg" alt="Molt architecture: Agent · vLLM rollout · Ray async queue · single-actor AutoModel/FSDP2 trainer, fully async" width="920"/>
 </p>
 
-**Ray** owns placement and the async queue between the three boxes — that
-is the entire runtime. The contract is **token-first**: token ids,
-logprobs, action ranges, rewards, and multimodal tensors stay aligned from
-rollout to training. Anything you can compute in Python is a valid reward,
-including LLM-as-judge calls back through the same vLLM engines that drive
-rollout.
+Agent workers run your agent, **vLLM** engines generate tokens for it, and the
+trainer holds the policy as a PyTorch module (AutoModel + FSDP2). Flags and file
+names call the trainer the *actor* (`--actor.*`), in the actor–critic sense: it is
+the model being trained. **Ray** owns placement and the async queue between the
+three boxes — that is the entire runtime. One training step:
+
+1. The agent asks a vLLM engine for its next turn. A `ChatAgent` does so through a
+   local server that speaks the OpenAI and Anthropic APIs; for an `Env`, Molt makes
+   the call itself.
+2. The engine returns the generated tokens, and Molt records each token id with
+   its log-probability.
+3. The agent continues, calling tools and the model in turn, until the task ends,
+   and returns a reward.
+4. The finished trajectory is queued.
+5. The trainer takes a batch from the queue and updates the policy.
+6. The new weights are copied back into the vLLM engines (weight sync).
+
+In async mode these stages overlap: agents keep generating while the trainer
+updates. The contract is **token-first**: token ids, logprobs, action ranges,
+rewards, and multimodal tensors stay aligned from rollout to training. Anything
+you can compute in Python is a valid reward, including LLM-as-judge calls back
+through the same vLLM engines that drive rollout.
 
 ## ✨ Why Molt
 
-| | What you get | Why it matters for research |
+### 🪶 Minimal — the code is easy to modify
+
+A research idea needs a code edit, not a flag: a new loss term, a different way to
+assemble batches, a modified attention layer. How hard that edit is depends on how
+much code stands between the idea and the code that runs. Molt keeps that distance
+short.
+
+- **One path.** One training backend, one rollout engine, one trainable actor, and
+  CLI flags as the only configuration. No backend interface stands between your
+  change and the code that runs, and nothing has to be repeated per backend.
+- **Flat code.** Few helper layers sit between the entry point and the work. The
+  [contributor rules](AGENTS.md) enforce it: a helper needs three call sites and
+  nontrivial logic, and code that is hard to follow is treated as a bug.
+- **Small files.** Each mechanism is one file of a few hundred lines. The whole RL
+  path is about 150K tokens, so you can read it in one sitting, and an AI coding
+  agent can hold it in one context window.
+
+| To change | Edit |
+|---|---|
+| The advantage estimator | [`molt/trainer/algorithm/advantage.py`](molt/trainer/algorithm/advantage.py) |
+| The policy loss | [`molt/models/loss.py`](molt/models/loss.py) |
+| Token capture and context segmentation | [`molt/agents/_chat_server.py`](molt/agents/_chat_server.py) |
+| Rollout dispatch and prompt groups | [`molt/trainer/rollout/samples_generator.py`](molt/trainer/rollout/samples_generator.py) |
+| The training loop | [`molt/trainer/rl_trainer.py`](molt/trainer/rl_trainer.py) |
+| The trainer process and weight sync | [`molt/trainer/workers/policy_actor.py`](molt/trainer/workers/policy_actor.py) |
+
+How large real research changes were, from this repo's history (framework code,
+without tests and docs):
+
+| Research change | PR | Files | Lines added | Lines removed |
+|---|:-:|--:|--:|--:|
+| GSPO sequence-level policy loss | [#53](https://github.com/NVIDIA-NeMo/labs-molt/pull/53) | 2 | 34 | 6 |
+| KL to the rollout policy, without a reference model | [#238](https://github.com/NVIDIA-NeMo/labs-molt/pull/238) | 4 | 60 | 13 |
+| Reward shaping for overlong and truncated rollouts | [#197](https://github.com/NVIDIA-NeMo/labs-molt/pull/197) | 4 | 97 | 6 |
+| FlashREINFORCE | [#116](https://github.com/NVIDIA-NeMo/labs-molt/pull/116) | 4 | 123 | 40 |
+| Score centering: off-policy REINFORCE without an importance ratio | [#182](https://github.com/NVIDIA-NeMo/labs-molt/pull/182) | 13 | 294 | 20 |
+
+### 🤗 Hugging Face-native — a new model needs no bridge
+
+Megatron-based stacks rebuild every model from their own parallel layer classes and
+store its parameters in their own layout. Each model family then needs dedicated
+code before RL can start: one piece translates its configuration, one maps every
+weight into that layout, and one maps every weight back at each weight sync.
+
+In Molt the model is the Hugging Face model. NeMo AutoModel represents it as an
+ordinary PyTorch module whose parameters keep the checkpoint's names, configured
+from the checkpoint's `config.json`. Parallelism is applied from outside by shared
+code, so the model file contains no parallel logic. The checkpoint loads directly,
+without an offline conversion or a second copy, and vLLM reads the same directory.
+
+- **New models arrive sooner.** AutoModel implements 60+ model families, among them
+  Qwen3, DeepSeek-V3, GLM-5, Kimi K2, Gemma 4, Llama, and Nemotron 3, and each
+  trains with RL as it is. Any other model still trains through its Hugging Face
+  `transformers` class.
+- **Changing a model is editing PyTorch.** The per-family code is the model itself.
+  DeepSeek-V3's attention is a 274-line PyTorch file in AutoModel, against a
+  1,779-line file in Megatron-Core, where the same module also carries its parallel
+  logic.
+
+### 🚀 Scalable — the same command, larger flags
+
+Tensor parallelism (TP) splits weight matrices, expert parallelism (EP) places MoE
+experts on different GPUs, and context parallelism (CP) splits one long sequence.
+Each is one flag on the native model ([Scaling Knobs](#-scaling-knobs)). The
+shipped recipes for a 4B model and a 753B MoE share the entry point, the agent, and
+the estimator. What changes is the checkpoint, the cluster size, and the
+parallelism flags, along with engine and batch settings:
+
+| | [Qwen3-4B](examples/scripts/quick_start/rl_qwen3_4b.sh) | [GLM-5.2 (753B)](examples/scripts/slurm/rl_glm5_2_753b.sh) |
 |---|---|---|
-| 🤖 **Agentic-first** | One Gymnasium-aligned API — `Env.step()` or `ChatAgent.run()` — covers graders, multi-turn tools, VLM environments, and OpenAI/Anthropic-compatible servers | The agent *is* the program — iterate on environments in plain Python, the trainer stays untouched |
-| ⚙️ **Fully-async runtime** | Ray placement, async rollout queues, vLLM engines, partial rollout, weight sync | Rollout, training, and weight sync overlap — a DeepSeek-V3-class actor stays fed without bespoke infra |
-| 🔥 **Hugging Face-native, PyTorch end-to-end** | The model is an ordinary PyTorch module in the Hugging Face layout (NVIDIA AutoModel + FSDP2); one checkpoint directory feeds both vLLM and the trainer | Models load as released — no bridge to write, no checkpoint to convert — and you change one by editing plain PyTorch |
-| 🎯 **Single-actor simplicity** | One actor, optional KL reference — the whole RL graph fits on a page | Every gradient is explicit; every loss term is one file away |
-| 🚀 **Frontier-scale MoE** | AutoModel + FSDP2 + TP / EP / CP + Adam CPU offload, MoE-native — e.g. DeepSeek-V3 with `--fsdp.ep_size 256` | The same script that trains 8B scales to 1T-class MoE — no rewrite between scales |
-| 🔗 **Token-first contract** | Aligned token ids, logprobs, action ranges, rewards, multimodal tensors | Multi-turn, VLM, and tool-call traces share one format end-to-end |
-| 🪶 **Small, hackable surface** | ~9.2K LOC of RL code across 3 thin layers | Fork one layer without touching the others — read it in an afternoon |
+| Entry point, agent, estimator | `molt.cli.train_rl_ray`, `agents/math.py`, `reinforce_baseline` | identical |
+| Trainer GPUs (nodes × GPUs per node) | 1 × 4 | 32 × 8 |
+| `--fsdp.ep_size` | 1 | 256 |
+| `--fsdp.cp_size` | 1 | 16 |
+| `--train.routing_replay` | — | on |
+
+The trainer is upstream NeMo AutoModel, so Molt inherits its scale. AutoModel
+reports training a 1T-parameter model (Kimi K2) at 8.86 seconds per step on 256
+H100 GPUs ([performance summary](https://docs.nvidia.com/nemo/automodel/nightly/performance/performance-summary))
+and full fine-tuning of a 2.8T-parameter model (Kimi K3) on 256 GB200 GPUs
+([model coverage](https://docs.nvidia.com/nemo/automodel/nightly/model-coverage/large-language-models/moonshotai/Kimi-K3.md)).
+
+### 🤖 Agentic-first — train the agent you already have
+
+- **Black-box agents.** An agent written against the OpenAI or Anthropic SDK trains
+  by pointing its client at Molt's local server. Nothing in the agent refers to
+  tokens, log-probabilities, or training ([Agent Contract](#-agent-contract)).
+- **Context compaction, handled automatically.** When an agent rewrites its own history, for
+  example by summarizing old turns or dropping old screenshots, Molt starts a new
+  token-exact segment. All segments of a rollout share its reward, with no change
+  to the agent.
+- **Fully asynchronous.** Rollout, training, and weight sync overlap, so a slow tool
+  or environment delays only its own prompt group. Samples generated by an older
+  policy are corrected with the log-probabilities recorded when they were sampled
+  ([IS correction](#-deep-dives)).
+- **Distributed experience storage.** Heavy trajectory data such as screenshots
+  stays in the Ray object store of the node that produced it. Each trainer process
+  loads only its own share, so no single process holds a full batch.
+
+## 📈 Results
+
+| Measured | Result |
+|---|---|
+| Learning stability · 30B MoE tool agent | Qwen3-30B-A3B with a Python tool, trained with FlashREINFORCE: mean accuracy on AMC23, Minerva, and AIME2025 rises from **46.38% to 66.36%** over 1,464 asynchronous updates |
+| Rollout–trainer agreement · 753B MoE | GLM-5.2: the mean rollout-to-trainer log-probability gap stays below 5 × 10⁻⁴, and the consistency gate removes no sequence |
+| Visual computer use · OSWorld | Nemotron-3-Nano-Omni-30B, acting from screenshots in a 49K-token context: task-weighted pass@1 rises from **50.97% to 56.16%** in 428 asynchronous updates |
+| Asynchronous vs. synchronous training · 16 GPUs | DeepSeek-R1-Distill-Qwen-1.5B: 12,000 updates in 68.55 hours against 164.77 hours, **2.40× faster** at comparable accuracy |
+| Pipeline throughput · Qwen3-30B-A3B, 16 H100 | 461 generated tokens/s/GPU, **92%** of a Megatron-Core + SGLang stack (slime, 502) |
+| Code footprint | ~9.2K lines on the RL path: 15% of verl's and 37% of slime's |
+
+Setups and details are in the [paper](https://arxiv.org/abs/2607.21653) and, for the
+OSWorld and asynchronous-versus-synchronous runs, in
+[REINFORCE Zero](https://github.com/hijkzzz/REINFORCE-Zero).
 
 ## 📦 Installation
 
@@ -211,21 +345,31 @@ Common RL switches:
 
 ## 📊 How It Compares
 
-The RL ecosystem optimizes for breadth. Molt optimizes for
-**agentic research velocity at scale** — the smallest Hugging Face-native stack
-that still drives fully-async agentic RL at frontier MoE scale on vLLM.
+Open RL frameworks tend to offer one of two things: code that is easy to modify,
+or scale to the largest open models. OpenRLHF, from which Molt originated, is
+compact and loads Hugging Face models directly, but its ZeRO-3 backend shards a
+model's storage without dividing its computation. verl and slime divide the
+computation through Megatron, which needs bridge code for every model family and
+several times more framework code. Molt optimizes for **agentic research velocity
+at scale**: the smallest Hugging Face-native stack that still drives fully-async
+agentic RL at frontier MoE scale on vLLM.
 
 |  | **🦋 Molt** | OpenRLHF | verl | slime |
 |---|:-:|:-:|:-:|:-:|
 | Training backend | **PyTorch / FSDP2 + NVIDIA AutoModel** | DeepSpeed ZeRO-3 | FSDP / FSDP2 / Megatron | Megatron (FSDP exp.) |
+| Hugging Face models | **Native** | Native | Native on FSDP; bridged on Megatron | Bridged |
 | Rollout engine | vLLM (Ray) | vLLM (Ray) | vLLM / SGLang / TRT-LLM | SGLang only |
 | RL topology | **actor (+ optional PPO critic)** | actor + critic + RM | actor + critic + RM | actor + critic + RM |
 | Reward source | **agent Python** | agent / endpoint / RM | agent / RM / endpoint | rollout fn / RM |
-| Parallelism | **TP / EP / CP**, MoE-native | ZeRO-3 / FSDP | TP / PP / EP / SP | TP / PP / DP / CP / EP |
+| Parallelism | **TP / EP / CP on native models**, MoE-native | ZeRO-3 / FSDP | TP / PP / EP / SP, on Megatron | TP / PP / DP / CP / EP, on Megatron |
 | Multimodal | VLM RL, multi-turn tool calls | VLM RL (v0.10+) | Qwen2.5-VL, Kimi-VL | geo3k VLM |
 | Config surface | **CLI flags only** | CLI + scripts | Hydra + YAML | CLI + YAML |
 | RL code size¹ | **~9.2K LOC** | ~7.2K | ~62K | ~25K |
 | Design center | **agentic-first research** | RLHF coverage | production breadth | Megatron throughput |
+
+*Native*: the trainer runs the PyTorch model in the Hugging Face layout.
+*Bridged*: the model is rebuilt in Megatron and its weights are mapped in both
+directions.
 
 **One framework, one job.** Molt is the smallest Hugging Face-native
 stack that takes a checkpoint from SFT to frontier-scale agentic RL on
@@ -760,20 +904,55 @@ fixed router is acceptable.
 
 </details>
 
-### 🧪 Train–inference consistency — bitwise rollout vs. trainer logprobs
+### 🧪 REINFORCE Zero — aligned kernels and unclipped importance sampling
 
-IS correction and R3 re-weight or mask the train/rollout gap; the complementary route removes it:
-the training forward calls vLLM's own kernels for every value-producing operator and only adds a
-backward, so the trainer's per-token logprob is byte-identical to the one vLLM sampled with. Molt
-ships this as an agent skill, [`.agents/skills/train-inference-consistency`](.agents/skills/train-inference-consistency/SKILL.md):
-gates G0–G8, per-operator numerical contracts, molt flags and patch points, mismatch debugging and
-paired acceptance, written for the FSDP2 + AutoModel + vLLM stack and inspired by the vLLM blog post
-[Finish RL Training Faster: Bitwise-Consistent, High-Performance, Agent-Driven](https://vllm-project.github.io/2026/10/14/train-inference-consistency.html) (verl + Megatron).
+[REINFORCE Zero](https://github.com/hijkzzz/REINFORCE-Zero) is the asynchronous RL recipe developed
+on Molt. In asynchronous RL the rollout engine and the trainer disagree on token probabilities for
+two reasons. Rollouts use older weights (*weight lag*). The two systems also run different GPU
+kernels, whose floating-point results differ even at identical weights (*kernel mismatch*).
+REINFORCE Zero removes the second and corrects the first:
 
-Measure it with `mismatch/bitwise_frac` (fraction of valid response tokens whose fp32 logprob bytes
-differ between vLLM and the training forward; logged whenever rollout logprobs exist, i.e.
+1. **Align the kernels (trainer–inference invariance, TII).** The training forward calls vLLM's own
+   kernels for every value-producing operator and only adds a backward, so at identical weights the
+   trainer's per-token logprob is byte-identical to the one vLLM sampled with. *Zero* refers to this
+   zero kernel mismatch.
+2. **Correct weight lag with token-level importance sampling.** Each action token is weighted by
+   `pi_train / pi_rollout`, using the logprob recorded when the token was sampled. The ratio is
+   left unclipped, with no sequence or token rejection gate.
+3. **Optimize a plain REINFORCE objective.** The advantage is the reward minus the mean reward of
+   the responses to the same prompt; the loss averages over the action tokens of each response and
+   then over responses.
+
+Kernel mismatch produces sharp spikes in the importance weights, and weight lag a smooth drift.
+With kernels aligned, the peak-to-median ratio of the importance-weight diagnostic drops from
+442.54 to 1.50, so ordinary importance sampling is enough for what remains.
+
+| Setting | Result |
+|---|---|
+| 20K-update reasoning · DeepSeek-R1-Distill-Qwen-1.5B | Stable asynchronous training at policy lags 2 and 8 through **20,000 updates** |
+| Training time · 16 GPUs, 12K updates | **2.40×** faster than synchronous training (68.55 vs. 164.77 hours) at comparable accuracy |
+| High policy lag · Qwen3-4B + Python tool | Learns at **lag 64** for 6,000 updates; mean reward rises from 0.287 to 0.782 |
+| MoE reasoning with tools · Qwen3-30B-A3B + Python tool | Four-benchmark macro pass@1 rises from **31.29% to 71.55%** in 3,000 updates |
+| Visual computer use · Nemotron-3-Nano-Omni-30B on OSWorld | Task-weighted pass@1 rises from **50.97% to 56.16%** in 428 updates |
+
+**In Molt.** The recipe has two parts. The objective (steps 2 and 3) is a composition of existing
+switches, with no new code:
+
+| Part of the recipe | Flags |
+|---|---|
+| Group-mean baseline, no whitening | `--algo.advantage.estimator dr_grpo` with `--rollout.n_samples_per_prompt` > 1 |
+| Unclipped token-level importance ratio | `--algo.advantage.is_correction_level token --algo.advantage.is_correction_threshold inf` |
+| Token mean per response, then mean over responses | `--actor.loss_agg_mode seq-mean-token-mean` |
+| Plain REINFORCE gradient, one update per batch | `--train.force_on_policy` |
+
+Kernel alignment (step 1) ships as an agent skill, [`.agents/skills/train-inference-consistency`](.agents/skills/train-inference-consistency/SKILL.md):
+gates C0–C10, per-operator numerical contracts, molt flags and patch points, mismatch debugging and
+paired acceptance, written for the FSDP2 + AutoModel + vLLM stack.
+
+Measure alignment with `mismatch/bitwise_frac` (fraction of valid response tokens whose fp32 logprob
+bytes differ between vLLM and the training forward; logged whenever rollout logprobs exist, i.e.
 `--algo.advantage.is_correction_level` ≠ `off` or score centering), plus `mismatch/abs_diff_mean` and
-`mismatch/k3_kl`. Bitwise means `bitwise_frac = 0` at every step of a synchronous run
+`mismatch/k3_kl`. Aligned means `bitwise_frac = 0` at every step of a synchronous run
 (`--train.force_sync_mode`, queue 1, one epoch); under any lag the rollout came from older weights and
 the fraction reads ≈ 1 whatever the kernels. `vllm_kl` is a signed mean and cannot tell a last-bit
 difference from 0. The aligned kernels (`--train.batch_invariant`) are being upstreamed from the
