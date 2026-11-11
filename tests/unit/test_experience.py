@@ -198,7 +198,11 @@ def _make_experience_with_rollout_reference(monkeypatch, use_loss, rollout_log_p
             experience.action_log_probs = action_log_probs
 
     monkeypatch.setattr(maker, "_dispatch_forward", _fake_dispatch)
+    # The runners offload every sample before it reaches the controller (router.run_group), and the
+    # controller never reloads it, so a stub ref is enough.
+    monkeypatch.setattr(experience_mod.ray, "put", lambda obj: "heavy-ref")
     exp = Experience(action_mask=torch.ones(1, 3, dtype=torch.bool), rollout_log_probs=rollout_log_probs, info={})
+    exp.offload()
     return maker.make_experience([exp])[0], action_log_probs
 
 
