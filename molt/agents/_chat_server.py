@@ -217,6 +217,7 @@ class _Session:
     # reply WITHOUT recording a second action, so retries can't double-count a turn.
     last_messages: list | None = None
     last_response: tuple | None = None
+    is_eval: bool = False  # an eval rollout may re-ask a turn whose reply was cut (see _run_turn)
 
 
 class ChatServerState:
@@ -245,9 +246,14 @@ class ChatServerState:
         self.expand_image_placeholder = should_expand_image_placeholder(processor)
         self.sessions: dict[str, _Session] = {}
 
-    def open(self, session_id: str, prompt, label, images, sampling_params=None):
+    def open(self, session_id: str, prompt, label, images, sampling_params=None, is_eval=False):
         self.sessions[session_id] = _Session(
-            prompt=prompt, label=label, images=images, session_id=session_id, sampling_params=sampling_params
+            prompt=prompt,
+            label=label,
+            images=images,
+            session_id=session_id,
+            sampling_params=sampling_params,
+            is_eval=is_eval,
         )
 
     def discard(self, session_id: str):
@@ -281,8 +287,14 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
     messages = body.get("messages") or []
     if not messages:
         raise HTTPException(status_code=400, detail="No messages provided")
-    if messages == session.last_messages:  # retry of an already-recorded turn -> replay, don't re-record
-        return session.last_response
+    retry = messages == session.last_messages
+    last = session.last_response
+    # A reply cut by max_tokens (not the empty reply of a full context) ends a training rollout:
+    # every later request gets it back, so its trained tokens are never re-asked or continued.
+    # An eval rollout re-asks that turn instead, as often as the agent retries.
+    cut = last is not None and last[1] == "length" and last[0] != ""
+    if (retry and not cut) or (cut and not session.is_eval):
+        return last  # incl. the retry of an already-recorded turn -> replay, don't re-record
     sp = _build_sampling_params(session.sampling_params or state.default_sampling, body)
     kwargs = {**state.chat_template_kwargs, **({"tools": body["tools"]} if body.get("tools") else {})}
     loop = asyncio.get_running_loop()
@@ -293,7 +305,10 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
     # so its messages extend last_messages; a compaction changes that prefix. Also false on turn 1.
     n = len(session.last_messages or [])
     extends = (
-        bool(session.trajectories) and messages[:n] == session.last_messages and messages[n].get("role") == "assistant"
+        bool(session.trajectories)
+        and len(messages) > n  # an eval re-ask repeats the same messages -> fresh segment
+        and messages[:n] == session.last_messages
+        and messages[n].get("role") == "assistant"
     )
     chat, pil_images = await loop.run_in_executor(_TOKENIZE_EXECUTOR, _messages_to_chat, state, messages)
     full = state.processor.apply_chat_template(chat, tokenize=False, add_generation_prompt=True, **kwargs)

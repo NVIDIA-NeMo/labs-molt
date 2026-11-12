@@ -380,7 +380,7 @@ class AgentRunnerActor:
         return True
 
     async def run_group(
-        self, prompt, label, images, sampling_params, max_length, n_samples, tools=None, group_id=None
+        self, prompt, label, images, sampling_params, max_length, n_samples, tools=None, group_id=None, is_eval=False
     ):
         """N rollouts of one prompt (unchanged runner) -> per step-sample ``(experience, drop_reason)``.
 
@@ -393,8 +393,10 @@ class AgentRunnerActor:
         batch of screenshots never concentrates on one node. Tagged group_id (per prompt; GRPO
         baseline) + rollout_id (per rollout; multi-turn step-samples share it). A failed/unusable
         rollout is dropped, never sinks the group."""
+        from molt.agents.base import IS_EVAL
         from molt.trainer.rollout.samples_generator import SamplesGenerator
 
+        IS_EVAL.set(is_eval)  # read by the chat runner when it opens each rollout's session
         group_id = group_id or uuid4().hex
         tasks = [
             self._runner.execute(

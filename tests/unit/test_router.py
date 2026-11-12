@@ -357,6 +357,26 @@ def test_agent_runner_actor_init_is_synchronous():
     assert not inspect.iscoroutinefunction(actor_cls.__init__)
 
 
+def test_run_group_tells_the_runner_which_rollouts_are_eval():
+    from molt.agents.base import IS_EVAL
+
+    seen = []
+
+    class _Runner:
+        async def execute(self, **kwargs):
+            seen.append(IS_EVAL.get())
+            raise RuntimeError("stop after the read")
+
+    actor_cls = getattr(AgentRunnerActor, "__ray_actor_class__", AgentRunnerActor)
+    actor = object.__new__(actor_cls)
+    actor._runner, actor._tokenizer, actor._client, actor._media_ids = _Runner(), None, None, set()
+
+    asyncio.run(actor.run_group("prompt", "label", None, SimpleNamespace(), 128, 1, group_id="g", is_eval=True))
+    asyncio.run(actor.run_group("prompt", "label", None, SimpleNamespace(), 128, 1, group_id="g"))
+
+    assert seen == [True, False]
+
+
 def test_agent_runner_reports_each_failed_rollout():
     class _FailingRunner:
         async def execute(self, **kwargs):

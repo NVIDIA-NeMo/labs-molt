@@ -351,7 +351,10 @@ class AgentRunner(ChatAgentRunner):
 
 A multi-turn agent that stops on its own turn cap should return
 `Result(truncated=True)` (see `examples/python/agents/chat_geo3k.py`); the
-server marks generation-length / context truncation by itself.
+server marks generation-length / context truncation by itself. A reply cut by
+`max_tokens` ends a training rollout: the server answers every later request
+with that same reply, so the turn is neither re-asked nor continued. An eval
+rollout that re-sends the turn gets a fresh sample instead.
 
 The same server speaks the Anthropic wire too — point `AsyncAnthropic` at
 `ctx.session_url` (the session root *without* `/v1`; the SDK appends

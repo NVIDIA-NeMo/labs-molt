@@ -37,6 +37,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 from abc import ABC, abstractmethod
+from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
@@ -47,6 +48,10 @@ import torch
 from molt.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
+
+# True while the rollout router runs an eval rollout (set in ``run_group``). Eval is never trained,
+# so the chat server lets it re-ask a turn whose reply was cut by max_tokens.
+IS_EVAL: ContextVar[bool] = ContextVar("molt_is_eval", default=False)
 
 
 def _first_scalar(value):
