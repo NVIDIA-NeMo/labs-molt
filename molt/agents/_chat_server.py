@@ -217,7 +217,8 @@ class _Session:
     # reply WITHOUT recording a second action, so retries can't double-count a turn.
     last_messages: list | None = None
     last_response: tuple | None = None
-    eval_retry_on_max_tokens: int | None = None  # None: a training rollout; else --eval.retry_on_max_tokens
+    max_retries: int = 0  # how often one turn may be sampled again: --agent.max_retries at eval, 0 in training
+    retries_left: int = 0  # ... what is left of that for the current turn
 
 
 class ChatServerState:
@@ -246,14 +247,14 @@ class ChatServerState:
         self.expand_image_placeholder = should_expand_image_placeholder(processor)
         self.sessions: dict[str, _Session] = {}
 
-    def open(self, session_id: str, prompt, label, images, sampling_params=None, eval_retry_on_max_tokens=None):
+    def open(self, session_id: str, prompt, label, images, sampling_params=None, max_retries=0):
         self.sessions[session_id] = _Session(
             prompt=prompt,
             label=label,
             images=images,
             session_id=session_id,
             sampling_params=sampling_params,
-            eval_retry_on_max_tokens=eval_retry_on_max_tokens,
+            max_retries=max_retries,
         )
 
     def discard(self, session_id: str):
@@ -287,12 +288,18 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
     messages = body.get("messages") or []
     if not messages:
         raise HTTPException(status_code=400, detail="No messages provided")
+    retry = messages == session.last_messages
     last = session.last_response
-    # A reply truncated by max_tokens (not the empty reply of a full context) ends a training rollout:
-    # every later request gets it back, so its trained tokens are never re-asked or continued.
     truncated = last is not None and last[1] == "length" and last[0] != ""
-    if messages == session.last_messages or (truncated and session.eval_retry_on_max_tokens is None):
+    # Training (max_retries 0) never samples a turn twice: a re-sent turn is replayed, and a reply
+    # truncated by max_tokens ends the rollout — every later request gets it back. Eval samples a
+    # re-sent turn again (truncated, unparseable, lost), up to --agent.max_retries times per turn.
+    if retry and session.retries_left:
+        session.retries_left -= 1
+    elif retry or (truncated and not session.max_retries):
         return last  # incl. the retry of an already-recorded turn -> replay, don't re-record
+    else:
+        session.retries_left = session.max_retries
     sp = _build_sampling_params(session.sampling_params or state.default_sampling, body)
     kwargs = {**state.chat_template_kwargs, **({"tools": body["tools"]} if body.get("tools") else {})}
     loop = asyncio.get_running_loop()
@@ -303,7 +310,10 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
     # so its messages extend last_messages; a compaction changes that prefix. Also false on turn 1.
     n = len(session.last_messages or [])
     extends = (
-        bool(session.trajectories) and messages[:n] == session.last_messages and messages[n].get("role") == "assistant"
+        bool(session.trajectories)
+        and len(messages) > n  # a turn sampled again repeats the same messages -> fresh segment
+        and messages[:n] == session.last_messages
+        and messages[n].get("role") == "assistant"
     )
     chat, pil_images = await loop.run_in_executor(_TOKENIZE_EXECUTOR, _messages_to_chat, state, messages)
     full = state.processor.apply_chat_template(chat, tokenize=False, add_generation_prompt=True, **kwargs)
@@ -387,15 +397,10 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
         sp.min_tokens = sp.max_tokens
 
     mm_data = {"image": traj.pil_images} if traj.pil_images else None
-    # Eval samples a reply truncated by max_tokens again, up to --eval.retry_on_max_tokens times (the
-    # OSWorld agent asks 20 times); only the last attempt is recorded. Training always takes the first.
-    for _ in range(1 + (session.eval_retry_on_max_tokens or 0)):
-        request_output, off_policy_len = await state.transport.generate(
-            gen_tokens, sp, multi_modal_data=mm_data, session_id=session.session_id
-        )
-        generation = request_output.outputs[0]
-        if generation.finish_reason != "length":
-            break
+    request_output, off_policy_len = await state.transport.generate(
+        gen_tokens, sp, multi_modal_data=mm_data, session_id=session.session_id
+    )
+    generation = request_output.outputs[0]
     action_ids = list(generation.token_ids)
     # /inference/v1/generate is token-only (generation.text == ""); decode the action text from the
     # ids so the agent/grader sees it. skip_special_tokens=False keeps answer markers (<answer>,

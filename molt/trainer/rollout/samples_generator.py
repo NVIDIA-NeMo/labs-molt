@@ -511,7 +511,7 @@ class SamplesGenerator:
                         1,
                         tools=tool,
                         group_id=group_id,
-                        eval_retry_on_max_tokens=generate_kwargs.get("eval_retry_on_max_tokens"),
+                        turn_retries=generate_kwargs.get("turn_retries", 0),
                     )
                 )
             refs.append(_gather_group.remote(*parts))

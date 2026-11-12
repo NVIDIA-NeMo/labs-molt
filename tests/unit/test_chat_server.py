@@ -404,18 +404,18 @@ def test_truncated_reply_ends_a_training_rollout(monkeypatch):
     assert len(tp.calls) == 1 and len(session.trajectories[0].action_ranges) == 1
 
 
-def test_eval_resamples_a_truncated_reply_within_its_retry_budget(monkeypatch):
-    # --eval.retry_on_max_tokens 2: a truncated reply is sampled again inside the same request and only
-    # the last attempt is recorded; when the budget runs out the agent gets the truncated reply.
-    cut = _act([90], [-0.1], finish="length")
-    _patch_prompts(monkeypatch, [[1, 2], [1, 2]])
-    state, tp = _state([cut, cut, _act([92], [-0.3]), cut, cut, cut])
-    state.open("ok", "P", "l", None, eval_retry_on_max_tokens=2)
-    assert asyncio.run(_run_turn(state, state.sessions["ok"], _MSG)) == ("ACT", "stop")
-    assert len(tp.calls) == 3 and len(state.sessions["ok"].trajectories[0].action_ranges) == 1
-    state.open("spent", "P", "l", None, eval_retry_on_max_tokens=2)
-    assert asyncio.run(_run_turn(state, state.sessions["spent"], _MSG)) == ("ACT", "length")
-    assert len(tp.calls) == 6
+def test_eval_samples_a_resent_turn_again_within_its_retry_budget(monkeypatch):
+    # An eval session (--agent.max_retries 2) samples a re-sent turn again, whatever made the agent
+    # re-send it, and replays the last reply once the turn's two retries are spent.
+    _patch_prompts(monkeypatch, [[1, 2]] * 3)
+    state, tp = _state([_act([90], [-0.1], finish="length"), _act([91], [-0.2]), _act([92], [-0.3])])
+    state.open("sid", "P", "l", None, max_retries=2)
+    session = state.sessions["sid"]
+    assert asyncio.run(_run_turn(state, session, _MSG)) == ("ACT", "length")
+    assert asyncio.run(_run_turn(state, session, _MSG)) == ("ACT", "stop")  # the truncated reply, asked again
+    assert asyncio.run(_run_turn(state, session, _MSG)) == ("ACT", "stop")  # e.g. the agent could not parse it
+    assert len(tp.calls) == 3 and len(session.trajectories) == 3
+    assert asyncio.run(_run_turn(state, session, _MSG)) == ("ACT", "stop") and len(tp.calls) == 3
 
 
 class _FlakyTransport(_FakeTransport):
@@ -814,7 +814,7 @@ def test_chatml_turn_cut_by_length_gets_the_template_end_of_turn_in_the_feedback
         [_dact(proc.encode("A1 cut"), [-0.1] * 6, finish="length"), _dact(proc.encode("A2" + proc.EOT), [-0.1] * 3)]
     )
     state = ChatServerState(engine, proc, "policy", 10000, _sampling())
-    state.open("sid", "P", "lab", None, eval_retry_on_max_tokens=0)
+    state.open("sid", "P", "lab", None, max_retries=1)
     session = state.sessions["sid"]
     msgs = [{"role": "user", "content": "Q0"}]
     act1, finish = _drive(state, session, msgs)

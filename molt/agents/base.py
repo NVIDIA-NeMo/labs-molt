@@ -49,9 +49,9 @@ from molt.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
 
-# Set by the rollout router's ``run_group`` for each rollout: None for a training rollout, else the
-# eval's --eval.retry_on_max_tokens (how often the chat server re-samples a reply truncated by max_tokens).
-EVAL_RETRY_ON_MAX_TOKENS: ContextVar[int | None] = ContextVar("molt_eval_retry_on_max_tokens", default=None)
+# How often the rollout being run may sample one turn again (set by the rollout router's ``run_group``):
+# --agent.max_retries for an eval rollout, 0 for a training one, whose replies are never sampled twice.
+TURN_RETRIES: ContextVar[int] = ContextVar("molt_turn_retries", default=0)
 
 
 def _first_scalar(value):

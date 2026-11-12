@@ -665,6 +665,15 @@ if __name__ == "__main__":
 
     # Rollout / generation
     parser.add_argument("--train.agent_path", type=str, default=None, help="Agent script path")
+    parser.add_argument(
+        "--agent.max_retries",
+        type=int,
+        default=2,
+        help="Retries per agent turn. A system error (router/engine 5xx, dropped connection) is retried in "
+        "training and eval alike. What the model got wrong is retried at eval only: a chat agent that "
+        "re-sends a turn (reply truncated by max_tokens, unparseable) gets a new sample; in training the "
+        "reply stands and a truncated one ends the rollout. The OSWorld agent uses 20.",
+    )
     # -- vLLM engine --
     parser.add_argument(
         "--vllm.num_engines", type=int, default=None, help="number of vLLM Engines, set to 0 to disable vLLM"
@@ -987,14 +996,6 @@ if __name__ == "__main__":
         type=int,
         default=None,
         help="Eval samples per prompt; falls back to --rollout.n_samples_per_prompt when unset.",
-    )
-    parser.add_argument(
-        "--eval.retry_on_max_tokens",
-        type=int,
-        default=0,
-        help="Chat agents, eval only: sample a reply truncated by max_tokens again, up to N times, before "
-        "the agent sees it (the OSWorld agent re-asks 20 times). Training never re-samples: a truncated "
-        "reply ends the rollout.",
     )
     parser.add_argument(
         "--eval.eval_at_start",

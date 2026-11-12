@@ -357,14 +357,14 @@ def test_agent_runner_actor_init_is_synchronous():
     assert not inspect.iscoroutinefunction(actor_cls.__init__)
 
 
-def test_run_group_hands_the_eval_retry_on_max_tokens_to_the_runner():
-    from molt.agents.base import EVAL_RETRY_ON_MAX_TOKENS
+def test_run_group_hands_the_turn_retries_to_the_runner():
+    from molt.agents.base import TURN_RETRIES
 
     seen = []
 
     class _Runner:
         async def execute(self, **kwargs):
-            seen.append(EVAL_RETRY_ON_MAX_TOKENS.get())
+            seen.append(TURN_RETRIES.get())
             raise RuntimeError("stop after the read")
 
     actor_cls = getattr(AgentRunnerActor, "__ray_actor_class__", AgentRunnerActor)
@@ -372,10 +372,10 @@ def test_run_group_hands_the_eval_retry_on_max_tokens_to_the_runner():
     actor._runner, actor._tokenizer, actor._client, actor._media_ids = _Runner(), None, None, set()
 
     args = ("prompt", "label", None, SimpleNamespace(), 128, 1)
-    asyncio.run(actor.run_group(*args, group_id="g", eval_retry_on_max_tokens=20))
+    asyncio.run(actor.run_group(*args, group_id="g", turn_retries=20))
     asyncio.run(actor.run_group(*args, group_id="g"))
 
-    assert seen == [20, None]  # None: a training rollout
+    assert seen == [20, 0]  # 0: a training rollout
 
 
 def test_agent_runner_reports_each_failed_rollout():
