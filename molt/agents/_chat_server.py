@@ -292,10 +292,10 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
     last = session.last_response
     truncated = last is not None and last[1] == "length" and last[0] != ""
     # A model error is tried again at eval only: a turn takes at most session.max_tries samples, 1 in
-    # training and --agent.max_tries at eval. Until they are spent, a re-sent turn (truncated,
-    # unparseable, lost) is sampled again. After that it is replayed, and a reply truncated by
-    # max_tokens ends the rollout: every later request gets it back.
-    if (retry or truncated) and session.tries >= session.max_tries:
+    # training and --agent.max_tries at eval. A re-sent turn (truncated, unparseable, lost) is sampled
+    # again until they are spent, then replayed. With a single try, a reply truncated by max_tokens
+    # ends the rollout: every later request gets it back. With more, the agent may act on it and go on.
+    if (retry and session.tries >= session.max_tries) or (truncated and session.max_tries == 1):
         return last
     session.tries = session.tries + 1 if retry else 1
     sp = _build_sampling_params(session.sampling_params or state.default_sampling, body)
