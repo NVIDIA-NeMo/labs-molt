@@ -668,12 +668,12 @@ if __name__ == "__main__":
     parser.add_argument(
         "--agent.max_tries",
         type=int,
-        default=1,
+        default=3,
         help="Most tries one agent turn gets; 1 = a single try, no retry (the OSWorld agent uses 20). "
         "Training: only a system error (router/engine 5xx, dropped connection) is tried again. A model "
         "error is not: the reply stands, and one truncated by max_tokens ends the rollout. "
         "Eval: a model error is tried again as well. When the chat agent re-sends a turn whose reply was "
-        "truncated or unparseable, the turn is sampled anew.",
+        "truncated or unparseable, the turn is sampled anew; it can also act on a truncated reply and go on.",
     )
     # -- vLLM engine --
     parser.add_argument(
