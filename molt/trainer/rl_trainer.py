@@ -627,10 +627,7 @@ class GenerateSamplesActor:
         # first node with free CPUs, and that node's port range then runs out.
         agent_runners = [
             AgentRunnerActor.options(scheduling_strategy="SPREAD").remote(
-                strategy.args.train.agent_path,
-                router_url,
-                model_path=pretrain,
-                max_retries=strategy.args.agent.max_retries,
+                strategy.args.train.agent_path, router_url, model_path=pretrain
             )
             for _ in range(num_runners)
         ]
@@ -815,7 +812,7 @@ class GenerateSamplesActor:
         if eval_n is None:
             eval_n = self.args.rollout.n_samples_per_prompt
         eval_kwargs = {**self.generate_kwargs, "n_samples_per_prompt": eval_n, "top_logprobs": 0}  # eval never trains
-        eval_kwargs["turn_retries"] = self.args.agent.max_retries  # eval may sample a turn again; training never
+        eval_kwargs["max_attempts"] = self.args.agent.max_attempts  # eval only: training takes one attempt per turn
         for key in ("temperature", "top_p", "max_new_tokens"):
             override = getattr(self.args.eval, key)
             if override is not None:

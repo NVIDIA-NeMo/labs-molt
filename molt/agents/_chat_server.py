@@ -217,8 +217,8 @@ class _Session:
     # reply WITHOUT recording a second action, so retries can't double-count a turn.
     last_messages: list | None = None
     last_response: tuple | None = None
-    max_retries: int = 0  # how often one turn may be sampled again: --agent.max_retries at eval, 0 in training
-    retries_left: int = 0  # ... what is left of that for the current turn
+    max_attempts: int = 1  # samples one turn may take: 1 in training, --agent.max_attempts at eval
+    attempts: int = 0  # ... and how many the current turn has taken
 
 
 class ChatServerState:
@@ -247,14 +247,14 @@ class ChatServerState:
         self.expand_image_placeholder = should_expand_image_placeholder(processor)
         self.sessions: dict[str, _Session] = {}
 
-    def open(self, session_id: str, prompt, label, images, sampling_params=None, max_retries=0):
+    def open(self, session_id: str, prompt, label, images, sampling_params=None, max_attempts=1):
         self.sessions[session_id] = _Session(
             prompt=prompt,
             label=label,
             images=images,
             session_id=session_id,
             sampling_params=sampling_params,
-            max_retries=max_retries,
+            max_attempts=max_attempts,
         )
 
     def discard(self, session_id: str):
@@ -291,15 +291,13 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
     retry = messages == session.last_messages
     last = session.last_response
     truncated = last is not None and last[1] == "length" and last[0] != ""
-    # Training (max_retries 0) never samples a turn twice: a re-sent turn is replayed, and a reply
-    # truncated by max_tokens ends the rollout — every later request gets it back. Eval samples a
-    # re-sent turn again (truncated, unparseable, lost), up to --agent.max_retries times per turn.
-    if retry and session.retries_left:
-        session.retries_left -= 1
-    elif retry or (truncated and not session.max_retries):
-        return last  # incl. the retry of an already-recorded turn -> replay, don't re-record
-    else:
-        session.retries_left = session.max_retries
+    # A turn takes at most session.max_attempts samples: 1 in training, where a model error is never
+    # retried, and --agent.max_attempts at eval. Until they are spent, a re-sent turn (truncated,
+    # unparseable, lost) is sampled again. After that it is replayed, and a reply truncated by
+    # max_tokens ends the rollout: every later request gets it back.
+    if (retry or truncated) and session.attempts >= session.max_attempts:
+        return last
+    session.attempts = session.attempts + 1 if retry else 1
     sp = _build_sampling_params(session.sampling_params or state.default_sampling, body)
     kwargs = {**state.chat_template_kwargs, **({"tools": body["tools"]} if body.get("tools") else {})}
     loop = asyncio.get_running_loop()

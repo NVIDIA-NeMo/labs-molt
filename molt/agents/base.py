@@ -49,9 +49,9 @@ from molt.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
 
-# How often the rollout being run may sample one turn again (set by the rollout router's ``run_group``):
-# --agent.max_retries for an eval rollout, 0 for a training one, whose replies are never sampled twice.
-TURN_RETRIES: ContextVar[int] = ContextVar("molt_turn_retries", default=0)
+# The samples one turn of the rollout being run may take (set by the rollout router's ``run_group``):
+# --agent.max_attempts for an eval rollout, 1 for a training one, where a model error is never retried.
+MAX_ATTEMPTS: ContextVar[int] = ContextVar("molt_max_attempts", default=1)
 
 
 def _first_scalar(value):

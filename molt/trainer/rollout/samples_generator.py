@@ -511,7 +511,7 @@ class SamplesGenerator:
                         1,
                         tools=tool,
                         group_id=group_id,
-                        turn_retries=generate_kwargs.get("turn_retries", 0),
+                        max_attempts=generate_kwargs.get("max_attempts", 1),
                     )
                 )
             refs.append(_gather_group.remote(*parts))
