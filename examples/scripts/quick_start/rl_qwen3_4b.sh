@@ -28,10 +28,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${MOLT_PATH:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
 MODEL_PATH="${MODEL_PATH:?Set MODEL_PATH to a Qwen3-4B checkpoint.}"
 
-# Same dataset path as slurm/rl_qwen3_4b.sh — the proRL text-math RL split.
-PROMPT_DATASET="${PROMPT_DATASET:-$REPO_ROOT/.tmp/proRL_text_rl/train}"
-EVAL_DATASET="${EVAL_DATASET:-$REPO_ROOT/.tmp/proRL_text_rl/eval}"
-test -e "$PROMPT_DATASET" || { echo "PROMPT_DATASET not found: $PROMPT_DATASET — prepare proRL_text_rl first."; exit 1; }
+# Text-math RL. Auto-prep if missing, as the geo3k quick starts do. Point
+# PROMPT_DATASET / EVAL_DATASET at your own export (e.g. the proRL text split)
+# to train on that instead; any set with prompt + reward_model loads the same.
+DATA_DIR="${DATA_DIR:-$REPO_ROOT/.tmp/dapo_math_17k}"
+if [ ! -d "$DATA_DIR/train" ] && [ -z "${PROMPT_DATASET:-}" ]; then
+  echo "[quickstart] preparing text math (BytedTsinghua-SIA/DAPO-Math-17k, AIME-2024 eval) — one-time"
+  python3 "$REPO_ROOT/examples/python/utils/prepare_dapo.py" --out-dir "$DATA_DIR"
+fi
+PROMPT_DATASET="${PROMPT_DATASET:-$DATA_DIR/train}"
+EVAL_DATASET="${EVAL_DATASET:-$DATA_DIR/eval}"
+test -e "$PROMPT_DATASET" || { echo "PROMPT_DATASET not found: $PROMPT_DATASET"; exit 1; }
 SAVE_ROOT="${SAVE_ROOT:-$REPO_ROOT/outputs/quick_start-qwen3-4b/run}"
 
 GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
@@ -55,7 +62,7 @@ fi
 trap '[ "$STARTED_RAY" = "1" ] && ray stop --force >/dev/null 2>&1 || true' EXIT
 
 cd "$REPO_ROOT"
-# Standard config: MAX_LEN=16384, ROLLOUT=16, N=8, TRAIN_BATCH=128, dataset=proRL.
+# Standard config: MAX_LEN=16384, ROLLOUT=16, N=8, TRAIN_BATCH=128, text math dataset.
 python3 -u -m molt.cli.train_rl_ray \
   --actor.model_name_or_path "$MODEL_PATH" \
   --data.prompt_dataset "$PROMPT_DATASET" \

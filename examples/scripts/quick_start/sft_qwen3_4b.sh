@@ -14,7 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Single-node quick-start: Qwen3-4B (dense) text SFT on proRL_text_rl.
+# Single-node quick-start: Qwen3-4B (dense) text SFT on text math.
 #
 # 8 GPUs on one machine via torchrun --standalone — no slurm.
 # Mirrors slurm/sft_qwen3_4b.sh's recipe for single-node use.
@@ -27,9 +27,17 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${MOLT_PATH:-$(cd "$SCRIPT_DIR/../../.." && pwd)}"
 MODEL_PATH="${MODEL_PATH:-/path/to/models/Qwen3/Qwen3-4B-Instruct-2507}"
 
-SFT_DATASET="${SFT_DATASET:-$REPO_ROOT/.tmp/proRL_text_rl/train}"
-EVAL_DATASET="${EVAL_DATASET:-$REPO_ROOT/.tmp/proRL_text_rl/eval}"
-test -e "$SFT_DATASET" || { echo "SFT_DATASET not found: $SFT_DATASET — prepare proRL_text_rl first."; exit 1; }
+# Text-math SFT on the boxed ground truth. Auto-prep if missing, as the geo3k
+# quick starts do. Point SFT_DATASET / EVAL_DATASET at your own export (e.g.
+# the proRL text split) to train on that instead.
+DATA_DIR="${DATA_DIR:-$REPO_ROOT/.tmp/dapo_math_17k}"
+if [ ! -d "$DATA_DIR/train" ] && [ -z "${SFT_DATASET:-}" ]; then
+  echo "[quickstart] preparing text math (BytedTsinghua-SIA/DAPO-Math-17k, AIME-2024 eval) — one-time"
+  python3 "$REPO_ROOT/examples/python/utils/prepare_dapo.py" --out-dir "$DATA_DIR"
+fi
+SFT_DATASET="${SFT_DATASET:-$DATA_DIR/train}"
+EVAL_DATASET="${EVAL_DATASET:-$DATA_DIR/eval}"
+test -e "$SFT_DATASET" || { echo "SFT_DATASET not found: $SFT_DATASET"; exit 1; }
 SAVE_ROOT="${SAVE_ROOT:-$REPO_ROOT/outputs/quick_start-sft-qwen3-4b/run}"
 
 GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
