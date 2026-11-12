@@ -389,6 +389,35 @@ def test_run_turn_replays_retried_turn_idempotently(monkeypatch):
     assert len(session.trajectories[0].action_ranges) == 1 and len(tp.calls) == 1
 
 
+def test_truncated_reply_ends_a_training_rollout(monkeypatch):
+    # A training session answers every request after a max_tokens truncation with that same reply,
+    # so the agent can neither re-ask the turn nor continue past it; the turn is recorded once.
+    _patch_prompts(monkeypatch, [[1, 2]])
+    state, tp = _state([_act([90], [-0.1], finish="length")])
+    state.open("sid", "P", "l", None)
+    session = state.sessions["sid"]
+    cut = asyncio.run(_run_turn(state, session, _MSG))
+    more = [{"role": "assistant", "content": "ACT"}, {"role": "user", "content": "go on"}]
+    assert cut == ("ACT", "length")
+    assert asyncio.run(_run_turn(state, session, _MSG)) == cut
+    assert asyncio.run(_run_turn(state, session, {"messages": _MSG["messages"] + more})) == cut
+    assert len(tp.calls) == 1 and len(session.trajectories[0].action_ranges) == 1
+
+
+def test_eval_samples_a_resent_turn_again_until_its_tries_are_spent(monkeypatch):
+    # An eval session (--agent.max_tries 3) samples a re-sent turn again, whatever made the agent
+    # re-send it, and replays the last reply once the turn has had its three tries.
+    _patch_prompts(monkeypatch, [[1, 2]] * 3)
+    state, tp = _state([_act([90], [-0.1], finish="length"), _act([91], [-0.2]), _act([92], [-0.3])])
+    state.open("sid", "P", "l", None, max_tries=3)
+    session = state.sessions["sid"]
+    assert asyncio.run(_run_turn(state, session, _MSG)) == ("ACT", "length")
+    assert asyncio.run(_run_turn(state, session, _MSG)) == ("ACT", "stop")  # the truncated reply, asked again
+    assert asyncio.run(_run_turn(state, session, _MSG)) == ("ACT", "stop")  # e.g. the agent could not parse it
+    assert len(tp.calls) == 3 and len(session.trajectories) == 3
+    assert asyncio.run(_run_turn(state, session, _MSG)) == ("ACT", "stop") and len(tp.calls) == 3
+
+
 class _FlakyTransport(_FakeTransport):
     """Raises on the listed 0-indexed generate calls (a transient engine 500 the stock SDK retries)
     WITHOUT consuming an action, so a retry hits the next call."""
@@ -779,12 +808,13 @@ def test_chatml_reply_strips_the_end_of_turn_token_and_the_stream_matches_the_te
 def test_chatml_turn_cut_by_length_gets_the_template_end_of_turn_in_the_feedback():
     # No <|im_end|> was generated (finish_reason=length): the next turn's feedback must start with the
     # template's end-of-turn markup so the stream is still the template's exact token sequence.
+    # Only an eval rollout continues past a truncated reply; a training one ends there.
     proc = _ChatMLProc()
     engine = _DriftyEngine(
         [_dact(proc.encode("A1 cut"), [-0.1] * 6, finish="length"), _dact(proc.encode("A2" + proc.EOT), [-0.1] * 3)]
     )
     state = ChatServerState(engine, proc, "policy", 10000, _sampling())
-    state.open("sid", "P", "lab", None)
+    state.open("sid", "P", "lab", None, max_tries=2)
     session = state.sessions["sid"]
     msgs = [{"role": "user", "content": "Q0"}]
     act1, finish = _drive(state, session, msgs)

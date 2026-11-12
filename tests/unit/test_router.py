@@ -185,7 +185,7 @@ def test_post_retries_transient_then_succeeds(monkeypatch):
 
     monkeypatch.setattr("molt.trainer.rollout.router.asyncio.sleep", _no_sleep)
     http = _FlakyHttp(_gen_resp([90]), aiohttp.ClientConnectionError("engine warming up"), fail_times=2)
-    ro, off = asyncio.run(RouterGenerateClient(http).generate([1, 2], _sp()))
+    ro, off = asyncio.run(RouterGenerateClient(http, max_tries=3).generate([1, 2], _sp()))
     assert http.attempts == 3 and ro.outputs[0].token_ids == [90]  # 2 transient failures, 3rd succeeds
 
 
@@ -206,7 +206,7 @@ def test_post_retries_interrupted_response_body(monkeypatch, path, failed_attemp
 
     monkeypatch.setattr(_FakeResp, "json", read_body)
     monkeypatch.setattr("molt.trainer.rollout.router.asyncio.sleep", record_backoff)
-    request = RouterGenerateClient(http)._post(path, {"token_ids": [1, 2]}, "stable-session")
+    request = RouterGenerateClient(http, max_tries=3)._post(path, {"token_ids": [1, 2]}, "stable-session")
     if failed_attempts == 3:
         with pytest.raises(aiohttp.ClientPayloadError, match="not completed"):
             asyncio.run(request)
@@ -355,6 +355,27 @@ def test_agent_runner_actor_init_is_synchronous():
     """Ray actor constructors are synchronous; an async __init__ would not be awaited."""
     actor_cls = getattr(AgentRunnerActor, "__ray_actor_class__", AgentRunnerActor)
     assert not inspect.iscoroutinefunction(actor_cls.__init__)
+
+
+def test_run_group_hands_the_max_tries_to_the_runner():
+    from molt.agents.base import MAX_TRIES
+
+    seen = []
+
+    class _Runner:
+        async def execute(self, **kwargs):
+            seen.append(MAX_TRIES.get())
+            raise RuntimeError("stop after the read")
+
+    actor_cls = getattr(AgentRunnerActor, "__ray_actor_class__", AgentRunnerActor)
+    actor = object.__new__(actor_cls)
+    actor._runner, actor._tokenizer, actor._client, actor._media_ids = _Runner(), None, None, set()
+
+    args = ("prompt", "label", None, SimpleNamespace(), 128, 1)
+    asyncio.run(actor.run_group(*args, group_id="g", max_tries=20))
+    asyncio.run(actor.run_group(*args, group_id="g"))
+
+    assert seen == [20, 1]  # 1: a training rollout
 
 
 def test_agent_runner_reports_each_failed_rollout():

@@ -503,7 +503,15 @@ class SamplesGenerator:
                 self._rr += 1
                 parts.append(
                     actor.run_group.remote(
-                        prompt, label, img, sampling_params, truncate_length, 1, tools=tool, group_id=group_id
+                        prompt,
+                        label,
+                        img,
+                        sampling_params,
+                        truncate_length,
+                        1,
+                        tools=tool,
+                        group_id=group_id,
+                        max_tries=generate_kwargs.get("max_tries", 1),
                     )
                 )
             refs.append(_gather_group.remote(*parts))

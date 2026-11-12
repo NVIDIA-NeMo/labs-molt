@@ -208,6 +208,7 @@ Common RL switches:
 | Freeze MoE routing (stabilize MoE RL) | `--actor.freeze_moe_router` |
 | On-policy distillation | `--algo.advantage.estimator on_policy_distill --ref.model_name_or_path /path/to/teacher` |
 | Independent eval sampling | `--eval.temperature`, `--eval.top_p`, `--eval.max_new_tokens`, `--eval.n_samples_per_prompt` (unset ones fall back to rollout) |
+| Tries per agent turn | `--agent.max_tries N` (default 1 = a single try; the OSWorld agent uses 20) — training tries a turn again only after a system error; eval also after a model error (truncated or unparseable reply) |
 | Eval a checkpoint (no training) | `--eval.eval_only --eval.dataset <path>` — score the eval set once and exit; vLLM holds the HF weights, so the policy/ref/critic FSDP actors are never built and their GPUs go to the eval |
 | Dump / replay a rollout batch | `--train.rollout_dump_dir <dir>` then `--train.rollout_replay_dir <dir>` re-runs training on it without regenerating |
 | Check weight-update coverage | `--train.check_weight_update_equal` warns which vLLM params a broadcast left stale |
@@ -352,6 +353,16 @@ class AgentRunner(ChatAgentRunner):
 A multi-turn agent that stops on its own turn cap should return
 `Result(truncated=True)` (see `examples/python/agents/chat_geo3k.py`); the
 server marks generation-length / context truncation by itself.
+
+A turn gets at most `--agent.max_tries` tries (default 1: a single try), and
+training and eval differ in what they try again:
+
+- **Training** tries a turn again only after a system error (router/engine
+  5xx, dropped connection). A model error is not retried: the turn keeps its
+  one sample, a re-sent turn gets that recorded reply back, and a reply
+  truncated by `max_tokens` ends the rollout.
+- **Eval** tries a turn again after a model error as well: re-sending a turn
+  (because its reply was truncated or could not be parsed) samples it anew.
 
 The same server speaks the Anthropic wire too — point `AsyncAnthropic` at
 `ctx.session_url` (the session root *without* `/v1`; the SDK appends

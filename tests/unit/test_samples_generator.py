@@ -506,7 +506,7 @@ def test_dispatch_spreads_each_groups_rollouts_over_runners_and_rejoins_them(mon
     calls = []
 
     def runner(name):
-        def remote(prompt, label, img, sampling_params, max_length, n_samples, tools=None, group_id=None):
+        def remote(prompt, label, img, sampling_params, max_length, n_samples, tools=None, group_id=None, **_):
             calls.append((prompt, n_samples, group_id))
             return f"{name}:{prompt}"
 

@@ -73,7 +73,7 @@ from molt.agents._chat_server import (
     serve_on_current_loop,
     stitch_session,
 )
-from molt.agents.base import Result, Runner
+from molt.agents.base import MAX_TRIES, Result, Runner
 from molt.utils.logging_utils import init_logger
 
 # The chat server registers this as the policy model id; agents request it via
@@ -255,7 +255,7 @@ class ChatAgentRunner(Runner):
         prompt_text = _extract_prompt_text(prompt)
         # Pass THIS call's sampling_params so the server defaults each turn to the right train-vs-eval
         # temperature/max_tokens even if the agent doesn't re-send them (see _Session.sampling_params).
-        self._state.open(session_id, prompt_text, label, images, sampling_params)
+        self._state.open(session_id, prompt_text, label, images, sampling_params, MAX_TRIES.get())
         session_root = f"{self._server_root}/s/{session_id}"
         ctx = ChatContext(
             messages=messages,
