@@ -49,9 +49,9 @@ from molt.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
 
-# True while the rollout router runs an eval rollout (set in ``run_group``). Eval is never trained,
-# so the chat server lets it re-ask a turn whose reply was cut by max_tokens.
-IS_EVAL: ContextVar[bool] = ContextVar("molt_is_eval", default=False)
+# Set by the rollout router's ``run_group`` for each rollout: None for a training rollout, else the
+# eval's --eval.retry_on_max_tokens (how often the chat server re-samples a reply truncated by max_tokens).
+EVAL_RETRY_ON_MAX_TOKENS: ContextVar[int | None] = ContextVar("molt_eval_retry_on_max_tokens", default=None)
 
 
 def _first_scalar(value):

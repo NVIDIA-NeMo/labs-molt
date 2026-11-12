@@ -989,6 +989,14 @@ if __name__ == "__main__":
         help="Eval samples per prompt; falls back to --rollout.n_samples_per_prompt when unset.",
     )
     parser.add_argument(
+        "--eval.retry_on_max_tokens",
+        type=int,
+        default=0,
+        help="Chat agents, eval only: sample a reply truncated by max_tokens again, up to N times, before "
+        "the agent sees it (the OSWorld agent re-asks 20 times). Training never re-samples: a truncated "
+        "reply ends the rollout.",
+    )
+    parser.add_argument(
         "--eval.eval_at_start",
         action="store_true",
         help="Run one baseline eval at global_step 0 (before any update) to measure the pre-RL model. "

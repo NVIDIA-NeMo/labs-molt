@@ -182,7 +182,6 @@ class SamplesGenerator:
                     dataloader_iter=self._eval_dataloader_iter,
                     num_prompts=eval_batch_size,
                     dynamic_filtering=False,
-                    is_eval=True,
                     **generate_kwargs,
                 )
                 all_experiences.extend(experiences)
@@ -512,7 +511,7 @@ class SamplesGenerator:
                         1,
                         tools=tool,
                         group_id=group_id,
-                        is_eval=generate_kwargs.get("is_eval", False),
+                        eval_retry_on_max_tokens=generate_kwargs.get("eval_retry_on_max_tokens"),
                     )
                 )
             refs.append(_gather_group.remote(*parts))
