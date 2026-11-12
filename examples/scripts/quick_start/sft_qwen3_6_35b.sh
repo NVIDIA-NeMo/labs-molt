@@ -50,6 +50,14 @@ MAX_SAMPLES="${MAX_SAMPLES:-4096}"
 export HF_HOME="${HF_HOME:-$HOME/.cache/huggingface}"
 export TOKENIZERS_PARALLELISM=true
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# Stated rather than left to the default in molt/models/base.py, so the one
+# knob reported to decide whether full AC below survives the backward recompute
+# is visible here. Full AC has been reported to fail on this recipe with a
+# checkpoint metadata mismatch; deepep avoided it for the reporter, while
+# hybridep stays the default (deepep is pinned rather than auto-selected, so
+# its availability depends on the image). See
+# https://github.com/NVIDIA-NeMo/labs-molt/issues/90
+export MOLT_MOE_DISPATCHER="${MOLT_MOE_DISPATCHER:-hybridep}"
 
 cd "$REPO_ROOT"
 torchrun --standalone --nproc_per_node="$GPUS_PER_NODE" -m molt.cli.train_sft \
