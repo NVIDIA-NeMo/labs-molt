@@ -825,6 +825,22 @@ def test_chatml_turn_cut_by_length_gets_the_template_end_of_turn_in_the_feedback
     assert session.trajectories[0].observation_tokens[: len(canonical)] == canonical
 
 
+def test_eval_goes_on_past_a_truncated_reply_the_agent_acted_on():
+    # Both tries of an eval turn (--agent.max_tries 2) were truncated, yet the agent found its action in
+    # the last reply and sent the next turn: that turn is generated, the rollout does not end there.
+    proc = _ChatMLProc()
+    cut = _dact(proc.encode("A1 cut"), [-0.1] * 6, finish="length")
+    engine = _DriftyEngine([cut, cut, _dact(proc.encode("A2" + proc.EOT), [-0.1] * 3)])
+    state = ChatServerState(engine, proc, "policy", 10000, _sampling())
+    state.open("sid", "P", "lab", None, max_tries=2)
+    session = state.sessions["sid"]
+    msgs = [{"role": "user", "content": "Q0"}]
+    assert _drive(state, session, msgs) == ("A1 cut", "length")
+    assert _drive(state, session, msgs) == ("A1 cut", "length")  # asked again, truncated again
+    msgs = msgs + [{"role": "assistant", "content": "A1 cut"}, {"role": "user", "content": "OBS1"}]
+    assert _drive(state, session, msgs)[1] == "stop" and len(engine.prompts) == 3
+
+
 def test_chat_request_cannot_change_rollout_temperature_or_top_p():
     base = SimpleNamespace(max_tokens=64, temperature=1.0, top_p=1.0, logprobs=None, min_tokens=0)
     with pytest.warns(UserWarning, match="ignored"):

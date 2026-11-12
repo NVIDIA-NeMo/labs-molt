@@ -363,6 +363,8 @@ training and eval differ in what they try again:
   truncated by `max_tokens` ends the rollout.
 - **Eval** tries a turn again after a model error as well: re-sending a turn
   (because its reply was truncated or could not be parsed) samples it anew.
+  An agent that finds its action in a truncated reply can act on it and send
+  the next turn instead.
 
 The same server speaks the Anthropic wire too — point `AsyncAnthropic` at
 `ctx.session_url` (the session root *without* `/v1`; the SDK appends
