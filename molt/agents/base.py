@@ -435,9 +435,29 @@ class StepEnvRunner(Runner):
                 )
                 trajectory.absorb_routing(request_output)  # fills routing by absolute position (R3)
 
-                feedback_tokens = _tokenize_feedback(
-                    hf_tokenizer, result.observation, result.images, trajectory, max_length
+                feedback = asyncio.get_running_loop().run_in_executor(
+                    _TOKENIZE_EXECUTOR,
+                    _tokenize_feedback,
+                    hf_tokenizer,
+                    result.observation,
+                    result.images,
+                    trajectory,
+                    max_length,
                 )
+                # Cancellation does not stop executor work. Keep the rollout alive until its
+                # trajectory mutation finishes, then let the outer finally close the environment.
+                cancellation = None
+                while not feedback.done():
+                    try:
+                        await asyncio.shield(feedback)
+                    except asyncio.CancelledError as exc:
+                        cancellation = exc
+                if cancellation is not None:
+                    # Retrieve a worker failure before cancellation takes precedence.
+                    if not feedback.cancelled():
+                        feedback.exception()
+                    raise cancellation
+                feedback_tokens = feedback.result()
                 feedback_budget = max(0, max_length - len(trajectory.observation_tokens) - trajectory.image_budget)
                 feedback_tokens = feedback_tokens[:feedback_budget]
                 trajectory.append_feedback(action_text, result.observation, feedback_tokens)
