@@ -18,10 +18,10 @@
 # architectures: the same file builds the amd64 and the arm64 image of a multi-arch tag.
 #
 # Base: OFFICIAL Docker Hub nvidia/cuda:13.0.2-cudnn-devel-ubuntu24.04 (multi-arch; CUDA 13.0
-#   toolkit + cuDNN 9, Ubuntu 24.04) plus Ubuntu's python 3.12 and the cu130 torch 2.13.0 trio from
-#   download.pytorch.org, which ships x86_64 and aarch64 wheels. (pytorch/pytorch:2.13.0-cuda13.0-
+#   toolkit + cuDNN 9, Ubuntu 24.04) plus Ubuntu's python 3.12 and torch 2.14.0+cu130 from
+#   download.pytorch.org, which ships x86_64 and aarch64 wheels. (pytorch/pytorch:2.14.0-cuda13.0-
 #   cudnn9-devel carries the same torch but publishes no arm64 manifest.)
-#   torch 2.13.0+cu130 matches vLLM 0.27–0.30's hard torch==2.13.0 pin — NO torch swap. The whole
+#   torch 2.14.0+cu130 matches the vLLM commit's hard torch==2.14.0 pin — NO torch swap. The whole
 #   source stack (TE / flash-attn / mamba / DeepEP) is compiled against this torch, so the torch
 #   version and vLLM must stay in lockstep.
 #
@@ -88,11 +88,13 @@ RUN ln -snf /usr/share/zoneinfo/Etc/UTC /etc/localtime && echo Etc/UTC > /etc/ti
         pkg-config cython3 cmake ninja-build && \
     rm -rf /var/lib/apt/lists/*
 
-# --- torch trio (cu130 wheels, both architectures) -------------------------------
+# --- torch trio (cu130 torch, both architectures) --------------------------------
 # Debian's pip/setuptools/wheel carry no RECORD and cannot be upgraded in place, so current ones are
-# layered over them. The trio is pinned to exactly what vLLM 0.29.0 requires.
+# layered over them. The trio is pinned to exactly what the vLLM commit below requires: torch from the
+# cu130 index (its +cu130 build outranks PyPI's), torchvision 0.29.2 and torchaudio 2.11.1 from PyPI,
+# the only place they are published (one wheel per architecture for every python).
 RUN python -m pip install --ignore-installed pip setuptools wheel && \
-    python -m pip install torch==2.13.0 torchvision==0.28.0 torchaudio==2.11.0 --index-url https://download.pytorch.org/whl/cu130
+    python -m pip install torch==2.14.0 torchvision==0.29.2 torchaudio==2.11.1 --extra-index-url https://download.pytorch.org/whl/cu130
 
 # --- pip tooling + source-build deps + dion -------------------------------------
 # --no-build-isolation builds use the system python, so their build + runtime deps must
@@ -101,20 +103,20 @@ RUN python -m pip install --ignore-installed pip setuptools wheel && \
 # Pin the base torch trio up-front so no later install can swap it — esp. dion's transitive
 # deps (gram-newton-schulz->nvidia-cutlass-dsl, quack-kernels->torch-c-dlpack-ext) which can
 # otherwise pull a generic torch and poison the stack.
-RUN T=$(python -c "import torch; print(torch.__version__)") && \
-    TV=$(python -c "import torchvision; print(torchvision.__version__)") && \
-    TA=$(python -c "import torchaudio; print(torchaudio.__version__)") && \
-    printf 'torch==%s\ntorchvision==%s\ntorchaudio==%s\n' "$T" "$TV" "$TA" > /opt/torch-pin.txt && \
+# The pins are the installed distribution versions: PyPI's torchvision / torchaudio report a +cu local
+# version in __version__ that their wheels do not carry, and pip finds nothing to match such a pin.
+RUN python -c "from importlib.metadata import version; print(*(f'{p}=={version(p)}' for p in ('torch', 'torchvision', 'torchaudio')), sep='\n')" \
+        > /opt/torch-pin.txt && \
     python -m pip install -c /opt/torch-pin.txt pybind11 setuptools_scm ninja cmake pydantic onnxscript onnx importlib_metadata && \
     (python -m pip uninstall -y xgboost pynvml opencv-python-headless || true) && \
     python -m pip install -c /opt/torch-pin.txt "dion @ git+https://github.com/microsoft/dion.git"
 
-# --- (a) Transformer Engine v2.19.0 (source; AutoModel main's TE_COMMIT and build flags) ----
+# --- (a) Transformer Engine v2.20.2 (source; AutoModel main's TE_COMMIT and build flags) ----
 # --no-deps is REQUIRED (else pip hits ResolutionImpossible on torch). CPATH exposes torch's bundled
 # cudnn / nccl / mathdx headers; nvidia/cu13/include stays out: its CUDA runtime headers shadow the
 # toolkit's and nvcc 13.0's sm_103a host stubs then fail ("__cudaLaunch passed 2 arguments").
 # TE 2.19 dropped its cudnn-frontend submodule: setup.py needs the nvidia-cudnn-frontend wheel (header-only).
-ARG TE_COMMIT=v2.19.0
+ARG TE_COMMIT=v2.20.2
 RUN python -m pip install nvidia-mathdx==25.1.1 nvidia-cudnn-frontend==1.31.0 && \
     git clone https://github.com/NVIDIA/TransformerEngine.git /opt/TransformerEngine && \
     cd /opt/TransformerEngine && git fetch origin "${TE_COMMIT}" && git checkout FETCH_HEAD && \
@@ -126,8 +128,9 @@ RUN python -m pip install nvidia-mathdx==25.1.1 nvidia-cudnn-frontend==1.31.0 &&
     cd / && rm -rf /opt/TransformerEngine
 
 # --- (b) flash-attn 2.8.3 (source) ----------------------------------------------
+# torch 2.14's headers need C++20 (std::strong_ordering); the 2.8.3 tags still pass -std=c++17.
 RUN git clone https://github.com/Dao-AILab/flash-attention.git /opt/flash-attention && \
-    cd /opt/flash-attention && git checkout v2.8.3 && \
+    cd /opt/flash-attention && git checkout v2.8.3 && sed -i 's/-std=c++17/-std=c++20/g' setup.py && \
     CPATH="$(for d in ${SITE}/nvidia/*/include; do printf '%s:' "$d"; done)${CPATH:-}" \
     FLASH_ATTENTION_FORCE_BUILD=TRUE MAX_JOBS=8 TORCH_CUDA_ARCH_LIST="${ARCH_LIST}" \
         python -m pip install --no-build-isolation --no-deps . && \
@@ -135,10 +138,11 @@ RUN git clone https://github.com/Dao-AILab/flash-attention.git /opt/flash-attent
 
 # --- (d) causal_conv1d 1.6.2 + mamba_ssm 2.3.2.post1 (source) -------------------
 # CUDA 13 dropped cub::LaneId()/cub::CTA_SYNC(); rewrite to warp/block intrinsics before nvcc.
+# Both setup.py files pass -std=c++17, which torch 2.14's headers no longer compile under.
 RUN for repo in "https://github.com/Dao-AILab/causal-conv1d.git@v1.6.2@/opt/causal-conv1d@CAUSAL_CONV1D_FORCE_BUILD" \
                 "https://github.com/state-spaces/mamba.git@v2.3.2.post1@/opt/mamba@MAMBA_FORCE_BUILD"; do \
         url="${repo%%@*}"; rest="${repo#*@}"; tag="${rest%%@*}"; rest="${rest#*@}"; dir="${rest%%@*}"; flag="${rest#*@}"; \
-        git clone "$url" "$dir" && cd "$dir" && git checkout "$tag" && \
+        git clone "$url" "$dir" && cd "$dir" && git checkout "$tag" && sed -i 's/-std=c++17/-std=c++20/g' setup.py && \
         find csrc -type f \( -name '*.cu' -o -name '*.cuh' -o -name '*.h' -o -name '*.cpp' \) \
             -exec sed -i -e 's/cub::LaneId()/(threadIdx.x \& 31u)/g' -e 's/cub::CTA_SYNC()/__syncthreads()/g' {} + && \
         CPATH="$(for d in ${SITE}/nvidia/*/include; do printf '%s:' "$d"; done)${CPATH:-}" \
@@ -167,7 +171,7 @@ RUN apt-get update && apt-get install -y --allow-change-held-packages rdma-core 
     ln -sfn /usr/lib/${ARCH_LIB} ${RDMA_CORE_HOME}/lib && \
     git clone https://github.com/deepseek-ai/DeepEP.git /opt/DeepEP && \
     cd /opt/DeepEP && \
-    git fetch origin 10d4dd7377d5bce900fbb4b80cce863764892b95 && git checkout FETCH_HEAD && \
+    git fetch origin 96e3d1fc77be942438673e88b07be21d454af8a9 && git checkout FETCH_HEAD && \
     patch -p1 < /opt/deepep.patch && \
     python -m pip install --no-cache-dir nvidia-nvshmem-cu13==3.6.5 && \
     NVSHMEM_LIB_PATH=$(pip show nvidia-nvshmem-cu13 | grep "Location:" | cut -d' ' -f2)/nvidia/nvshmem/lib && \
@@ -180,7 +184,10 @@ RUN apt-get update && apt-get install -y --allow-change-held-packages rdma-core 
     rm -rf /var/lib/apt/lists/* /opt/deepep.patch && cd / && rm -rf /opt/DeepEP
 # RDMA_CORE_HOME=/opt/rdma-core/build symlinks to the system (apt) rdma-core at runtime.
 
-# --- (e) vLLM 0.32.0 (cu130) ----------------------------------------------------
+# --- (e) vLLM main at VLLM_COMMIT (cu130) ----------------------------------------
+# A main-branch commit, installed from vLLM's per-commit wheel index, https://wheels.vllm.ai/<full commit
+# hash>, which serves both architectures; VLLM_VERSION is that wheel's version. The exact version pin is
+# what lets pip take a pre-release; --pre would open every dependency to pre-releases too.
 # Pin the base cu130 torch trio via a constraints file so pip can never swap it; let pip
 # pull vLLM's cu13 kernel deps (flashinfer-cu13, nvidia-cutlass-dsl, etc.).
 # vllm[audio] (not bare vllm): the official Nemotron-Omni GA model carries a Parakeet
@@ -189,7 +196,9 @@ RUN apt-get update && apt-get install -y --allow-change-held-packages rdma-core 
 # vision-only RL and the encoder is frozen — but the weights must load. Torch-pinned so the
 # [audio] extra (librosa/soundfile; torchaudio already in base) can't swap the torch trio.
 # Baking it here removes the per-run, per-node rl_omni3 MOLT_INSTALL_AUDIO install.
-RUN python -m pip install -c /opt/torch-pin.txt "vllm[audio]==0.32.0"
+ARG VLLM_COMMIT=c410543d9ffff03f5f6c4a8c0ae1d3ad082c4a15
+ARG VLLM_VERSION=0.34.0rc1.dev388+gc410543d9
+RUN python -m pip install -c /opt/torch-pin.txt --extra-index-url "https://wheels.vllm.ai/${VLLM_COMMIT}" "vllm[audio]==${VLLM_VERSION}"
 
 # --- VLM modeling-code runtime deps + molt requirements + fla -----------
 # setup.py resolves requirements.txt plus the AutoModel source selected by MOLT_AUTOMODEL (upstream,
@@ -225,8 +234,8 @@ RUN python -m pip install --no-cache-dir "tilelang==0.1.12" "tile-kernels==1.0.0
 # is container-local, so every job would recompile the DSA kernels from scratch.
 ENV TILELANG_CACHE_DIR=/root/.cache/tilelang
 
-# vLLM 0.32 pins nvidia-cutlass-dsl 4.8.0 and quack-kernels 0.6.5; AutoModel's nemo-automodel metadata still asks for
-# quack 0.6.4 (cutlass 4.6.2), which the molt step above installed last. A 4.6.2 DSL under vLLM 0.32's CuTe router
+# vLLM pins nvidia-cutlass-dsl 4.8.0 and quack-kernels 0.6.5; AutoModel's nemo-automodel metadata still asks for
+# quack 0.6.4 (cutlass 4.6.2), which the molt step above installed last. A 4.6.2 DSL under vLLM's CuTe router
 # GEMM fails MLIR verification at engine warmup on Hopper/Blackwell ("nvvm.mbarrier.arrive op operand count"), so
 # the runtime wins: re-pin both to vLLM's versions (quack 0.6.5 accepts cutlass >= 4.7). -c keeps the torch trio.
 RUN { cat /opt/torch-pin.txt; echo 'nvidia-cutlass-dsl==4.8.0'; } > /tmp/pin.txt && \

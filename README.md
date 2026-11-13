@@ -100,7 +100,7 @@ cd labs-molt
 
 ### 🐳 Container (recommended)
 
-`dockerfile/Dockerfile` bakes the whole CUDA-13 stack (torch 2.13, vLLM, TransformerEngine, flash-attn,
+`dockerfile/Dockerfile` bakes the whole CUDA-13 stack (torch 2.14, vLLM, TransformerEngine, flash-attn,
 mamba, DeepEP, NeMo AutoModel) for A100 / H100 / H200 / B200 / GB200. SFT and RL run in it as-is.
 
 ```bash
@@ -118,10 +118,11 @@ For development outside the container. It pulls the exact git-pinned AutoModel t
 against (`setup.py`, `AUTOMODEL`), so R3 routing replay and Muon work out of the box.
 
 ```bash
-pip install -e ".[vllm]"
+# the vLLM pin is a main-branch commit: its wheels come from vLLM's per-commit index, not PyPI
+pip install -e ".[vllm]" --extra-index-url https://wheels.vllm.ai/c410543d9ffff03f5f6c4a8c0ae1d3ad082c4a15
 ```
 
-Requires CUDA 13 (`torch==2.13.0+cu130`); a CUDA-12 environment will not work. With a host driver older
+Requires CUDA 13 (`torch==2.14.0+cu130`); a CUDA-12 environment will not work. With a host driver older
 than 580, use the container: it ships the CUDA forward-compatibility layer and enables it automatically.
 
 The `molt-rl` package on PyPI cannot carry the git-pinned AutoModel, so it lags the pin and is not a
@@ -147,7 +148,7 @@ e2e metrics match, and the branch runs its own seven-minute CI on molt's image a
 parity table, the kept / removed lists and the maintenance rules are in the branch's README.
 
 ```bash
-MOLT_AUTOMODEL=slim pip install -e ".[vllm]"                                          # local install
+MOLT_AUTOMODEL=slim pip install -e ".[vllm]" --extra-index-url ...                    # local install, the vLLM index as above
 docker build --build-arg MOLT_AUTOMODEL=slim -f dockerfile/Dockerfile -t molt:slim .   # image
 EXTRA_PYTHONPATH=/path/to/automodel-slim ...                                          # slurm recipes: a checkout wins over the baked-in package
 ```

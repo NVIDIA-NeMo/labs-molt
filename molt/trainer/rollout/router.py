@@ -300,15 +300,19 @@ class RouterGenerateClient:
         logprobs = [{t: SimpleNamespace(logprob=float(item["logprob"]))} for t, item in zip(ids, content)]
         # Score centering (sampling_params.logprobs = k > 1): the sampler's top-k per token as two
         # [n, k] arrays, the sampled token leading each row. vLLM >= 0.31.1 names the candidate with
-        # a `token_id` field, 0.31.0 only as the "token_id:<id>" string.
+        # a `token_id` field and no `token`, 0.31.0 only the "token_id:<id>" string. vLLM >= 0.33 no longer
+        # cuts a row to k: a sampled token outside the top k makes it k + 1 long, so the cut is made here.
         top_logprobs = None
         if (getattr(sampling_params, "logprobs", None) or 1) > 1:
             k = sampling_params.logprobs
-            heads = [item.get("top_logprobs") or [] for item in content]
+            heads = [(item.get("top_logprobs") or [])[:k] for item in content]
             if any(len(h) != k for h in heads):
                 raise RuntimeError(f"/inference/v1/generate returned a top_logprobs row without exactly {k} entries.")
             top_logprobs = (
-                np.array([e.get("token_id", e["token"].rsplit(":", 1)[-1]) for h in heads for e in h], dtype=np.int64),
+                np.array(
+                    [e["token_id"] if "token_id" in e else e["token"].rsplit(":", 1)[-1] for h in heads for e in h],
+                    dtype=np.int64,
+                ),
                 np.array([e["logprob"] for h in heads for e in h], dtype=np.float32),
             )
             top_logprobs = tuple(a.reshape(len(heads), k) for a in top_logprobs)

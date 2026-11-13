@@ -523,6 +523,20 @@ def test_generate_forwards_logprobs_k_and_parses_top_logprobs_into_the_token_dic
     assert ids.tolist() == [[90, 7]] and log_probs[0].tolist() == pytest.approx([-0.1, -2.0])
 
 
+def test_generate_cuts_a_top_logprobs_row_to_k():
+    # vLLM >= 0.33 sends k + 1 candidates when the sampled token is outside the top k: sampled first, then the
+    # top k. Candidates carry `token_id` and no `token` (vLLM >= 0.31.1).
+    row = [{"token_id": 90, "logprob": -5.0}, {"token_id": 7, "logprob": -0.1}, {"token_id": 8, "logprob": -2.0}]
+    content = [{"token_id": 90, "logprob": -5.0, "top_logprobs": row}]
+    resp = {"choices": [{"token_ids": [90], "finish_reason": "stop", "logprobs": {"content": content}}]}
+    sp = SimpleNamespace(max_tokens=8, temperature=1.0, top_p=1.0, logprobs=2)
+
+    ro, _ = asyncio.run(RouterGenerateClient(_FakeHttp({GEN: resp})).generate([1, 2], sp))
+
+    ids, log_probs = ro.outputs[0].top_logprobs
+    assert ids.tolist() == [[90, 7]] and log_probs[0].tolist() == pytest.approx([-5.0, -0.1])
+
+
 def test_generate_skips_frontend_detokenization_unless_stop_strings_need_it():
     http = _FakeHttp({GEN: _gen_resp([9], top_k=32)})
     sp = SimpleNamespace(max_tokens=8, temperature=1.0, top_p=1.0, logprobs=32)
