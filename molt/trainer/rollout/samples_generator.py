@@ -509,7 +509,6 @@ class SamplesGenerator:
                         1,
                         tools=tool,
                         group_id=group_id,
-                        max_tries=generate_kwargs.get("max_tries", 1),
                     )
                 )
             refs.append(_gather_group.remote(*parts))

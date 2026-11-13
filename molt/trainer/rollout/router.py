@@ -227,9 +227,8 @@ class RouterGenerateClient:
     the OpenAI ``/v1/*`` routes, whose token_ids the router schema-strips). It also carries the shared
     aiohttp session (``.http``)."""
 
-    def __init__(self, http_client, *, model_name="policy", image_token_id=None, max_tries=1):
+    def __init__(self, http_client, *, model_name="policy", image_token_id=None):
         self.http = http_client
-        self.max_tries = max_tries  # --agent.max_tries: a system error is tried again, in training and eval
         self.model_name = model_name
         self.image_token_id = image_token_id  # HF processor's image placeholder id (VLM realign)
 
@@ -252,23 +251,23 @@ class RouterGenerateClient:
     async def _post(self, path, payload, session_id):
         """POST to a router route (``model`` + the routing-affinity header injected), return parsed JSON.
 
-        Retries transient failures with linear backoff — a 5xx or a refused/dropped connection while
+        Tries a transient failure 20 times, a second apart — a 5xx or a refused/dropped connection while
         the router or an engine is still warming up (its port binds before its workers pass health
         checks) or is briefly overloaded — so a hiccup costs a retry, not a dropped rollout (vime/slime
         retry the same way). A 4xx is a real client bug, so it fails fast rather than burn the retry
         budget. The session sets no read timeout, so a slow generation never lands here at all."""
         headers = {"x-session-id": session_id} if session_id else None
         body = {"model": self.model_name, **payload}
-        for attempt in range(self.max_tries):
+        for attempt in range(20):
             try:
                 async with self.http.post(path, json=body, headers=headers) as resp:
                     resp.raise_for_status()
                     return await resp.json()
             except (aiohttp.ClientResponseError, aiohttp.ClientConnectionError, aiohttp.ClientPayloadError) as e:
                 fatal = isinstance(e, aiohttp.ClientResponseError) and e.status < 500  # 4xx = real bug
-                if fatal or attempt == self.max_tries - 1:
+                if fatal or attempt == 19:
                     raise
-            await asyncio.sleep(attempt + 1)
+            await asyncio.sleep(1)
 
     async def _render(self, images, session_id):
         """POST the image(s) to the stock ``/v1/chat/completions/render`` route (server-side chat
@@ -347,7 +346,7 @@ class AgentRunnerActor:
     (``--rollout.num_runners``) parallelizes that work; the trainer round-robins rollouts
     across them (no pool wrapper — just a list + an index)."""
 
-    def __init__(self, agent_path, router_url, *, model_path=None, model_name="policy", max_tries=1):
+    def __init__(self, agent_path, router_url, *, model_path=None, model_name="policy"):
         import aiohttp
 
         from molt.agents.base import load_agent_runner  # lazy: router.py is imported by _chat_server
@@ -374,15 +373,13 @@ class AgentRunnerActor:
             timeout=aiohttp.ClientTimeout(total=None),
             connector=aiohttp.TCPConnector(limit=0),
         )
-        self._client = RouterGenerateClient(
-            self._http, model_name=model_name, image_token_id=image_token_id, max_tries=max_tries
-        )
+        self._client = RouterGenerateClient(self._http, model_name=model_name, image_token_id=image_token_id)
 
     async def ready(self):
         return True
 
     async def run_group(
-        self, prompt, label, images, sampling_params, max_length, n_samples, tools=None, group_id=None, max_tries=1
+        self, prompt, label, images, sampling_params, max_length, n_samples, tools=None, group_id=None
     ):
         """N rollouts of one prompt (unchanged runner) -> per step-sample ``(experience, drop_reason)``.
 
@@ -395,10 +392,8 @@ class AgentRunnerActor:
         batch of screenshots never concentrates on one node. Tagged group_id (per prompt; GRPO
         baseline) + rollout_id (per rollout; multi-turn step-samples share it). A failed/unusable
         rollout is dropped, never sinks the group."""
-        from molt.agents.base import MAX_TRIES
         from molt.trainer.rollout.samples_generator import SamplesGenerator
 
-        MAX_TRIES.set(max_tries)  # read by the chat runner when it opens each rollout's session
         group_id = group_id or uuid4().hex
         tasks = [
             self._runner.execute(

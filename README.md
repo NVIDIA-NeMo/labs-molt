@@ -209,7 +209,6 @@ Common RL switches:
 | Freeze MoE routing (stabilize MoE RL) | `--actor.freeze_moe_router` |
 | On-policy distillation | `--algo.advantage.estimator on_policy_distill --ref.model_name_or_path /path/to/teacher` |
 | Independent eval sampling | `--eval.temperature`, `--eval.top_p`, `--eval.max_new_tokens`, `--eval.n_samples_per_prompt` (unset ones fall back to rollout) |
-| Tries per agent turn | `--agent.max_tries N` (default 3; 1 = a single try; the OSWorld agent uses 20) — training tries a turn again only after a system error; eval also after a model error (truncated or unparseable reply) |
 | Eval a checkpoint (no training) | `--eval.eval_only --eval.dataset <path>` — score the eval set once and exit; vLLM holds the HF weights, so the policy/ref/critic FSDP actors are never built and their GPUs go to the eval |
 | Dump / replay a rollout batch | `--train.rollout_dump_dir <dir>` then `--train.rollout_replay_dir <dir>` re-runs training on it without regenerating |
 | Check weight-update coverage | `--train.check_weight_update_equal` warns which vLLM params a broadcast left stale |
@@ -355,17 +354,20 @@ A multi-turn agent that stops on its own turn cap should return
 `Result(truncated=True)` (see `examples/python/agents/chat_geo3k.py`); the
 server marks generation-length / context truncation by itself.
 
-A turn gets at most `--agent.max_tries` tries (default 3; 1 is a single try), and
-training and eval differ in what they try again:
+The server samples every request it gets, in training and eval alike; what
+to do about a bad reply is the agent's call:
 
-- **Training** tries a turn again only after a system error (router/engine
-  5xx, dropped connection). A model error is not retried: the turn keeps its
-  one sample, a re-sent turn gets that recorded reply back, and a reply
-  truncated by `max_tokens` ends the rollout.
-- **Eval** tries a turn again after a model error as well: re-sending a turn
-  (because its reply was truncated or could not be parsed) samples it anew.
-  An agent that finds its action in a truncated reply can act on it and send
-  the next turn instead.
+- **Re-sending a turn** (its reply was truncated or could not be parsed)
+  samples it anew. The reply it replaces stays in the rollout as its own
+  segment and shares the rollout's reward, so an agent that should not retry
+  a model error in training must not re-send.
+- **A reply truncated by `max_tokens`** comes back with
+  `finish_reason="length"`: the agent ends the episode, re-sends the turn, or
+  acts on the reply and sends the next turn.
+- **A reply whose client hung up** before it arrived is not recorded.
+
+A system error (router/engine 5xx, dropped connection) is the framework's to
+retry: 20 tries, a second apart, then the rollout fails.
 
 The same server speaks the Anthropic wire too — point `AsyncAnthropic` at
 `ctx.session_url` (the session root *without* `/v1`; the SDK appends

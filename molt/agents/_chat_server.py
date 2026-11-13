@@ -212,13 +212,7 @@ class _Session:
     # template re-render of prior turns starts a fresh segment. Empty until the first turn generates.
     trajectories: list = field(default_factory=list)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # serialize turns within a session
-    # A re-sent turn (the SAME messages, e.g. a stock client whose response was lost) gets the cached
-    # reply back once the turn's tries are spent -- always in training, so a retry can't record a
-    # second action there; an eval turn with tries left is sampled again (see _run_turn).
-    last_messages: list | None = None
-    last_response: tuple | None = None
-    max_tries: int = 1  # samples one turn may take: 1 in training, --agent.max_tries at eval
-    tries: int = 0  # ... and how many the current turn has taken
+    last_messages: list | None = None  # the last turn's request: the next one extends it or starts a new segment
 
 
 class ChatServerState:
@@ -247,14 +241,13 @@ class ChatServerState:
         self.expand_image_placeholder = should_expand_image_placeholder(processor)
         self.sessions: dict[str, _Session] = {}
 
-    def open(self, session_id: str, prompt, label, images, sampling_params=None, max_tries=1):
+    def open(self, session_id: str, prompt, label, images, sampling_params=None):
         self.sessions[session_id] = _Session(
             prompt=prompt,
             label=label,
             images=images,
             session_id=session_id,
             sampling_params=sampling_params,
-            max_tries=max_tries,
         )
 
     def discard(self, session_id: str):
@@ -278,26 +271,20 @@ def _messages_to_chat(state: ChatServerState, messages: list) -> tuple[list, lis
     return chat, pil_images
 
 
-async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tuple[str, str]:
+async def _run_turn(state: ChatServerState, session: _Session, body: dict, gone=None) -> tuple[str, str]:
     """Grow the session's current token-exact Trajectory segment by one turn, then generate over its
     EXACT accumulated tokens (TITO). A new segment (full CLIENT-SIDE render, the same
     ``apply_chat_template`` -> ``process_prompt_with_images`` path the RL dataset uses) starts the
     episode AND resumes after a compaction; a normal continuation appends only the new chat-template
     delta, so the trained tokens stay identical to what vLLM generated over — no re-template drift.
+
+    Every request is sampled, in training and eval alike: what to do about a truncated or unparseable
+    reply is the agent's call. A re-sent turn starts a fresh segment, and the reply it replaces stays
+    in the rollout as generated. ``gone`` tells whether the client has hung up.
     Returns ``(action_text, finish_reason)``."""
     messages = body.get("messages") or []
     if not messages:
         raise HTTPException(status_code=400, detail="No messages provided")
-    retry = messages == session.last_messages
-    last = session.last_response
-    truncated = last is not None and last[1] == "length" and last[0] != ""
-    # A model error is tried again at eval only: a turn takes at most session.max_tries samples, 1 in
-    # training and --agent.max_tries at eval. A re-sent turn (truncated, unparseable, lost) is sampled
-    # again until they are spent, then replayed. With a single try, a reply truncated by max_tokens
-    # ends the rollout: every later request gets it back. With more, the agent may act on it and go on.
-    if (retry and session.tries >= session.max_tries) or (truncated and session.max_tries == 1):
-        return last
-    session.tries = session.tries + 1 if retry else 1
     sp = _build_sampling_params(session.sampling_params or state.default_sampling, body)
     kwargs = {**state.chat_template_kwargs, **({"tools": body["tools"]} if body.get("tools") else {})}
     loop = asyncio.get_running_loop()
@@ -344,7 +331,7 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
         )
         remaining = state.max_length - len(prompt_ids) - image_budget
         if remaining <= 0:  # prompt alone fills the context -> generate nothing; stitch drops empty rollouts
-            session.last_messages, session.last_response = messages, ("", "length")
+            session.last_messages = messages
             return "", "length"
         # Built but NOT yet attached to the session: a failed generate below must leave the session
         # untouched (see the commit note) so a client retry re-runs cleanly.
@@ -385,7 +372,7 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
         remaining = state.max_length - len(gen_tokens) - traj.image_budget
         if remaining <= 0:  # grown context fills the window -> end truncated; prior turns are kept
             traj.truncated = True
-            session.last_messages, session.last_response = messages, ("", "length")
+            session.last_messages = messages
             return "", "length"
 
     # Clamp generation to the remaining budget (the step runner clamps the same way).
@@ -398,6 +385,10 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
     request_output, off_policy_len = await state.transport.generate(
         gen_tokens, sp, multi_modal_data=mm_data, session_id=session.session_id
     )
+    # A client that hung up while this turn generated never sees the reply and asks again: recording
+    # it would leave a turn in the rollout that the agent never acted on.
+    if gone is not None and await gone():
+        raise HTTPException(status_code=499, detail="client disconnected")
     generation = request_output.outputs[0]
     action_ids = list(generation.token_ids)
     # /inference/v1/generate is token-only (generation.text == ""); decode the action text from the
@@ -439,7 +430,7 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict) -> tu
     # R3: absorb this turn's prefill+gen routing by absolute position (first-writer-wins). The full
     # prefill covers the prior action's trailing token too, so the turn-boundary backfills naturally.
     traj.absorb_routing(request_output)
-    session.last_messages, session.last_response = messages, (action_text, finish_reason)
+    session.last_messages = messages
     session.last_action_text = raw_action_text
     return action_text, finish_reason
 
@@ -516,10 +507,10 @@ def mount_session_capture(app, state: ChatServerState) -> None:
         session = state.sessions.get(session_id)
         if session is None:
             raise HTTPException(status_code=400, detail=f"Unknown or unopened session {session_id}")
-        # Serialize turns within a session: a stock client may retry, which would
-        # otherwise run a second turn concurrently and double-record the sample.
+        # Serialize turns within a session: a stock client may retry, and two turns
+        # running at once would interleave their tokens in one segment.
         async with session.lock:
-            action_text, finish_reason = await _run_turn(state, session, body)
+            action_text, finish_reason = await _run_turn(state, session, body, request.is_disconnected)
         return JSONResponse(encode(state.model_name, action_text, finish_reason))
 
     @router.post("/s/{session_id}/v1/chat/completions")
