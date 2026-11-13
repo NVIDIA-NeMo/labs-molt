@@ -292,6 +292,7 @@ class RemoteExperienceMaker:
             gamma=args.algo.advantage.gamma,
             kls=[exp.kl for exp in experiences],
             lam=args.algo.advantage.lam,
+            length_adaptive_alpha=args.algo.advantage.length_adaptive_alpha,
             values=[exp.values for exp in experiences] if needs_values else None,
             no_whiten=args.algo.advantage.no_whiten,
         )

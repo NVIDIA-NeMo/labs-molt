@@ -24,7 +24,11 @@ def _maker(estimator="dr_grpo", **reward_kwargs):
     reward.update(reward_kwargs)
     args = SimpleNamespace(
         reward=SimpleNamespace(**reward),
-        algo=SimpleNamespace(advantage=SimpleNamespace(estimator=estimator, gamma=1.0, lam=1.0, no_whiten=True)),
+        algo=SimpleNamespace(
+            advantage=SimpleNamespace(
+                estimator=estimator, gamma=1.0, lam=1.0, length_adaptive_alpha=None, no_whiten=True
+            )
+        ),
         rollout=SimpleNamespace(n_samples_per_prompt=2, max_new_tokens=None, batch_size=1),
         data=SimpleNamespace(max_len=2048),
         actor=SimpleNamespace(num_nodes=1, num_gpus_per_node=1),
@@ -224,6 +228,11 @@ def test_trainer_keeps_raw_metrics_and_never_shapes_a_dropped_sample(monkeypatch
             "two answers to the same question",
         ),
         (["--reward.overlong_buffer_len", "200"], "--train.agent_path is required"),
+        (
+            ["--train.agent_path", "x", "--algo.advantage.lam", "length_adaptive"]
+            + ["--algo.advantage.length_adaptive_alpha", "0"],
+            "length_adaptive_alpha must be > 0",
+        ),
     ],
 )
 def test_cli_validates_before_training(flags, message):

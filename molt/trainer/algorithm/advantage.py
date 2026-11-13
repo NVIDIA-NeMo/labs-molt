@@ -60,8 +60,9 @@ class AdvantageContext:
     action_masks: List[torch.Tensor]  # per experience (B, L)
     kl_coef: float  # per-token KL reward coefficient (REINFORCE++ / GAE)
     gamma: float  # discount factor (REINFORCE++ / GAE)
-    lam: float  # GAE lambda (PPO); 1.0 = Monte-Carlo return minus the value baseline
+    lam: float | str  # GAE lambda (PPO); 1.0 = Monte-Carlo return minus the value baseline; or "length_adaptive"
     kls: List[torch.Tensor]  # per experience (B, L) per-token KL
+    length_adaptive_alpha: float | None = None  # alpha of lam = "length_adaptive"
     values: List[torch.Tensor] | None = None  # per experience (B, L) critic V(s) at collection (PPO/gae)
     no_whiten: bool = False  # skip whitening entirely: raw returns (no mean-center, no std)
 
@@ -280,6 +281,12 @@ def gae(
     discounted return (interior values cancel by telescoping, so carry-vs-terminal is
     invisible there).
 
+    Length-adaptive GAE (``ctx.lam == "length_adaptive"``, VAPO https://arxiv.org/abs/2504.05118):
+    each sample gets ``lam = max(0, 1 - 1 / (alpha * H))``, ``H`` its action-token count.
+    A fixed ``lam < 1`` leaves the outcome reward a weight of ``lam ** H`` at the first token,
+    which vanishes for long responses; this keeps it near ``exp(-1 / alpha)`` at any length.
+    The value target is then decoupled and uses ``lam = 1``, the Monte-Carlo return.
+
     Advantages are then batch-whitened (mean/std over action tokens, unless ``no_whiten``).
     Whitening touches only the advantages fed to the policy loss; ``returns = A + V(s)`` is left
     un-whitened so it stays the correct value-regression target for the value loss.
@@ -308,10 +315,18 @@ def gae(
         # bootstrap value and the running GAE across them so an action token before a
         # gap bootstraps from the next action token's value, not a spurious terminal
         # V = 0 (matters at lam < 1, a no-op at lam = 1).
-        adv = torch.zeros_like(token_reward)
-        running = torch.zeros(token_reward.size(0), device=token_reward.device)
-        next_value = torch.zeros_like(running)  # V(s_{T+1}) = 0
         m = mask.float()
+        # The recursion runs twice side by side, each row with its own lambda: row 0 gives the
+        # policy's advantage, row 1 the value target.
+        if ctx.lam == "length_adaptive":
+            horizon = m.sum(dim=1).clamp(min=1)  # H: the sample's action tokens
+            policy_lam = (1 - 1 / (ctx.length_adaptive_alpha * horizon)).clamp(min=0)
+            lam = torch.stack([policy_lam, torch.ones_like(policy_lam)])  # decoupled: Monte-Carlo value target
+        else:
+            lam = torch.full((2, token_reward.size(0)), ctx.lam, device=token_reward.device)
+        adv = torch.zeros(2, *token_reward.shape, device=token_reward.device)
+        running = torch.zeros_like(lam)
+        next_value = torch.zeros(token_reward.size(0), device=token_reward.device)  # V(s_{T+1}) = 0
         reward_steps = token_reward.unbind(1)
         value_steps = values.unbind(1)
         masked_value_steps = (values * m).unbind(1)
@@ -319,12 +334,12 @@ def gae(
         inverse_mask_steps = (1 - m).unbind(1)
         for t in reversed(range(token_reward.size(1))):
             delta = reward_steps[t] + ctx.gamma * next_value - value_steps[t]
-            running_t = delta + ctx.gamma * ctx.lam * running
+            running_t = delta + ctx.gamma * lam * running
             next_value = masked_value_steps[t] + inverse_mask_steps[t] * next_value
             running = running_t * mask_steps[t] + inverse_mask_steps[t] * running
-            adv[:, t] = running
-        advantages.append(adv * mask)
-        returns.append((adv + values) * mask)  # value-regression target: returns = A + V(s)
+            adv[..., t] = running
+        advantages.append(adv[0] * mask)
+        returns.append((adv[1] + values) * mask)  # value-regression target: returns = A + V(s)
     # Advantages must be whitened (mean/std over action tokens, unless no_whiten),
     # re-masked so off-action positions stay 0; returns are left un-whitened (they
     # remain the value-regression target A + V(s)).
