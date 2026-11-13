@@ -340,8 +340,12 @@ class CheckpointManager:
         """DCP restores the checkpoint's param_groups too; re-apply the CLI hyperparameters (lr, betas,
         weight decay) and keep the schedule position: the in-flight lr scales with the base lr."""
         for group, flag in zip(optimizer.param_groups, flags):
+            if "rounding" in flag and any(group[key] != flag[key] for key in ("rounding", "rounding_seed")):
+                raise ValueError("Checkpoint rounding mode and seed must match the configured optimizer")
             group["lr"] *= flag["initial_lr"] / group["initial_lr"]
-            group.update({k: v for k, v in flag.items() if k != "lr"})
+            # Draw position and restart phase belong to the checkpoint, not CLI defaults.
+            restored_keys = {"lr", "quantization_step", "faircast_phase", "faircast_phase_start_global_step"}
+            group.update({k: v for k, v in flag.items() if k not in restored_keys})
         if scheduler is not None:
             scheduler.base_lrs = [group["initial_lr"] for group in optimizer.param_groups]
 
@@ -384,12 +388,21 @@ class CheckpointManager:
             from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
 
             flags = [{k: v for k, v in group.items() if k != "params"} for group in optimizer.param_groups]
+            rounding_enabled = any("rounding" in group for group in optimizer.param_groups)
+            # DCP only loads keys in the destination: plain Adam would silently drop a saved master.
+            metadata = dcp.FileSystemReader(optim_dir).read_metadata()
+            checkpoint_rounding = any(
+                key.startswith("optim.") and key.endswith(".rounding") for key in metadata.state_dict_metadata
+            )
+            if checkpoint_rounding != rounding_enabled:
+                raise ValueError("Checkpoint BF16 weight rounding setting must match the configured optimizer")
             optimizer_state = OptimizerState(model, optimizer, scheduler)
             optim_state_dict = optimizer_state.state_dict()
             dcp.load(
                 optim_state_dict,
                 checkpoint_id=optim_dir,
-                planner=DefaultLoadPlanner(allow_partial_load=True),
+                # A missing FP32 master must not leave the fresh destination initialized from q.
+                planner=DefaultLoadPlanner(allow_partial_load=not rounding_enabled),
             )
             optimizer_state.load_state_dict(optim_state_dict)
             self._reapply_cli_optimizer_hyperparams(optimizer, scheduler, flags)

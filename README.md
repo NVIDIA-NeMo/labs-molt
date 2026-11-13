@@ -266,6 +266,20 @@ gradients, in plain PyTorch.
 - **Model scale** — AutoModel + FSDP2 with TP / EP / CP, MoE-native — e.g. DeepSeek-V3 at `--fsdp.ep_size 256`
 - **Model backend** — **NeMo AutoModel is the primary path** — native CP / EP / TP, custom MoE+EP parallelizer, TE fused attention; everything model-side aligns with AutoModel's own recipes. The HF transformers path is a **non-preferred fallback** (AutoModel drops to it only when a model has no native class) supporting **text + flash_attention_2 + packing only — no CP / EP / TP**
 - **Optimizer** — `adam` (default), with CPU offload for the largest actors (`--fsdp.offload optimizer`). `muon` (Newton–Schulz via Dion: Muon for 2D weights and grouped MoE experts, AdamW for embeddings / head / norms) is **experimental** — runs distributed (FSDP / EP) but has shown no consistent win over `adam` yet, which stays the recommended default
+- **BF16 working-weight rounding (opt-in)** — requires [AutoModel #4704](https://github.com/NVIDIA-NeMo/Automodel/pull/4704).
+  Use `--actor.optim adam --actor.adam.weight_rounding stochastic` for SR, or `nearest` for RNE.
+  Omit the option for ordinary AdamW; SFT uses `--adam.weight_rounding` without the actor prefix.
+  Native AdamW keeps FP32 masters while the model stores BF16-representable working weights in FP32 storage;
+  use BF16 FSDP computation (`--fsdp.param_dtype bf16`). The existing refit sends these working weights to vLLM.
+  Declared FP32-kept parameters retain their original precision; optimizer-only CPU offload is unsupported.
+  Native checkpoints preserve master weights and the rounding sequence; resume with the same mode, seed and parameter layout.
+  Legacy `--optim faircast_adamw` / `--adam.rounding` names remain accepted, including their actor-prefixed forms;
+  only the legacy optimizer name defaults to `nearest`.
+- **Optional Adam restart at a saved RL boundary** — resume a full native checkpoint with
+  `--actor.reset_optimizer_at_step 5000` to restart Adam moments, Adam step and the native LR scheduler at update 5000.
+  Working weights, FP32 masters and rounding counters are retained. This applies to rounded AdamW only;
+  keep the same boundary on later resumes so checkpoint phase markers prevent a second reset.
+
 ### 🤖 Agents & rewards
 | Area | Support |
 |---|---|

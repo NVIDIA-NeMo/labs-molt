@@ -305,6 +305,13 @@ if __name__ == "__main__":
     add_fsdp_args(parser)
     # Optimizer + scheduler + grad clip for the actor ("actor." prefix + lr default 1e-6).
     add_optimizer_args(parser, prefix="actor.", default_adam_lr=1e-6)
+    parser.add_argument(
+        "--actor.reset_optimizer_at_step",
+        type=int,
+        default=0,
+        help="Reset Adam moments/step and restart the native LR schedule once at this restored checkpoint "
+        "boundary. Requires BF16 weight rounding and full checkpoint loading; 0 disables.",
+    )
     # Checkpoints; RL disables eval when --eval.steps is -1 and adds best-ckpt selection.
     add_ckpt_args(parser, default_ckpt_path="./ckpt/checkpoints_rl_ray")
     parser.add_argument(
@@ -1027,6 +1034,18 @@ if __name__ == "__main__":
     # NOTE: ordering matters where a check derives state a later check reads — the
     # on_policy_distill branch fills in agent_path / kl.* before they are validated,
     # and the VLM branch flips fsdp.packing_samples before the FSDP checks read it.
+
+    if args.actor.reset_optimizer_at_step < 0:
+        raise ValueError("--actor.reset_optimizer_at_step must be nonnegative")
+    if args.actor.reset_optimizer_at_step and (
+        not args.ckpt.load_enable
+        or os.environ.get("LOAD_MODEL_ONLY", "0") == "1"
+        or not (
+            args.actor.optim == "faircast_adamw"
+            or (args.actor.optim == "adam" and args.actor.adam.weight_rounding is not None)
+        )
+    ):
+        raise ValueError("Adam restart requires BF16 weight rounding and full native checkpoint loading")
 
     # --- Required inputs ---
     if not args.actor.model_name_or_path:

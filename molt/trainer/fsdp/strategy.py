@@ -334,6 +334,11 @@ class FsdpStrategy:
 
         kind = cfg["optim"]
         adam = cfg["adam"]
+        rounding = adam.get("weight_rounding")
+        if kind == "faircast_adamw" and rounding is None:
+            rounding = "nearest"  # Compatibility with the original experiment commands.
+        if rounding is not None and kind not in ("adam", "faircast_adamw"):
+            raise ValueError("BF16 weight rounding requires the AdamW optimizer")
         # LoRA runs on bf16 masters (see BaseModel); at full-fine-tune LRs (SFT 5e-6, RL 1e-6)
         # bf16 AdamW rounds the step away and the adapters barely move.
         if kind == "adam" and getattr(model, "peft_config", None) is not None and adam["lr"] < 1e-5:
@@ -350,6 +355,32 @@ class FsdpStrategy:
             from molt.trainer.fsdp.muon import build_automodel_muon_optimizer
 
             optimizer = build_automodel_muon_optimizer(train_model, cfg["muon"], adam, self.device_mesh)
+        elif rounding is not None:
+            if self.offload_optimizer:
+                raise NotImplementedError("BF16 weight rounding does not support optimizer-only offload")
+            from nemo_automodel.components.models.common.utils import _get_fp32_module_keywords
+            from nemo_automodel.components.optim.optimizer import AdamWConfig
+
+            protected_modules = _get_fp32_module_keywords(train_model)
+            quantized, protected = [], []
+            for name, param in train_model.named_parameters():
+                if param.requires_grad:
+                    target = protected if any(part in name.split(".") for part in protected_modules) else quantized
+                    target.append(param)
+            optimizer = AdamWConfig(
+                lr=adam["lr"],
+                betas=tuple(adam["betas"]),
+                eps=adam["eps"],
+                weight_decay=adam["weight_decay"],
+                weight_rounding=rounding,
+                rounding_seed=self.seed,
+                fused=False,
+            ).build_from_param_groups(
+                [
+                    {"params": quantized, "quantize": True},
+                    {"params": protected, "quantize": False},
+                ]
+            )
         elif kind == "adam":
             optimizer = torch.optim.AdamW(
                 params,
