@@ -78,9 +78,7 @@ def _grpo_maker():
     args = SimpleNamespace(
         reward=SimpleNamespace(clip_range=None, overlong_buffer_len=None, stop_properly_penalty_coef=None),
         algo=SimpleNamespace(
-            advantage=SimpleNamespace(
-                estimator="grpo", gamma=1.0, lam=1.0, length_adaptive_alpha=None, no_whiten=False
-            )
+            advantage=SimpleNamespace(estimator="grpo", gamma=1.0, lam=1.0, length_adaptive_alpha=0.5, no_whiten=False)
         ),
         rollout=SimpleNamespace(n_samples_per_prompt=4),
     )

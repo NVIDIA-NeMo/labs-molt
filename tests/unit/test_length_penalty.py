@@ -26,7 +26,7 @@ def _maker(estimator="dr_grpo", **reward_kwargs):
         reward=SimpleNamespace(**reward),
         algo=SimpleNamespace(
             advantage=SimpleNamespace(
-                estimator=estimator, gamma=1.0, lam=1.0, length_adaptive_alpha=None, no_whiten=True
+                estimator=estimator, gamma=1.0, lam=1.0, length_adaptive_alpha=0.5, no_whiten=True
             )
         ),
         rollout=SimpleNamespace(n_samples_per_prompt=2, max_new_tokens=None, batch_size=1),
@@ -229,8 +229,8 @@ def test_trainer_keeps_raw_metrics_and_never_shapes_a_dropped_sample(monkeypatch
         ),
         (["--reward.overlong_buffer_len", "200"], "--train.agent_path is required"),
         (
-            ["--train.agent_path", "x", "--algo.advantage.lam", "length_adaptive"]
-            + ["--algo.advantage.length_adaptive_alpha", "0"],
+            ["--train.agent_path", "x", "--algo.advantage.estimator", "gae"]
+            + ["--algo.advantage.lam", "length_adaptive", "--algo.advantage.length_adaptive_alpha", "0"],
             "length_adaptive_alpha must be > 0",
         ),
     ],

@@ -1114,7 +1114,7 @@ if __name__ == "__main__":
         )
 
     if args.algo.advantage.lam == "length_adaptive" and not args.algo.advantage.length_adaptive_alpha > 0:
-        # A negative alpha puts lambda above 1, where the advantages grow with the length.
+        # 1 - 1/(alpha * H) is a lambda below 1 only for alpha > 0; `not >` also rejects NaN.
         raise ValueError("--algo.advantage.length_adaptive_alpha must be > 0")
 
     if args.algo.kl.ref == "rollout" and args.algo.kl.use_loss and args.algo.kl.estimator == "k1":

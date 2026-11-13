@@ -62,9 +62,9 @@ class AdvantageContext:
     gamma: float  # discount factor (REINFORCE++ / GAE)
     lam: float | str  # GAE lambda (PPO); 1.0 = Monte-Carlo return minus the value baseline; or "length_adaptive"
     kls: List[torch.Tensor]  # per experience (B, L) per-token KL
-    length_adaptive_alpha: float | None = None  # alpha of lam = "length_adaptive"
     values: List[torch.Tensor] | None = None  # per experience (B, L) critic V(s) at collection (PPO/gae)
     no_whiten: bool = False  # skip whitening entirely: raw returns (no mean-center, no std)
+    length_adaptive_alpha: float = 0.5  # alpha of lam = "length_adaptive"
 
 
 Estimator = Callable[
@@ -324,6 +324,7 @@ def gae(
             lam = torch.stack([policy_lam, torch.ones_like(policy_lam)])  # decoupled: Monte-Carlo value target
         else:
             lam = torch.full((2, token_reward.size(0)), ctx.lam, device=token_reward.device)
+        gamma_lam = ctx.gamma * lam
         adv = torch.zeros(2, *token_reward.shape, device=token_reward.device)
         running = torch.zeros_like(lam)
         next_value = torch.zeros(token_reward.size(0), device=token_reward.device)  # V(s_{T+1}) = 0
@@ -334,7 +335,7 @@ def gae(
         inverse_mask_steps = (1 - m).unbind(1)
         for t in reversed(range(token_reward.size(1))):
             delta = reward_steps[t] + ctx.gamma * next_value - value_steps[t]
-            running_t = delta + ctx.gamma * lam * running
+            running_t = delta + gamma_lam * running
             next_value = masked_value_steps[t] + inverse_mask_steps[t] * next_value
             running = running_t * mask_steps[t] + inverse_mask_steps[t] * running
             adv[..., t] = running

@@ -247,19 +247,6 @@ def test_gae_lambda_lt1_interior_gap_bootstraps_across_observation():
     assert not torch.allclose(ret, bug_ret * mask, atol=1e-3)
 
 
-def _length_adaptive_reference(token_reward, values, mask, gamma, alpha):
-    """Per sample, over its H action tokens only: advantages with lam = max(0, 1 - 1/(alpha * H))
-    and Monte-Carlo value targets (lam = 1), scattered back to the action positions."""
-    adv, ret = torch.zeros_like(token_reward), torch.zeros_like(token_reward)
-    for b in range(mask.size(0)):
-        idx = mask[b].bool().nonzero().squeeze(1)
-        lam = max(0.0, 1 - 1 / (alpha * len(idx)))
-        r, v = token_reward[b, idx][None], values[b, idx][None]
-        adv[b, idx] = _reference_gae(r, v, gamma, lam)[0][0]
-        ret[b, idx] = _reference_gae(r, v, gamma, 1.0)[1][0]
-    return adv, ret
-
-
 def test_length_adaptive_gae_takes_lambda_from_each_samples_length():
     """With lam = "length_adaptive" every sample gets its own lam = 1 - 1/(alpha * H), H its action
     tokens (trailing padding and an interior observation gap do not count), and the value target is
@@ -281,11 +268,13 @@ def test_length_adaptive_gae_takes_lambda_from_each_samples_length():
     adv, ret = gae(reward, [[i] for i in range(3)], ctx)
 
     token_reward = -kl_coef * kl * mask
-    last = [8, 3, 6]
-    token_reward[torch.arange(3), last] += reward
-    ref_adv, ref_ret = _length_adaptive_reference(token_reward, values * mask, mask, gamma, alpha)
-    assert torch.allclose(adv[0], ref_adv, atol=1e-5)
-    assert torch.allclose(ret[0], ref_ret, atol=1e-5)
+    token_reward[torch.arange(3), [8, 3, 6]] += reward  # the outcome reward, on each last action token
+    for b in range(3):  # the reference runs each sample alone, over its H action tokens only
+        idx = mask[b].bool().nonzero().squeeze(1)
+        r, v = token_reward[b, idx][None], values[b, idx][None]
+        lam = 1 - 1 / (alpha * len(idx))
+        assert torch.allclose(adv[0][b, idx], _reference_gae(r, v, gamma, lam)[0][0], atol=1e-5)
+        assert torch.allclose(ret[0][b, idx], _reference_gae(r, v, gamma, 1.0)[1][0], atol=1e-5)
 
 
 def test_length_adaptive_gae_floors_lambda_at_zero_for_short_samples():
