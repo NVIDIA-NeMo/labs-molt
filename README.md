@@ -180,6 +180,7 @@ python3 -m molt.cli.train_rl_ray \
   --actor.model_name_or_path /path/to/automodel \
   --data.prompt_dataset /path/to/prompts.jsonl \
   --data.input_key input \
+  --data.label_key answer \
   --train.agent_path examples/python/agents/math.py \
   --vllm.num_engines 2 \
   --vllm.tensor_parallel_size 2 \
