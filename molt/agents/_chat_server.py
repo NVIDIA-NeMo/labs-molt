@@ -212,9 +212,9 @@ class _Session:
     # template re-render of prior turns starts a fresh segment. Empty until the first turn generates.
     trajectories: list = field(default_factory=list)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # serialize turns within a session
-    # Idempotent replay: a stock client retries a turn whose response was lost (e.g. a weight
-    # broadcast stalled the loop). The retry re-sends the SAME messages; we return the cached
-    # reply WITHOUT recording a second action, so retries can't double-count a turn.
+    # A re-sent turn (the SAME messages, e.g. a stock client whose response was lost) gets the cached
+    # reply back once the turn's tries are spent -- always in training, so a retry can't record a
+    # second action there; an eval turn with tries left is sampled again (see _run_turn).
     last_messages: list | None = None
     last_response: tuple | None = None
     max_tries: int = 1  # samples one turn may take: 1 in training, --agent.max_tries at eval

@@ -104,11 +104,8 @@ class PolicyTrainer:
         vllm_engines: List = None,
         **kwargs,
     ):
-        """Policy trainer for Ray actor workers.
-
-        Args:
-            vllm_engines (List, optional): vllm engines for text generation, if not specified, generate text by actor model directly. Defaults to None.
-        """
+        """Policy trainer for Ray actor workers. ``vllm_engines`` are the rollout engines the
+        trained weights are broadcast to; the actor itself never generates."""
         self.strategy = strategy
         self.args = strategy.args
         # MOLT_DEFER_GRAD_SYNC=1 → defer the FSDP grad reduce-scatter to the last
@@ -180,7 +177,7 @@ class PolicyTrainer:
             |train rank|  engine-0  |  engine-1  |   engine-2   |
 
         One rank per vLLM worker GPU, so an engine occupies
-        `tensor_parallel_size * pipeline_parallel_size` consecutive ranks; a
+        `tensor_parallel_size * pipeline_parallel_size * data_parallel_size` consecutive ranks; a
         TP/PP group spanning nodes still contributes one rank per GPU. The packed
         broadcast reaches every worker; each loads only the shards/experts/PP-stage
         layers it owns (vLLM's name-based load_weights skips the rest). FSDP2/TP
@@ -606,8 +603,8 @@ class PolicyTrainer:
                 accumulate=not self.args.train.dynamic_batch_enable,
                 scale_loss_by_accumulation=False,
                 num_microbatches=num_microbatches,
-                # Defer the grad reduce-scatter to the optimizer-step microbatch when
-                # enabled; otherwise sync every microbatch (default). See _defer_grad_sync.
+                # Defer the grad reduce-scatter to the optimizer-step microbatch (default);
+                # MOLT_DEFER_GRAD_SYNC=0 syncs every microbatch. See _defer_grad_sync.
                 sync_gradients=(is_optimizer_step if self._defer_grad_sync else True),
             )
         finally:

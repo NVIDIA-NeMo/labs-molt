@@ -20,8 +20,8 @@
 
 A first-class sibling to ``PolicyModelActor`` / ``ReferenceModelActor``: its own Ray
 actor holding the value model, its own optimizer, and its own value-only training
-loop. It is colocated on the actor's GPUs by default (shared placement group) but,
-being a separate group, can be disaggregated onto its own GPUs.
+loop. It runs on its own GPUs by default and shares the actor's (one placement group)
+under ``--train.colocate_fsdp_models``.
 
 The training loop mirrors ``PolicyTrainer``'s window / grad-accumulation /
 global-token-mean contract so the value update is DP-invariant and aligned with the
@@ -373,11 +373,8 @@ class CriticModelActor(BaseModelActor):
             args.ckpt.dcp_max_num,
             args.ckpt.max_mem,
             client_states or {},
-            # Forward the actor's eval metric so the critic's retention/pruning
-            # (sorted by metric in _prune_checkpoints) makes the SAME keep/drop
-            # decisions as the actor — otherwise the critic prunes by recency
-            # only and the two checkpoint sets desync (a step the actor keeps for
-            # its metric may have its _critic dir pruned).
+            # Forward the actor's eval metric so the critic checkpoint records the same
+            # metric.json as the actor's for this step.
             metric_value=metric_value,
             metric_key=metric_key,
             optimizer=self.critic_optim,

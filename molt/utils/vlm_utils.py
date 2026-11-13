@@ -200,7 +200,7 @@ def estimate_vllm_input_expansion_delta(
     if grid_total == 0:
         # Pre-expanded processor (no grid_thw): tokens already include vLLM's
         # multimodal expansion. The vllm_engine still dedups + re-expands at
-        # generate-time (vllm_engine.py:145), and the round-trip variance can
+        # generate-time, and the round-trip variance can
         # be hundreds of tokens for high-resolution ViT encoders. Use a
         # 1024/image upper bound — safe for current generation VLMs without
         # needing per-model tuning.

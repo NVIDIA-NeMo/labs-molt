@@ -231,8 +231,8 @@ def train(args):
     else:
         ref_model = None
 
-    # PPO critic: its own group, colocated on the actor's GPUs via the shared
-    # placement group (same world size / mesh as the actor). Only for gae.
+    # PPO critic: its own group with the actor's world size / mesh, on the actor's GPUs (shared
+    # placement group) under --train.colocate_fsdp_models and on its own otherwise. Only for gae.
     if has_critic:
         from molt.trainer.workers.critic_actor import CriticModelActor
 
@@ -380,8 +380,8 @@ if __name__ == "__main__":
         help="Reference/teacher checkpoint. Defaults to the actor checkpoint (standard KL-to-init RL). "
         "Set to a different (e.g. larger, same-tokenizer) model for on-policy distillation.",
     )
-    # Critic (PPO value model; used only when --algo.advantage.estimator gae). It is
-    # colocated in the actor workers and reuses the actor's optimizer/parallelism config.
+    # Critic (PPO value model; used only when --algo.advantage.estimator gae). Its own actor group
+    # with its own --critic.* optimizer; it shares the actor's GPUs under --train.colocate_fsdp_models.
     parser.add_argument(
         "--critic.model_name_or_path",
         type=str,
@@ -612,10 +612,10 @@ if __name__ == "__main__":
         "cispo (https://arxiv.org/abs/2506.13585 — clips only the upper side of the IS ratio, "
         "stop-gradient through that weight, gradient flows through log-probs only; pass "
         "--actor.eps_clip_low_high's high value as the absolute ratio ceiling, e.g. 1.2, not a +offset; "
-        "--actor.dual_clip is unused in this mode) or "
+        "--actor.dual_clip is rejected in this mode) or "
         "gspo (https://arxiv.org/abs/2507.18071 — clips ONE ratio per sequence, its geometric mean, "
         "so a single outlier token cannot clip the whole update; aggregated with molt's global "
-        "token-mean denominator, not the paper's per-sequence 1/|y|; --actor.dual_clip is unused).",
+        "token-mean denominator, not the paper's per-sequence 1/|y|; --actor.dual_clip is rejected).",
     )
     parser.add_argument(
         "--actor.entropy_coef",
@@ -676,9 +676,7 @@ if __name__ == "__main__":
         "truncated or unparseable, the turn is sampled anew; it can also act on a truncated reply and go on.",
     )
     # -- vLLM engine --
-    parser.add_argument(
-        "--vllm.num_engines", type=int, default=None, help="number of vLLM Engines, set to 0 to disable vLLM"
-    )
+    parser.add_argument("--vllm.num_engines", type=int, default=None, help="number of vLLM engines (required, > 0)")
     parser.add_argument(
         "--vllm.tensor_parallel_size",
         type=int,
@@ -698,10 +696,10 @@ if __name__ == "__main__":
         "--vllm.data_parallel_size",
         type=int,
         default=1,
-        help="data parallel size per vLLM engine (ray DP backend). vLLM has no standalone "
+        help="data parallel size per vLLM engine (mp DP backend, single node). vLLM has no standalone "
         "expert-parallel size: EP = TP * DP, so raise DP to decouple EP from TP "
-        "(DeepSeek-V3-style TP8+DP4 attention -> EP32 experts). An engine spans "
-        "TP*PP*DP GPUs; requires --vllm.enable_expert_parallel and the ray executor.",
+        "(DeepSeek-V3-style TP8+DP4 attention -> EP32 experts). An engine spans TP*DP GPUs; requires "
+        "--vllm.enable_expert_parallel and the mp executor, and excludes --vllm.pipeline_parallel_size > 1.",
     )
     parser.add_argument("--vllm.sync_backend", type=str, default="nccl", help="trainer -> vLLM weight sync backend")
     parser.add_argument("--vllm.enforce_eager", action="store_true", default=False, help="Disable CUDA graph in vLLM")

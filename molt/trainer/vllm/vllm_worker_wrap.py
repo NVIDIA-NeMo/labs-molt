@@ -50,7 +50,7 @@ class WorkerWrap:
         ``metas`` is a list of ``(name, dtype, shape)``. Producer (rank 0 in
         the trainer) cats all tensors into a single uint8 buffer in the same
         order; here we split + reinterpret-cast back. Replaces thousands of
-        per-tensor RPC+broadcast pairs with a handful of ~1 GiB ones.
+        per-tensor RPC+broadcast pairs with tens of ~512 MiB ones.
 
         Dtype-faithful: each meta carries the sender's own per-param dtype, which
         may differ from ``model_config.dtype`` (e.g. an fp32-kept MoE router/gate).

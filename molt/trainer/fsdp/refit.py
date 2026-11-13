@@ -39,8 +39,7 @@ def gather_full_param(param: torch.Tensor, dtype: Optional[torch.dtype] = None) 
 
     Caller invokes this on each rank; ``full_tensor`` is replicated. Memory cost
     is the size of the full tensor on every participating rank — acceptable for
-    weight refit (one-shot per training step). For very large models the async RL
-    path uses per-tensor streaming with a ping-pong buffer to bound peak memory.
+    weight refit (one-shot per training step).
     """
     full = param.full_tensor() if isinstance(param, DTensor) else param.data
     if dtype is not None and full.is_floating_point():

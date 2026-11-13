@@ -33,8 +33,8 @@ def get_bundle_indices(placement_group, index, length):
 
 
 def model_placement_strategy() -> str:
-    """PACK the actor's GPUs node-contiguously (rank i -> bundle i is assigned
-    directly, without get_bundle_indices re-grouping). SPREAD interleaves bundles
+    """PACK the actor's GPUs node-contiguously (rank i takes the i-th bundle in
+    node-sorted order, see get_bundle_indices). SPREAD interleaves bundles
     across nodes, which scatters the EP/CP group across nodes and makes deep_ep's
     intra-node NVLink dispatch hit a cross-node peer (illegal memory access on the
     >1-node actor). PACK keeps EP=8/CP=8 within one node, matching torchrun/SFT."""

@@ -45,8 +45,7 @@ def _build_action_token_mask(
     partial rollout. Those positions are left False, so they get zero policy
     gradient AND drop out of the global token-mean denominator — slime's
     mask_offpolicy_in_partial_rollout, but folded into the action mask so the loss
-    path is unchanged. It is also used for the streaming slow tail when a refit
-    spans requests that outlive their originating generation call.
+    path is unchanged.
     """
     mask = torch.zeros(num_tokens, dtype=torch.bool)
     for i, (start, end) in enumerate(action_ranges):
