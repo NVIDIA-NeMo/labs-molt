@@ -129,3 +129,20 @@ def test_max_num_evicts_oldest_regardless_of_metric(tmp_path):
     cm._prune_checkpoints(root, current_tag="step-3", max_num=2, max_mem=0, is_best=False)
 
     assert set(os.listdir(root)) == {"step-2", "step-3"}
+
+
+def test_a_new_best_hf_export_replaces_the_previous_one(tmp_path):
+    """The HF-export dir is pruned through FsdpStrategy.prune_checkpoints. A best tag has to take
+    the best branch there too, or every improving eval leaves one more full export behind."""
+    from molt.trainer.fsdp.strategy import FsdpStrategy
+
+    root = str(tmp_path)
+    for name in ("best_global_step5", "best_global_step10", "global_step10"):
+        _make_ckpt_dir(root, name, 1024)
+    strategy = FsdpStrategy.__new__(FsdpStrategy)
+    strategy.checkpoint = _cm()
+    strategy.is_rank_0 = lambda: True
+
+    strategy.prune_checkpoints(root, "best_global_step10", max_num=3)
+
+    assert set(os.listdir(root)) == {"best_global_step10", "global_step10"}
