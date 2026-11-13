@@ -487,6 +487,15 @@ if __name__ == "__main__":
         help="GAE lambda (PPO only). 1.0 = Monte-Carlo return minus the value baseline.",
     )
     parser.add_argument(
+        "--algo.advantage.length_adaptive_alpha",
+        type=float,
+        default=None,
+        help="Length-adaptive GAE (VAPO, https://arxiv.org/abs/2504.05118; PPO only): each sample's lambda is "
+        "1 - 1/(alpha * H), H its generated tokens, floored at 0, instead of --algo.advantage.lam. The outcome "
+        "reward keeps about exp(-1/alpha) of the weight at the first token whatever the length (alpha 0.1: "
+        "5e-5, 0.5: 0.14, 1.5: 0.51), and the value target uses lambda 1 (decoupled GAE).",
+    )
+    parser.add_argument(
         "--algo.advantage.no_whiten",
         action="store_true",
         default=False,
@@ -1114,6 +1123,13 @@ if __name__ == "__main__":
     if not args.eval.eval_only and args.algo.advantage.estimator in ["rloo", "reinforce_baseline", "grpo", "dr_grpo"]:
         assert args.rollout.n_samples_per_prompt > 1, (
             f"{args.algo.advantage.estimator} requires n_samples_per_prompt > 1"
+        )
+
+    alpha = args.algo.advantage.length_adaptive_alpha
+    if alpha is not None and (args.algo.advantage.estimator != "gae" or not math.isfinite(alpha) or alpha <= 0):
+        # Only GAE has a lambda to adapt; under another estimator the flag would be silently ignored.
+        raise ValueError(
+            "--algo.advantage.length_adaptive_alpha needs --algo.advantage.estimator gae and a finite value > 0"
         )
 
     if args.algo.kl.ref == "rollout" and args.algo.kl.use_loss and args.algo.kl.estimator == "k1":

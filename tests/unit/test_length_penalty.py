@@ -224,6 +224,11 @@ def test_trainer_keeps_raw_metrics_and_never_shapes_a_dropped_sample(monkeypatch
             "two answers to the same question",
         ),
         (["--reward.overlong_buffer_len", "200"], "--train.agent_path is required"),
+        (
+            ["--train.agent_path", "x", "--algo.advantage.estimator", "reinforce"]
+            + ["--algo.advantage.length_adaptive_alpha", "0.5"],
+            "length_adaptive_alpha needs --algo.advantage.estimator gae",
+        ),
     ],
 )
 def test_cli_validates_before_training(flags, message):
