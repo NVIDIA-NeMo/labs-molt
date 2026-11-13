@@ -60,9 +60,9 @@ class AdvantageContext:
     action_masks: List[torch.Tensor]  # per experience (B, L)
     kl_coef: float  # per-token KL reward coefficient (REINFORCE++ / GAE)
     gamma: float  # discount factor (REINFORCE++ / GAE)
-    lam: float  # GAE lambda (PPO); 1.0 = Monte-Carlo return minus the value baseline
+    lam: float | str  # GAE lambda (PPO); 1.0 = Monte-Carlo return minus the value baseline; or "length_adaptive"
     kls: List[torch.Tensor]  # per experience (B, L) per-token KL
-    length_adaptive_alpha: float | None = None  # GAE: per-sample lam = 1 - 1/(alpha * H) replaces `lam`
+    length_adaptive_alpha: float | None = None  # alpha of lam = "length_adaptive"
     values: List[torch.Tensor] | None = None  # per experience (B, L) critic V(s) at collection (PPO/gae)
     no_whiten: bool = False  # skip whitening entirely: raw returns (no mean-center, no std)
 
@@ -281,8 +281,8 @@ def gae(
     discounted return (interior values cancel by telescoping, so carry-vs-terminal is
     invisible there).
 
-    Length-adaptive GAE (``ctx.length_adaptive_alpha``, VAPO https://arxiv.org/abs/2504.05118):
-    each sample gets ``lam = 1 - 1 / (alpha * H)``, ``H`` its action-token count, floored at 0.
+    Length-adaptive GAE (``ctx.lam == "length_adaptive"``, VAPO https://arxiv.org/abs/2504.05118):
+    each sample gets ``lam = max(0, 1 - 1 / (alpha * H))``, ``H`` its action-token count.
     A fixed ``lam < 1`` leaves the outcome reward a weight of ``lam ** H`` at the first token,
     which vanishes for long responses; this keeps it near ``exp(-1 / alpha)`` at any length.
     The value target is then decoupled and uses ``lam = 1``, the Monte-Carlo return.
@@ -317,12 +317,13 @@ def gae(
         # V = 0 (matters at lam < 1, a no-op at lam = 1).
         m = mask.float()
         # The recursion runs twice side by side, each row with its own lambda: row 0 gives the
-        # policy's advantage, row 1 the value target. Both are ctx.lam unless length-adaptive.
-        lam = torch.full((2, token_reward.size(0)), ctx.lam, device=token_reward.device)
-        if ctx.length_adaptive_alpha is not None:
+        # policy's advantage, row 1 the value target.
+        if ctx.lam == "length_adaptive":
             horizon = m.sum(dim=1).clamp(min=1)  # H: the sample's action tokens
-            lam[0] = (1 - 1 / (ctx.length_adaptive_alpha * horizon)).clamp(min=0)
-            lam[1] = 1.0  # decoupled: Monte-Carlo value target
+            policy_lam = (1 - 1 / (ctx.length_adaptive_alpha * horizon)).clamp(min=0)
+            lam = torch.stack([policy_lam, torch.ones_like(policy_lam)])  # decoupled: Monte-Carlo value target
+        else:
+            lam = torch.full((2, token_reward.size(0)), ctx.lam, device=token_reward.device)
         adv = torch.zeros(2, *token_reward.shape, device=token_reward.device)
         running = torch.zeros_like(lam)
         next_value = torch.zeros(token_reward.size(0), device=token_reward.device)  # V(s_{T+1}) = 0

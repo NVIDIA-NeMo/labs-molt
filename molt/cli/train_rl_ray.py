@@ -482,18 +482,18 @@ if __name__ == "__main__":
     parser.add_argument("--algo.advantage.gamma", type=float, default=1, help="discount factor")
     parser.add_argument(
         "--algo.advantage.lam",
-        type=float,
+        type=lambda s: s if s == "length_adaptive" else float(s),
         default=1.0,
-        help="GAE lambda (PPO only). 1.0 = Monte-Carlo return minus the value baseline.",
+        help="GAE lambda (PPO only). 1.0 = Monte-Carlo return minus the value baseline. `length_adaptive` "
+        "(VAPO, https://arxiv.org/abs/2504.05118): each sample's lambda is max(0, 1 - 1/(alpha * H)), H its "
+        "generated tokens, and the value target uses lambda 1 (decoupled GAE).",
     )
     parser.add_argument(
         "--algo.advantage.length_adaptive_alpha",
         type=float,
-        default=None,
-        help="Length-adaptive GAE (VAPO, https://arxiv.org/abs/2504.05118; PPO only): each sample's lambda is "
-        "1 - 1/(alpha * H), H its generated tokens, floored at 0, instead of --algo.advantage.lam. The outcome "
-        "reward keeps about exp(-1/alpha) of the weight at the first token whatever the length (alpha 0.1: "
-        "5e-5, 0.5: 0.14, 1.5: 0.51), and the value target uses lambda 1 (decoupled GAE).",
+        default=0.5,
+        help="alpha of `--algo.advantage.lam length_adaptive`. The outcome reward keeps about exp(-1/alpha) of "
+        "the weight at the first token whatever the length (0.1: 5e-5, 0.5: 0.14, 1.5: 0.51).",
     )
     parser.add_argument(
         "--algo.advantage.no_whiten",
@@ -1125,12 +1125,9 @@ if __name__ == "__main__":
             f"{args.algo.advantage.estimator} requires n_samples_per_prompt > 1"
         )
 
-    alpha = args.algo.advantage.length_adaptive_alpha
-    if alpha is not None and (args.algo.advantage.estimator != "gae" or not math.isfinite(alpha) or alpha <= 0):
-        # Only GAE has a lambda to adapt; under another estimator the flag would be silently ignored.
-        raise ValueError(
-            "--algo.advantage.length_adaptive_alpha needs --algo.advantage.estimator gae and a finite value > 0"
-        )
+    if args.algo.advantage.lam == "length_adaptive" and not args.algo.advantage.length_adaptive_alpha > 0:
+        # A negative alpha puts lambda above 1, where the advantages grow with the length.
+        raise ValueError("--algo.advantage.length_adaptive_alpha must be > 0")
 
     if args.algo.kl.ref == "rollout" and args.algo.kl.use_loss and args.algo.kl.estimator == "k1":
         # The tokens came from the reference, so minimising log pi - log mu over them RAISES
