@@ -500,7 +500,9 @@ def test_dispatch_spreads_each_groups_rollouts_over_runners_and_rejoins_them(mon
     generator = object.__new__(SamplesGenerator)
     generator.args = SimpleNamespace(
         rollout=SimpleNamespace(n_samples_per_prompt=4),
-        algo=SimpleNamespace(advantage=SimpleNamespace(is_correction_level="off")),
+        algo=SimpleNamespace(
+            advantage=SimpleNamespace(is_correction_level="off"), kl=SimpleNamespace(init_coef=0.0, ref="rollout")
+        ),
     )
     generator._rr = 0
     calls = []
@@ -618,3 +620,24 @@ def test_process_response_scatters_the_sampler_top_k_onto_the_step_axis():
     replay_buffer = NaiveReplayBuffer(sample_batch_size=1, cpu_offload=False)
     replay_buffer.append(experience)
     assert replay_buffer.items[0].rollout_top_ids.shape == (2, 4)
+
+
+def test_kl_to_the_rollout_policy_makes_the_rollout_record_its_logprobs(monkeypatch):
+    # --algo.kl.ref rollout reads the sampler's log-probs off the samples, so the rollout has to
+    # record them with the IS correction off too; without a KL term nothing reads them.
+    sent = []
+    runner = SimpleNamespace(run_group=SimpleNamespace(remote=lambda *args, **kwargs: sent.append(args[3])))
+    monkeypatch.setattr(samples_generator, "_gather_group", SimpleNamespace(remote=lambda *parts: None))
+    generator = object.__new__(SamplesGenerator)
+    generator.agent_runners, generator._rr = [runner], 0
+    kl = SimpleNamespace(init_coef=0.3, ref="rollout")
+    generator.args = SimpleNamespace(
+        rollout=SimpleNamespace(n_samples_per_prompt=1),
+        algo=SimpleNamespace(advantage=SimpleNamespace(is_correction_level="off"), kl=kl),
+    )
+
+    generator._dispatch_to_agent_runners(["p"], ["l"])
+    kl.init_coef = 0.0
+    generator._dispatch_to_agent_runners(["p"], ["l"])
+
+    assert [sampling_params.logprobs for sampling_params in sent] == [1, None]
