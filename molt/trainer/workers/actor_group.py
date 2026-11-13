@@ -135,6 +135,7 @@ class ReferenceModelActor(BaseModelActor):
             moe_config=strategy.moe_config,
             activation_checkpointing=False,
             packing_samples=strategy.args.fsdp.packing_samples,
+            use_liger_kernel=strategy.args.fsdp.use_liger_kernel,
             temperature=strategy.args.rollout.temperature,
             # Keep reference numerics on the same AutoModel path as the
             # trainable actor. Custom AutoModel Llama is not fp32/bf16 forward
