@@ -618,3 +618,18 @@ def test_process_response_scatters_the_sampler_top_k_onto_the_step_axis():
     replay_buffer = NaiveReplayBuffer(sample_batch_size=1, cpu_offload=False)
     replay_buffer.append(experience)
     assert replay_buffer.items[0].rollout_top_ids.shape == (2, 4)
+
+
+def test_dispatch_always_asks_for_the_sampled_tokens_logprob(monkeypatch):
+    # A KL to the rollout policy (--algo.kl.ref rollout) reads it off the samples with the IS
+    # correction off, so the rollout records it on every run.
+    sent = []
+    runner = SimpleNamespace(run_group=SimpleNamespace(remote=lambda *args, **kwargs: sent.append(args[3])))
+    monkeypatch.setattr(samples_generator, "_gather_group", SimpleNamespace(remote=lambda *parts: None))
+    generator = object.__new__(SamplesGenerator)
+    generator.agent_runners, generator._rr = [runner], 0
+    generator.args = SimpleNamespace(rollout=SimpleNamespace(n_samples_per_prompt=1))
+
+    generator._dispatch_to_agent_runners(["p"], ["l"])
+
+    assert sent[0].logprobs == 1

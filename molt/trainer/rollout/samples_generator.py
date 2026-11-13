@@ -481,10 +481,9 @@ class SamplesGenerator:
             max_tokens=generate_kwargs.get("max_new_tokens"),  # None = dynamic per-prompt
             min_tokens=generate_kwargs.get("min_new_tokens", 1),
             skip_special_tokens=generate_kwargs.get("skip_special_tokens", False),
-            # Score centering trains on the sampler's top-k (rollout only, see _run_eval); the IS
-            # correction needs just the sampled token's logprob.
-            logprobs=generate_kwargs.get("top_logprobs")
-            or (1 if self.args.algo.advantage.is_correction_level != "off" else None),
+            # Score centering trains on the sampler's top-k (rollout only, see _run_eval); otherwise the
+            # sampled token's logprob, which the IS correction and a KL to the rollout policy read back.
+            logprobs=generate_kwargs.get("top_logprobs") or 1,
         )
         truncate_length = generate_kwargs.get("max_len", 2048)
         n_samples = generate_kwargs.get("n_samples_per_prompt", self.args.rollout.n_samples_per_prompt)
