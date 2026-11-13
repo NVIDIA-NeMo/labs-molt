@@ -469,9 +469,12 @@ class BaseModel(nn.Module):
         )
         # A single-rank trainer runs under AutoModel's bf16 autocast with fp32 weights: Hugging Face's Qwen3RMSNorm
         # then returns fp32 (weight * x) for query / key while the value stays bf16, and TransformerEngine's
-        # attention rejects mixed dtypes. Keep each query / key norm's output in its input dtype.
+        # attention rejects mixed dtypes. Keep each such norm's output in its input dtype; other models' query /
+        # key norms are left alone (some keep fp32 on purpose).
+        from transformers.models.qwen3.modeling_qwen3 import Qwen3RMSNorm
+
         for name, module in self.model.named_modules():
-            if name.endswith((".q_norm", ".k_norm")):
+            if isinstance(module, Qwen3RMSNorm) and name.endswith((".q_norm", ".k_norm")):
                 module.register_forward_hook(lambda _module, args, output: output.to(args[0].dtype))
         # An unmatched --*.lora_target_modules leaves every parameter frozen (AutoModel freezes
         # the base before patching); fail instead of training nothing.
