@@ -149,8 +149,10 @@ def build_automodel_muon_optimizer(
     valid = inspect.signature(target).parameters
     if "distributed_mesh" in valid:
         # AutoModel knows how to pull the 1D dp_shard_cp submesh out of the full
-        # device mesh; reuse it instead of duplicating the extraction.
-        kwargs["distributed_mesh"] = automodel_optim._get_dion_mesh(distributed_mesh)
+        # device mesh; reuse it instead of duplicating the extraction. The helper became
+        # public (get_dion_mesh); AutoModel-Slim still has the private name.
+        get_dion_mesh = getattr(automodel_optim, "get_dion_mesh", None) or automodel_optim._get_dion_mesh
+        kwargs["distributed_mesh"] = get_dion_mesh(distributed_mesh)
     kwargs = {k: v for k, v in kwargs.items() if k in valid}
 
     optimizer = target(param_groups, **kwargs)
