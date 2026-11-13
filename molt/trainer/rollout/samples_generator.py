@@ -272,10 +272,15 @@ class SamplesGenerator:
             ready, self._inflight_rollouts = ray.wait(self._inflight_rollouts, num_returns=1)
             for finished_rollout in ready:
                 groups_completed += 1
-                # Dropped groups (filtered or all-unusable) come back empty; their
+                # Dropped groups (filtered, or short of a rollout) come back empty; their
                 # slot is refilled with a fresh prompt on the next iteration.
                 group_samples = self._filter_group(
-                    finished_rollout, dynamic_filtering, drop_counts, score_stats=score_stats, **generate_kwargs
+                    finished_rollout,
+                    dynamic_filtering,
+                    drop_counts,
+                    score_stats=score_stats,
+                    whole_groups=True,
+                    **generate_kwargs,
                 )
                 if group_samples:
                     self._finished_samples.extend(group_samples)
@@ -353,6 +358,7 @@ class SamplesGenerator:
         dynamic_filtering: bool,
         drop_counts: Dict[str, int],
         score_stats: Dict[str, float] | None = None,
+        whole_groups: bool = False,
         **generate_kwargs,
     ) -> List[Experience]:
         """Filter one finished rollout (a prompt's N responses = one group) down to
@@ -375,7 +381,7 @@ class SamplesGenerator:
             elif drop_reason is not None:
                 drop_counts[drop_reason] += 1
 
-        if dynamic_filtering and group_samples:
+        if group_samples and (whole_groups or dynamic_filtering):
             # Compaction can emit several step-samples with the same terminal score. Keep one
             # representative per rollout for filtering; all segments still enter training below.
             rollout_samples = {
@@ -384,7 +390,7 @@ class SamplesGenerator:
             # Pre-filter score stats (the model's TRUE judge pass rate over scored rollouts, BEFORE
             # DAPO drops uniform groups). Accumulate here, before any keep/drop decision, so the
             # logged mean reflects all-pass + all-fail + mixed (not just the kept mixed groups).
-            if score_stats is not None:
+            if dynamic_filtering and score_stats is not None:
                 scored = [s.scores[0].item() for s in rollout_samples if s.scores is not None]
                 if scored:
                     min_score, max_score = self.args.algo.dynamic_filtering_range
@@ -394,7 +400,8 @@ class SamplesGenerator:
                     score_stats["groups"] += 1.0
                     score_stats["all_pass"] += float(gmean >= max_score)
                     score_stats["all_fail"] += float(gmean <= min_score)
-            # Require COMPLETE groups: a group that lost a response to a per-response drop
+            # Require COMPLETE groups (training always does, as slime and miles do; eval keeps what
+            # it has): a group that lost a response to a failed rollout or a per-response drop
             # (vlm_truncation / no_action_tokens / logprob_misalign / ...) has < n_samples
             # usable samples, which would pull the accepted count off train_batch_size and make
             # it indivisible by the DP-rank count -> per-sample forward microbatches split unevenly
@@ -405,7 +412,7 @@ class SamplesGenerator:
             if n_rollouts < n_samples:
                 drop_counts["incomplete_group"] += len(group_samples)
                 return []
-            if not self._passes_dynamic_filter(rollout_samples):
+            if dynamic_filtering and not self._passes_dynamic_filter(rollout_samples):
                 drop_counts["dynamic_filter"] += len(group_samples)
                 return []
         return group_samples
@@ -509,7 +516,6 @@ class SamplesGenerator:
                         1,
                         tools=tool,
                         group_id=group_id,
-                        max_tries=generate_kwargs.get("max_tries", 1),
                     )
                 )
             refs.append(_gather_group.remote(*parts))

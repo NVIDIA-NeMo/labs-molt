@@ -37,7 +37,6 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 from abc import ABC, abstractmethod
-from contextvars import ContextVar
 from copy import deepcopy
 from dataclasses import dataclass, field
 from typing import Any
@@ -48,10 +47,6 @@ import torch
 from molt.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
-
-# The tries one turn of the rollout being run gets after a model error (set by the rollout router's
-# ``run_group``): --agent.max_tries for an eval rollout, 1 for a training one, which never retries it.
-MAX_TRIES: ContextVar[int] = ContextVar("molt_max_tries", default=1)
 
 
 def _first_scalar(value):
