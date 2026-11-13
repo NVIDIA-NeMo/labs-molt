@@ -475,12 +475,6 @@ class SamplesGenerator:
         as before. Per-rollout (not per-group) dispatch: a runner's event loop is shared by all its
         in-flight rollouts (grading, image processing and blocking tool calls run in-process), so
         a group's N rollouts land on N runners instead of one."""
-        algo = self.args.algo
-        # The sampled token's logprob is recorded only for what reads it back: the IS correction,
-        # or a KL whose reference is the rollout policy (--algo.kl.ref rollout).
-        needs_logprob = algo.advantage.is_correction_level != "off" or (
-            algo.kl.init_coef > 0 and algo.kl.ref == "rollout"
-        )
         sampling_params = SamplingParams(
             temperature=generate_kwargs.get("temperature", 1.0),
             top_p=generate_kwargs.get("top_p", 1.0),
@@ -488,8 +482,9 @@ class SamplesGenerator:
             max_tokens=generate_kwargs.get("max_new_tokens"),  # None = dynamic per-prompt
             min_tokens=generate_kwargs.get("min_new_tokens", 1),
             skip_special_tokens=generate_kwargs.get("skip_special_tokens", False),
-            # Score centering trains on the sampler's top-k (rollout only, see _run_eval).
-            logprobs=generate_kwargs.get("top_logprobs") or (1 if needs_logprob else None),
+            # Score centering trains on the sampler's top-k (rollout only, see _run_eval); otherwise the
+            # sampled token's logprob, which the IS correction and a KL to the rollout policy read back.
+            logprobs=generate_kwargs.get("top_logprobs") or 1,
         )
         truncate_length = generate_kwargs.get("max_len", 2048)
         n_samples = generate_kwargs.get("n_samples_per_prompt", self.args.rollout.n_samples_per_prompt)

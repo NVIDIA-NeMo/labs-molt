@@ -795,8 +795,7 @@ second and corrects the first, which keeps asynchronous training stable through 
   gate: `--algo.advantage.estimator dr_grpo --algo.advantage.is_correction_level token --algo.advantage.is_correction_threshold inf --actor.loss_agg_mode seq-mean-token-mean --train.force_on_policy`.
 
 Measure alignment with `mismatch/bitwise_frac` (fraction of valid response tokens whose fp32 logprob bytes
-differ between vLLM and the training forward; logged whenever rollout logprobs exist, i.e.
-`--algo.advantage.is_correction_level` ≠ `off` or score centering), plus `mismatch/abs_diff_mean` and
+differ between vLLM and the training forward; logged on every run), plus `mismatch/abs_diff_mean` and
 `mismatch/k3_kl`. Bitwise means `bitwise_frac = 0` at every step of a synchronous run
 (`--train.force_sync_mode`, queue 1, one epoch); under any lag the rollout came from older weights and
 the fraction reads ≈ 1 whatever the kernels. `vllm_kl` is a signed mean and cannot tell a last-bit
