@@ -316,13 +316,13 @@ def gae(
         # gap bootstraps from the next action token's value, not a spurious terminal
         # V = 0 (matters at lam < 1, a no-op at lam = 1).
         m = mask.float()
-        # Two recursions side by side: row 0 is the policy's advantage, row 1 the one behind the
-        # value target. Both use ctx.lam unless the length-adaptive lambda decouples them.
+        # The recursion runs twice side by side, each row with its own lambda: row 0 gives the
+        # policy's advantage, row 1 the value target. Both are ctx.lam unless length-adaptive.
         lam = torch.full((2, token_reward.size(0)), ctx.lam, device=token_reward.device)
         if ctx.length_adaptive_alpha is not None:
             horizon = m.sum(dim=1).clamp(min=1)  # H: the sample's action tokens
             lam[0] = (1 - 1 / (ctx.length_adaptive_alpha * horizon)).clamp(min=0)
-            lam[1] = 1.0
+            lam[1] = 1.0  # decoupled: Monte-Carlo value target
         adv = torch.zeros(2, *token_reward.shape, device=token_reward.device)
         running = torch.zeros_like(lam)
         next_value = torch.zeros(token_reward.size(0), device=token_reward.device)  # V(s_{T+1}) = 0

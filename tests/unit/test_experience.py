@@ -77,7 +77,11 @@ def _grpo_maker():
     new step on the compute_advantages path does not need another binding here."""
     args = SimpleNamespace(
         reward=SimpleNamespace(clip_range=None, overlong_buffer_len=None, stop_properly_penalty_coef=None),
-        algo=SimpleNamespace(advantage=SimpleNamespace(estimator="grpo", gamma=1.0, lam=1.0, no_whiten=False)),
+        algo=SimpleNamespace(
+            advantage=SimpleNamespace(
+                estimator="grpo", gamma=1.0, lam=1.0, length_adaptive_alpha=None, no_whiten=False
+            )
+        ),
         rollout=SimpleNamespace(n_samples_per_prompt=4),
     )
     return RemoteExperienceMaker(None, None, SimpleNamespace(value=0.0), SimpleNamespace(args=args), None)

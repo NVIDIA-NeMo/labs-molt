@@ -24,7 +24,11 @@ def _maker(estimator="dr_grpo", **reward_kwargs):
     reward.update(reward_kwargs)
     args = SimpleNamespace(
         reward=SimpleNamespace(**reward),
-        algo=SimpleNamespace(advantage=SimpleNamespace(estimator=estimator, gamma=1.0, lam=1.0, no_whiten=True)),
+        algo=SimpleNamespace(
+            advantage=SimpleNamespace(
+                estimator=estimator, gamma=1.0, lam=1.0, length_adaptive_alpha=None, no_whiten=True
+            )
+        ),
         rollout=SimpleNamespace(n_samples_per_prompt=2, max_new_tokens=None, batch_size=1),
         data=SimpleNamespace(max_len=2048),
         actor=SimpleNamespace(num_nodes=1, num_gpus_per_node=1),
