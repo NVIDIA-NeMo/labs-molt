@@ -128,10 +128,9 @@ def _decode_routed_experts(blob):
 
 
 def _inference_sampling_params(sp) -> dict:
-    """The ``sampling_params`` object for vLLM's ``/inference/v1/generate`` (vime's shape). Forward
-    every knob set on the rollout SamplingParams so nothing is silently dropped over HTTP (only
-    non-defaults are sent); ``skip_special_tokens`` is always sent (server defaults True, rollouts
-    want raw action text)."""
+    """The ``sampling_params`` object for vLLM's ``/inference/v1/generate`` (vime's shape). Every
+    sampling knob is sent explicitly, defaults included, because the server fills an omitted one
+    from the checkpoint's generation_config; only min_tokens, seed and the stop lists are sent when set."""
     fields = {
         "max_tokens": sp.max_tokens,
         "logprobs": getattr(sp, "logprobs", None) or 1,

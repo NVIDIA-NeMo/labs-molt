@@ -134,11 +134,8 @@ def _grade_answer(text: str, label) -> tuple[float, str]:
 
 class Geo3kAgent(ChatAgent):
     async def run(self, ctx: ChatContext) -> Result:
-        # max_retries=0 — the transport BEHIND this server already retries (RouterGenerateClient
-        # ._post), so retrying here multiplies the two budgets: a turn whose generation outlives the
-        # transport's read timeout gets resent 3x by _post and then 3x again by the SDK, turning one
-        # slow turn into hours. A client-side retry is still SAFE (the server locks per session and
-        # replays an already-recorded turn idempotently) — it just isn't ours to spend twice.
+        # max_retries=0: the transport behind this server (RouterGenerateClient._post) already
+        # retries a system error, so an SDK retry would spend that budget twice.
         # Generous timeout so slow cold-start generations don't fail.
         client = AsyncOpenAI(base_url=ctx.base_url, api_key=ctx.api_key, max_retries=0, timeout=3600)
         # The dataset row, ready to send: images are already inlined as image_url items.

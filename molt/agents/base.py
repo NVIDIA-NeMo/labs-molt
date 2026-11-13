@@ -122,7 +122,7 @@ class Result:
 # ---------------------------------------------------------------------------
 # Trajectory — accumulated rollout the trainer consumes directly (no dict
 # coercion). Field names below are the stable contract with samples_generator;
-# group_id / rollout_id are stamped by the trainer's vllm_engine after rollout.
+# group_id / rollout_id are stamped by AgentRunnerActor.run_group after the rollout.
 # ---------------------------------------------------------------------------
 @dataclass
 class Trajectory:

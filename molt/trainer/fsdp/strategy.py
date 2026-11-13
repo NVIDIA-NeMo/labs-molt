@@ -234,9 +234,9 @@ class FsdpStrategy:
             mp_policy=mp_policy,
             offload_policy=CPUOffloadPolicy(pin_memory=False) if self.cpu_offload else None,
             activation_checkpointing=activation_checkpointing,
-            # defer_fsdp_grad_sync=False: every microbatch reduce-scatters into .grad.
-            # The accumulation window comes from deferring optimizer_step, not skipping
-            # sync, so grads stay materialized for clipping and logging.
+            # AutoModel's own deferral stays off: backward() sets the reduce-scatter per
+            # microbatch itself (_set_fsdp_backward_sync), deferred to the optimizer-step
+            # microbatch unless MOLT_DEFER_GRAD_SYNC=0.
             defer_fsdp_grad_sync=False,
         )
         # MoE parallelization config, required when ep_size > 1.

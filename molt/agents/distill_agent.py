@@ -19,7 +19,7 @@ On-policy distillation needs no reward function and no task-specific agent: the 
 training signal is the per-token reverse KL to the teacher (the reference model),
 supplied by the ``on_policy_distill`` advantage estimator. This env just samples one
 on-policy completion per prompt and returns reward 0.0 — present only because the
-rollout contract requires a scalar (``make_experience`` rejects ``None``). The estimator
+rollout contract requires a scalar (the step runner rejects ``None``). The estimator
 ignores it.
 
 Because it is generic (no grader, no tools), it ships in the package and is selected

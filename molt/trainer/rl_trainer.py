@@ -253,7 +253,7 @@ def compute_eval_metrics(eval_dataloader, samples_list, n_samples_per_prompt):
 
 
 class BaseRLTrainer:
-    """Training-side base class for non-critic policy RL."""
+    """Training-side base class for policy RL (trains the critic too when one is given)."""
 
     def __init__(
         self,
