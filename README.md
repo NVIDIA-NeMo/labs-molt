@@ -367,7 +367,10 @@ to do about a bad reply is the agent's call:
 - **A reply whose client hung up** before it arrived is not recorded.
 
 A system error (router/engine 5xx, dropped connection) is the framework's to
-retry: 20 tries, a second apart, then the rollout fails.
+retry: 20 tries, a second apart, then the rollout fails. In training, a group
+that lost a rollout (a failed agent, an unusable trajectory) is dropped whole
+and its slot refilled with a fresh prompt, so every group trains with all its
+rollouts; eval keeps the rollouts it has.
 
 The same server speaks the Anthropic wire too — point `AsyncAnthropic` at
 `ctx.session_url` (the session root *without* `/v1`; the SDK appends

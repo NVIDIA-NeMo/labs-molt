@@ -361,6 +361,18 @@ def test_dynamic_filtering_counts_compaction_segments_once_per_rollout(monkeypat
     assert dict(score_stats) == {"score_sum": 1.0, "score_n": 2, "groups": 1.0, "all_pass": 0.0, "all_fail": 0.0}
 
 
+def test_training_drops_a_group_that_lost_a_rollout_and_eval_keeps_it(monkeypatch):
+    generator = object.__new__(SamplesGenerator)
+    generator.args = SimpleNamespace(rollout=SimpleNamespace(n_samples_per_prompt=2))
+    kept_rollout = SimpleNamespace(rollout_ids=["a"], scores=torch.tensor([1.0]))
+    monkeypatch.setattr(samples_generator.ray, "get", lambda _: [(kept_rollout, None), (None, "runner_error")])
+
+    drops = defaultdict(int)
+    assert generator._filter_group(object(), False, drops, whole_groups=True) == []  # training: refilled
+    assert dict(drops) == {"runner_error": 1, "incomplete_group": 1}
+    assert generator._filter_group(object(), False, defaultdict(int)) == [kept_rollout]  # eval
+
+
 def test_process_response_preserves_text_info_through_replay_buffer_append():
     experience, drop_reason = SamplesGenerator._process_response_into_experience(
         Trajectory(

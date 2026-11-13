@@ -391,7 +391,8 @@ class AgentRunnerActor:
         node's object store and only the lazy handle travels to the controller — so a 256-session
         batch of screenshots never concentrates on one node. Tagged group_id (per prompt; GRPO
         baseline) + rollout_id (per rollout; multi-turn step-samples share it). A failed/unusable
-        rollout is dropped, never sinks the group."""
+        rollout is reported with its drop reason, never raised: training then drops its whole group
+        and refills the slot, eval keeps the rest (``SamplesGenerator._filter_group``)."""
         from molt.trainer.rollout.samples_generator import SamplesGenerator
 
         group_id = group_id or uuid4().hex
