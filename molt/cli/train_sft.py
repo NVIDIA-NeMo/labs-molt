@@ -102,6 +102,9 @@ def train(args):
             True,
             False,
             eval_dataset.collate_fn,
+            # Score every row: dropping the remainder (the training default) trims the set to a
+            # multiple of ranks x micro-batch, which can leave a small eval set half-scored or empty.
+            drop_last=False,
             num_workers=args.data.dataloader_num_workers,
         )
 
