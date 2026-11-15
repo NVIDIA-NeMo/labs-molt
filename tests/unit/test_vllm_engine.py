@@ -20,6 +20,8 @@ import sys
 from dataclasses import dataclass
 from types import ModuleType, SimpleNamespace
 
+import pytest
+
 
 def _install_vllm_test_stub():
     vllm = ModuleType("vllm")
@@ -159,11 +161,14 @@ def test_reload_mode_reaches_vllm_through_its_environment_variable(monkeypatch):
     assert os.environ["VLLM_RELOAD_MODE"] == "auto"
 
 
-def test_create_vllm_engines_asks_vllm_for_post_temperature_logprobs(monkeypatch):
-    """Every rollout records the sampled token's log-prob, and the training forward recomputes it at
-    --rollout.temperature: mismatch/* compares the two, and the IS correction / score centering / a
-    rollout-referenced KL consume them. vLLM's own default is RAW (pre-temperature) log-probs, so the
-    engine has to be created with processed_logprobs whatever the rest of the configuration is."""
+@pytest.mark.parametrize(
+    "logprobs_mode,expected",
+    [("processed_logprobs", "processed_logprobs"), (None, None)],
+)
+def test_create_vllm_engines_forwards_the_logprobs_mode(monkeypatch, logprobs_mode, expected):
+    """The caller's choice has to reach vLLM: post-temperature log-probs when it asks for them, and
+    nothing at all when it wants vLLM's raw default (molt asks for raw at temperature 1, where the
+    full vocabulary is what the training forward recomputes)."""
     captured = {}
 
     def _spawn(**kwargs):
@@ -177,6 +182,6 @@ def test_create_vllm_engines_asks_vllm_for_post_temperature_logprobs(monkeypatch
     monkeypatch.setattr(vllm_engine, "PlacementGroupSchedulingStrategy", lambda **k: None)
     monkeypatch.setattr(vllm_engine.ray, "get", lambda *a, **k: None)
 
-    vllm_engine.create_vllm_engines(1, 1, "model-path", 0, False, True, 4096)
+    vllm_engine.create_vllm_engines(1, 1, "model-path", 0, False, True, 4096, logprobs_mode=logprobs_mode)
 
-    assert captured["logprobs_mode"] == "processed_logprobs"
+    assert captured.get("logprobs_mode") == expected
