@@ -5,7 +5,7 @@
 **A Hugging Face-native, minimal, and scalable framework for agentic RL research.**
 
 Ray · vLLM · NeMo AutoModel: the smallest Hugging Face-native stack for
-fully-async, multimodal, multi-turn agentic RL at 1T-class scale.
+fully asynchronous, multimodal, multi-turn agentic RL at 1T-class scale.
 
 <br/>
 
@@ -44,15 +44,14 @@ fully-async, multimodal, multi-turn agentic RL at 1T-class scale.
 </div>
 
 Molt is **agentic-first**, **Hugging Face-native**, **minimal**, and **scalable**. The agent is the
-program, the trainer is a single actor, and reward is any Python you write inside an `Env` or a
-`ChatAgent`: graders, multi-turn tools, VLM environments, LLM-as-judge. Three components carry the
-rest: **Ray** for placement and async queues, **vLLM** for rollout, and **NeMo AutoModel + FSDP2**
-for training. The model stays an ordinary PyTorch module in the Hugging Face layout, so one
-checkpoint directory feeds both vLLM and the trainer, with no bridge to write and no weights to
-convert. That is the whole stack: **~9.2K lines of RL code that scale to 1T-class MoE** with
-TP / EP / CP. The same command runs a 4B model on one node and GLM-5.2 (753B) at
-`--fsdp.ep_size 256`, with Adam CPU offload for the largest actors. One agent API and one
-trainable actor, clean enough to read end to end.
+program: the reward is whatever Python you write in an `Env` or a `ChatAgent`, whether a grader, a
+multi-turn tool loop, a VLM environment, or an LLM judge. Three components do the rest. **Ray**
+places the processes and runs the async queues, **vLLM** generates the rollouts, and **NeMo
+AutoModel + FSDP2** trains a single actor. The model stays an ordinary PyTorch module in the
+Hugging Face layout, so one checkpoint directory serves both vLLM and the trainer, with no bridge
+to write and no weights to convert. The whole RL path is **~9.2K lines, and it scales to 1T-class
+MoE** with TP / EP / CP: the entry point that trains a 4B model on one node also trains GLM-5.2
+(753B) at `--fsdp.ep_size 256`, with Adam CPU offload for the largest actors.
 
 ## 📰 News
 
@@ -62,23 +61,25 @@ trainable actor, clean enough to read end to end.
 
 ## 🧩 Architecture
 
-Three boxes. One async loop.
+One loop. Six stages.
 
 <p align="center">
-  <img src="assets/molt.jpg" alt="Molt architecture: Agent · vLLM rollout · Ray async queue · single-actor AutoModel/FSDP2 trainer, fully async" width="920"/>
+  <img src="assets/architecture.svg" alt="Molt architecture, one loop in six stages: agent workers request tokens from the vLLM engines, return a reward, and send trajectories to a Ray queue; the trainer takes batches and refits the engines with the new weights" width="900"/>
 </p>
 
-**Ray** owns placement and the async queue between the three boxes. That is the entire runtime.
-The contract is **token-first**: token ids, log-probs, action ranges, rewards, and multimodal
-tensors stay aligned from rollout to training. Anything you can compute in Python is a valid
-reward, including LLM-as-judge calls back through the same vLLM engines that drive rollout.
+**Ray** places three kinds of processes (agent workers, vLLM engines, and one trainer) and carries
+the queue between them. That is the entire runtime. In asynchronous mode the six stages overlap,
+so a slow episode delays only itself. The contract is **token-first**: token ids, log-probs, action
+ranges, rewards, and multimodal tensors stay aligned from rollout to training. Anything you can
+compute in Python is a valid reward, including LLM-as-judge calls back through the same vLLM
+engines that drive rollout.
 
 ## ✨ Why Molt
 
 | | What you get | Why it matters for research |
 |---|---|---|
-| 🤖 **Agentic-first** | One Gymnasium-aligned API, `Env.step()` or `ChatAgent.run()`, covers graders, multi-turn tools, VLM environments, and OpenAI- or Anthropic-compatible servers | The agent *is* the program. Iterate on environments in plain Python while the trainer stays untouched |
-| ⚙️ **Fully-async runtime** | Ray placement, async rollout queues, vLLM engines, partial rollout, weight sync | Rollout, training, and weight sync overlap, so a DeepSeek-V3-class actor stays fed without bespoke infrastructure |
+| 🤖 **Agentic-first** | One Gymnasium-aligned API, `Env.step()` or `ChatAgent.run()`, covers graders, multi-turn tools, VLM environments, and existing agents that speak the OpenAI or Anthropic API | The agent *is* the program. Iterate on environments in plain Python while the trainer stays untouched |
+| ⚙️ **Fully asynchronous runtime** | Ray placement, async rollout queues, vLLM engines, partial rollout, weight sync | Rollout, training, and weight sync overlap, so a DeepSeek-V3-class actor stays fed without bespoke infrastructure |
 | 🔥 **Hugging Face-native, PyTorch end to end** | The model is an ordinary PyTorch module in the Hugging Face layout (NeMo AutoModel + FSDP2), and one checkpoint directory feeds both vLLM and the trainer | Models load as released, with no bridge to write and no checkpoint to convert. Changing one means editing plain PyTorch |
 | 🎯 **Single-actor simplicity** | One actor and an optional KL reference. The whole RL graph fits on a page | Every gradient is explicit, and every loss term is one file away |
 | 🚀 **Frontier-scale MoE** | AutoModel + FSDP2 with TP / EP / CP and Adam CPU offload, MoE-native. GLM-5.2 (753B) runs at `--fsdp.ep_size 256` | The 4B and 753B recipes share the entry point, the agent, and the algorithm. Nothing is rewritten between scales |
@@ -179,8 +180,8 @@ every flag.
 ## 📊 How It Compares
 
 The RL ecosystem optimizes for breadth. Molt optimizes for **agentic research velocity at scale**:
-the smallest Hugging Face-native stack that still drives fully-async agentic RL at frontier MoE
-scale.
+the smallest Hugging Face-native stack that still drives fully asynchronous agentic RL at frontier
+MoE scale.
 
 |  | **🦋 Molt** | OpenRLHF | verl | slime |
 |---|:-:|:-:|:-:|:-:|

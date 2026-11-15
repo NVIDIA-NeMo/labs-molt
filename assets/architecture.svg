@@ -1,0 +1,90 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 222" width="900" height="222" role="img" aria-labelledby="title desc">
+  <title id="title">Molt architecture: one loop in six stages</title>
+  <desc id="desc">Agent workers send requests to the vLLM engines (1) and receive tokens and log-probs (2). They call tools and the model in turn, then return a reward (3). Finished trajectories enter a Ray queue (4), the trainer takes batches from it (5), and the new weights are refit into the engines (6).</desc>
+  <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
+  <!-- SPDX-License-Identifier: Apache-2.0 -->
+  <!-- The README figure. It mirrors the loop diagram on the project page (docs/index.html), and it
+       carries its own background so it stays legible when the viewer's theme and GitHub's differ. -->
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif; }
+    .bg { fill: #ffffff; }
+    .node { fill: #f5f5f7; }
+    .role { font-size: 11px; font-weight: 600; letter-spacing: .5px; fill: #3f7a00; }
+    .name { font-size: 17px; font-weight: 600; fill: #1d1d1f; }
+    .note { font-size: 13px; fill: #6e6e73; }
+    .hop { font-size: 12px; fill: #6e6e73; }
+    .wire { fill: none; stroke: #8e8e93; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    .dashed { stroke-dasharray: 5 5; }
+    /* An outline in the background colour: it breaks the dashed line behind the label. */
+    .cut { paint-order: stroke; stroke: #ffffff; stroke-width: 12px; stroke-linejoin: round; }
+    .dot { fill: #1d1d1f; }
+    .num { font-size: 10px; font-weight: 700; fill: #ffffff; text-anchor: middle; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0d1117; }
+      .cut { stroke: #0d1117; }
+      .node { fill: #161b22; stroke: #30363d; }
+      .role { fill: #76b900; }
+      .name { fill: #f0f6fc; }
+      .note, .hop { fill: #9198a1; }
+      .wire { stroke: #6e7681; }
+      .dot { fill: #f0f6fc; }
+      .num { fill: #0d1117; }
+    }
+  </style>
+
+  <rect class="bg" width="900" height="222" rx="14"/>
+
+  <!-- 6: the trainer's new weights return to the engines -->
+  <path class="wire dashed" d="M810 156 V180 Q810 196 794 196 H106 Q90 196 90 180 V162"/>
+  <path class="wire" d="M83 167 L90 160 L97 167"/>
+  <text class="hop cut" x="330" y="200">weight refit: new weights return to the engines</text>
+  <circle class="dot cut" cx="316" cy="196" r="8"/><text class="num" x="316" y="199.5">6</text>
+
+  <rect class="node" x="14" y="14" width="152" height="142" rx="16"/>
+  <text class="role" x="30" y="40">ROLLOUT</text>
+  <text class="name" x="30" y="63">vLLM engines</text>
+  <text class="note" x="30" y="86">Generate tokens</text>
+  <text class="note" x="30" y="103">for the agents.</text>
+
+  <!-- 1 and 2: the agents call the engines -->
+  <circle class="dot" cx="187" cy="58" r="8"/><text class="num" x="187" y="61.5">1</text>
+  <text class="hop" x="200" y="62">request</text>
+  <path class="wire" d="M248 72 H172 M179 66 L172 72 L179 78"/>
+  <path class="wire" d="M172 90 H248 M241 84 L248 90 L241 96"/>
+  <circle class="dot" cx="184" cy="108" r="8"/><text class="num" x="184" y="111.5">2</text>
+  <text class="hop" x="197" y="112">tokens +</text>
+  <text class="hop" x="210" y="127" text-anchor="middle">log-probs</text>
+
+  <rect class="node" x="254" y="14" width="152" height="142" rx="16"/>
+  <text class="role" x="270" y="40">YOUR PROGRAM</text>
+  <text class="name" x="270" y="63">Agent workers</text>
+  <circle class="dot" cx="278" cy="82" r="8"/><text class="num" x="278" y="85.5">3</text>
+  <text class="note" x="291" y="86">Call tools and</text>
+  <text class="note" x="270" y="103">the model in turn,</text>
+  <text class="note" x="270" y="120">then return a</text>
+  <text class="note" x="270" y="137">reward.</text>
+
+  <!-- 4: finished trajectories -->
+  <circle class="dot" cx="421" cy="72" r="8"/><text class="num" x="421" y="75.5">4</text>
+  <text class="hop" x="434" y="76">trajectory</text>
+  <path class="wire" d="M412 90 H488 M481 84 L488 90 L481 96"/>
+
+  <rect class="node" x="494" y="14" width="152" height="142" rx="16"/>
+  <text class="role" x="510" y="40">RAY</text>
+  <text class="name" x="510" y="63">Queue</text>
+  <text class="note" x="510" y="86">Buffers finished</text>
+  <text class="note" x="510" y="103">trajectories and</text>
+  <text class="note" x="510" y="120">bounds policy lag.</text>
+
+  <!-- 5: training batches -->
+  <circle class="dot" cx="673" cy="72" r="8"/><text class="num" x="673" y="75.5">5</text>
+  <text class="hop" x="686" y="76">batch</text>
+  <path class="wire" d="M652 90 H728 M721 84 L728 90 L721 96"/>
+
+  <rect class="node" x="734" y="14" width="152" height="142" rx="16"/>
+  <text class="role" x="750" y="40">TRAINING</text>
+  <text class="name" x="750" y="63">Trainer</text>
+  <text class="note" x="750" y="86">NeMo AutoModel +</text>
+  <text class="note" x="750" y="103">FSDP2 update the</text>
+  <text class="note" x="750" y="120">policy.</text>
+</svg>
