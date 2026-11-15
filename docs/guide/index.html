@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+<!-- guide/ lists every page in pages.js; guide/?p=<name> renders pages/<name>.md. See README.md here. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Docs · Molt</title>
+<meta name="description" content="Guides, deep dives, and reference for Molt, a Hugging Face-native framework for agentic RL research.">
+<meta name="theme-color" content="#000000">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Molt Docs">
+<meta property="og:description" content="Guides, deep dives, and reference for Molt.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🦋</text></svg>">
+<link rel="stylesheet" href="../assets/site.css">
+</head>
+<body>
+
+<header class="nav">
+  <div class="nav-inner">
+    <a class="brand" href="../" aria-label="Molt home">Molt</a>
+    <nav aria-label="Sections">
+      <ul class="nav-links">
+        <li class="keep"><a href="../blog/">Blog</a></li>
+        <li class="keep"><a href="./" aria-current="page">Docs</a></li>
+        <li><a href="../#architecture">Architecture</a></li>
+        <li><a href="../#automodel">AutoModel</a></li>
+        <li><a href="../#features">Features</a></li>
+        <li><a href="../#quickstart">Quick Start</a></li>
+      </ul>
+    </nav>
+    <a class="nav-cta" href="https://github.com/NVIDIA-NeMo/labs-molt">GitHub</a>
+  </div>
+</header>
+
+<div class="docs">
+  <details class="docs-nav" id="guide-nav"><summary>Browse the docs</summary></details>
+  <main class="docs-main" id="guide-root">
+    <noscript><p>The docs need JavaScript. The same content is in the <a href="https://github.com/NVIDIA-NeMo/labs-molt#readme">README</a>.</p></noscript>
+  </main>
+</div>
+
+<footer class="footer">
+  <div class="footer-inner">
+    <div class="legal">
+      <span>Copyright © 2026 NVIDIA Corporation &amp; Affiliates. All rights reserved.</span>
+      <span><a href="../">Molt</a> · <a href="https://github.com/NVIDIA-NeMo/labs-molt">GitHub</a> · <a href="https://arxiv.org/abs/2607.21653">Paper</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="pages.js"></script>
+<script src="../assets/site.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"
+        integrity="sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi" crossorigin="anonymous"></script>
+<script>
+(function () {
+  var d = document, M = window.Molt, el = M.el;
+  var nav = d.getElementById('guide-nav'), root = d.getElementById('guide-root');
+  var slug = new URLSearchParams(location.search).get('p');
+  function pageLink(page, cls) { var a = el('a', cls, page[1]); a.href = '?p=' + page[0]; return a; }
+
+  // The sidebar lists every page. It starts open on wide screens, where it sits beside the text.
+  var pages = [];
+  window.MOLT_DOCS.forEach(function (group) {
+    var list = el('ul');
+    group.pages.forEach(function (page) {
+      var item = el('li'), a = pageLink(page);
+      if (page[0] === slug) a.setAttribute('aria-current', 'page');
+      item.appendChild(a);
+      list.appendChild(item);
+      pages.push(page);
+    });
+    nav.appendChild(el('h4', null, group.section));
+    nav.appendChild(list);
+  });
+  nav.open = window.matchMedia('(min-width: 900px)').matches;
+
+  if (!slug) {
+    root.appendChild(el('p', 'kicker', 'Molt'));
+    root.appendChild(el('h1', 'docs-title', 'Documentation'));
+    root.appendChild(el('p', 'sub', 'Guides, deep dives, and reference. The reference pages are generated from the source code.'));
+    window.MOLT_DOCS.forEach(function (group) {
+      var grid = el('div', 'lib');
+      group.pages.forEach(function (page) {
+        var a = pageLink(page, 'lib-item');
+        a.textContent = '';
+        a.appendChild(el('h3', null, page[1]));
+        a.appendChild(el('p', null, page[2]));
+        grid.appendChild(a);
+      });
+      root.appendChild(el('h2', 'lib-head', group.section));
+      root.appendChild(grid);
+    });
+    return;
+  }
+
+  // Only pages listed in pages.js are fetched, so ?p= cannot load other content.
+  var at = pages.map(function (page) { return page[0]; }).indexOf(slug);
+  (at < 0 ? Promise.reject() : fetch('pages/' + slug + '.md'))
+    .then(function (r) { return r.ok ? r.text() : Promise.reject(); })
+    .then(function (md) {
+      var prose = el('div', 'prose'), pager = el('div', 'pager');
+      root.appendChild(prose);
+      M.markdown(md, new URL('pages/' + slug + '.md', location.href), prose);
+      d.title = pages[at][1] + ' · Molt Docs';
+
+      // Pages link to each other by file name, which also works on GitHub. Route those links here.
+      [].forEach.call(prose.querySelectorAll('a[href$=".md"]'), function (a) {
+        var name = a.pathname.split('/').pop().slice(0, -3);
+        if (a.host === location.host) a.href = '?p=' + name;
+      });
+
+      // Longer pages get an "On this page" list of their sections.
+      var sections = prose.querySelectorAll('h2'), toc = el('p', 'toc');
+      [].forEach.call(sections, function (h) {
+        var a = el('a', null, h.textContent);
+        h.id = h.textContent.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+        a.href = '#' + h.id;
+        toc.appendChild(a);
+      });
+      if (sections.length > 2) prose.insertBefore(toc, prose.querySelector('h1').nextSibling);
+      if (location.hash) d.getElementById(location.hash.slice(1)).scrollIntoView();
+
+      pager.appendChild(at > 0 ? pageLink(pages[at - 1], 'more back') : el('span'));
+      if (at < pages.length - 1) pager.appendChild(pageLink(pages[at + 1], 'more'));
+      root.appendChild(pager);
+    }, function () {
+      var back = el('a', 'more back', 'All docs');
+      back.href = './';
+      root.appendChild(el('h1', 'docs-title', 'Page not found'));
+      root.appendChild(back);
+    });
+})();
+</script>
+</body>
+</html>

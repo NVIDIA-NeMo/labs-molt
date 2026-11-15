@@ -1,0 +1,3 @@
+# Keep the website out of code searches by ripgrep-based tools and coding agents: it only
+# repeats the source. Search it on purpose with `rg <pattern> docs/`.
+docs/

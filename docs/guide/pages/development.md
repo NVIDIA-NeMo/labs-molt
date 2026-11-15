@@ -1,0 +1,60 @@
+# Development
+
+How to check a change, keep these docs correct, and contribute.
+
+> Source: [`CONTRIBUTING.md`](https://github.com/NVIDIA-NeMo/labs-molt/blob/main/CONTRIBUTING.md) · [`docs/guide/build_reference.py`](https://github.com/NVIDIA-NeMo/labs-molt/blob/main/docs/guide/build_reference.py)
+
+## Check a change
+
+```bash
+python -m compileall -q molt examples/python tests
+pytest -q
+```
+
+Inside the container:
+
+```bash
+SKIP_BUILD=1 DOCKER_GPUS=all DOCKER_SHM_SIZE=32g \
+  bash examples/scripts/docker_run.sh "pytest -q"
+```
+
+## Keep the docs correct
+
+The [RL flags](cli-rl.md), [SFT flags](cli-sft.md), and [molt.agents API](api-agents.md) pages are
+generated from the source. After changing a flag or the agents API:
+
+```bash
+python docs/guide/build_reference.py
+```
+
+```bash
+python docs/guide/build_reference.py --check
+```
+
+The check fails if a generated page is stale, or if any page names a flag that neither CLI
+defines.
+
+## Contribute
+
+External contributions are welcome. See
+[CONTRIBUTING.md](https://github.com/NVIDIA-NeMo/labs-molt/blob/main/CONTRIBUTING.md). Every commit must be signed off with
+`git commit -s`, per the [Developer Certificate of Origin](https://developercertificate.org/).
+
+## Cite
+
+```bibtex
+@article{hu2026molt,
+  title         = {Molt: A Scalable PyTorch-Native Training Framework for Agentic Reinforcement Learning},
+  author        = {Jian Hu and Molt Contributors},
+  year          = {2026},
+  eprint        = {2607.21653},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.LG},
+  url           = {https://arxiv.org/abs/2607.21653}
+}
+```
+
+## License
+
+[Apache License 2.0](https://github.com/NVIDIA-NeMo/labs-molt/blob/main/LICENSE). Copyright and third-party attributions are in
+[NOTICE](https://github.com/NVIDIA-NeMo/labs-molt/blob/main/NOTICE) and [THIRD_PARTY_NOTICES.md](https://github.com/NVIDIA-NeMo/labs-molt/blob/main/THIRD_PARTY_NOTICES.md).
