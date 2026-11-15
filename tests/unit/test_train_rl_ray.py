@@ -4,7 +4,9 @@
 import ast
 import inspect
 
-from molt.cli.train_rl_ray import _ray_runtime_env_vars, train
+import pytest
+
+from molt.cli.train_rl_ray import _ray_runtime_env_vars, _rollout_logprobs_mode, train
 
 
 def test_ray_runtime_env_forwards_wandb_settings(monkeypatch):
@@ -30,12 +32,27 @@ def test_ray_runtime_env_omits_empty_optional_settings(monkeypatch):
     assert not {"WANDB_API_KEY", "WANDB_ENTITY", "WANDB_MODE"} & env_vars.keys()
 
 
-def test_rollout_engines_are_asked_for_post_temperature_logprobs():
-    """Every rollout records the sampled token's log-prob, and the training forward recomputes it at
-    --rollout.temperature, so mismatch/* compares like with like only when vLLM returns processed
-    (post-temperature) log-probs; its own default is raw. The engines used to get the raw default
-    unless the IS correction, score centering or a rollout-referenced KL asked otherwise. Asserted on
-    the call rather than by running it: creating engines needs vLLM and GPUs."""
+@pytest.mark.parametrize(
+    "temperature,expected",
+    [
+        (1.0, None),  # raw: the full vocabulary, untouched by temperature or any sampling mask
+        (0.8, "processed_logprobs"),
+        (1.2, "processed_logprobs"),
+    ],
+)
+def test_rollout_logprobs_mode_follows_the_training_forward(temperature, expected):
+    """The forward recomputes the sampled token's log-prob over the full vocabulary at
+    --rollout.temperature. vLLM's raw log-probs are that vocabulary before temperature, so they match
+    exactly at 1; its processed ones are after temperature but also after top_p/top_k and the
+    min_tokens stop mask, so they are the closer match only away from 1."""
+    assert _rollout_logprobs_mode(temperature) == expected
+
+
+def test_rollout_engines_are_created_with_that_mode():
+    """The engines have to be created with the mode above. They used to get vLLM's raw default unless
+    the IS correction, score centering or a rollout-referenced KL asked for the processed one, which
+    left mismatch/* comparing a pre-temperature log-prob against a post-temperature one. Asserted on
+    the call because creating engines needs vLLM and GPUs."""
     call = next(
         node
         for node in ast.walk(ast.parse(inspect.getsource(train)))
@@ -43,5 +60,5 @@ def test_rollout_engines_are_asked_for_post_temperature_logprobs():
     )
     mode = next((kw.value for kw in call.keywords if kw.arg == "logprobs_mode"), None)
 
-    assert isinstance(mode, ast.Constant), "logprobs_mode must be passed, unconditionally"
-    assert mode.value == "processed_logprobs"
+    assert isinstance(mode, ast.Call), "logprobs_mode must come from _rollout_logprobs_mode"
+    assert mode.func.id == "_rollout_logprobs_mode"
