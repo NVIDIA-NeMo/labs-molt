@@ -869,3 +869,132 @@ def test_history_thinking_kept_when_the_template_has_the_knob():
     # History renders as generated -> prefix-stable -> one segment with two actions, not one segment per turn.
     assert len(session.trajectories) == 1 and len(session.trajectories[0].action_ranges) == 2
     assert "<think>T</think>" in proc.decode(engine.prompts[1])  # the policy sees its own earlier reasoning
+
+
+def test_vlm_continuation_failure_or_disconnect_rolls_back_staged_images(monkeypatch):
+    # _tokenize_feedback stages new images onto traj before generate runs. If generate raises or the
+    # client disconnects (499), the staged multimodal state must roll back so the retry absorbs the
+    # image once rather than duplicating pixel_values against a single placeholder span.
+    monkeypatch.setattr(cs, "load_images", lambda url: ["PIL1"] if url == "u1" else ["PIL2"])
+    monkeypatch.setattr(cs, "estimate_vllm_input_expansion_delta", lambda *a, **k: 5)
+    monkeypatch.setattr(
+        cs,
+        "_tokenize_observation",
+        lambda proc, text, imgs: ([1, 2, 3], {"pixel_values": np.ones((1, 3, 4, 4))}, list(imgs)),
+    )
+
+    def fake_feedback(proc, text, new_images, traj, max_len):
+        if new_images:
+            traj.pil_images.extend(new_images)
+            traj.mm_train_inputs = {"pixel_values": np.ones((len(traj.pil_images), 3, 4, 4))}
+            traj.image_budget += 5
+            return [60, 61]
+        return [50, 51]
+
+    monkeypatch.setattr(cs, "_tokenize_feedback", fake_feedback)
+    tp = _FlakyTransport([_act([90], [-0.1]), _act([91], [-0.2]), _act([92], [-0.3])], fail_calls={1})
+    state = ChatServerState(tp, _proc(), "policy", 1000, _sampling())
+    state.open("sid", "P", "lab", None)
+    session = state.sessions["sid"]
+
+    turn1 = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "u1"}}]}]
+    _drive(state, session, turn1)
+    traj = session.trajectories[0]
+    assert traj.pil_images == ["PIL1"] and traj.image_budget == 5
+
+    turn2 = turn1 + [
+        {"role": "assistant", "content": "ACT"},
+        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "u2"}}]},
+    ]
+    with pytest.raises(RuntimeError):
+        _drive(state, session, turn2)
+    assert traj.pil_images == ["PIL1"]
+    assert traj.mm_train_inputs["pixel_values"].shape[0] == 1
+    assert traj.image_budget == 5
+
+    async def hung_up():
+        return True
+
+    with pytest.raises(cs.HTTPException) as exc_info:
+        asyncio.run(_run_turn(state, session, {"messages": turn2}, hung_up))
+    assert exc_info.value.status_code == 499
+    assert traj.pil_images == ["PIL1"]
+    assert traj.mm_train_inputs["pixel_values"].shape[0] == 1
+    assert traj.image_budget == 5
+
+    _drive(state, session, turn2)
+    assert traj.pil_images == ["PIL1", "PIL2"]
+    assert traj.mm_train_inputs["pixel_values"].shape[0] == 2
+    assert traj.image_budget == 10
+    assert traj.observation_tokens == [1, 2, 3, 90, 60, 61, 92]
+
+
+def test_vlm_continuation_overflow_keeps_committed_images_aligned_with_tokens(monkeypatch):
+    # When feedback + new image budget fills max_length exactly (remaining == 0), _tokenize_feedback
+    # absorbs the image (<= max_length) and _run_turn then exits with ("", "length") without appending
+    # delta_ids. Rolling back the uncommitted image keeps pixel_values aligned with observation_tokens.
+    monkeypatch.setattr(cs, "load_images", lambda url: ["PIL1"] if url == "u1" else ["PIL2"])
+    monkeypatch.setattr(cs, "estimate_vllm_input_expansion_delta", lambda *a, **k: 5)
+    monkeypatch.setattr(
+        cs,
+        "_tokenize_observation",
+        lambda proc, text, imgs: ([1, 2, 3], {"pixel_values": np.ones((1, 3, 4, 4))}, list(imgs)),
+    )
+
+    def fake_feedback(proc, text, new_images, traj, max_len):
+        if new_images and len(traj.observation_tokens) + 2 + traj.image_budget + 5 <= max_len:
+            traj.pil_images.extend(new_images)
+            traj.mm_train_inputs = {"pixel_values": np.ones((len(traj.pil_images), 3, 4, 4))}
+            traj.image_budget += 5
+            return [60, 61]
+        return [50, 51]
+
+    monkeypatch.setattr(cs, "_tokenize_feedback", fake_feedback)
+    # Turn 1: 3 prompt + 1 action + 5 budget = 9 (< 16). Turn 2: +2 feedback + 5 budget = 16 -> remaining == 0.
+    state, _ = _state([_act([90], [-0.1])], max_length=16)
+    state.open("sid", "P", "lab", None)
+    session = state.sessions["sid"]
+
+    turn1 = [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "u1"}}]}]
+    _drive(state, session, turn1)
+    traj = session.trajectories[0]
+
+    turn2 = turn1 + [
+        {"role": "assistant", "content": "ACT"},
+        {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "u2"}}]},
+    ]
+    assert _drive(state, session, turn2) == ("", "length")
+    assert traj.truncated is True
+    assert traj.observation_tokens == [1, 2, 3, 90]
+    assert traj.pil_images == ["PIL1"]
+    assert traj.mm_train_inputs["pixel_values"].shape[0] == 1
+    assert traj.image_budget == 5
+
+
+def test_overflow_turn_keeps_last_messages_at_committed_turn():
+    # An overflow return ("", "length") commits nothing to session.trajectories[-1], so
+    # session.last_messages must stay at the last committed turn: if the agent trims the oversized
+    # observation and retries, it still extends the running segment instead of splitting on a phantom turn.
+    a1, a2 = "A1", "A2"
+    engine = _DriftyEngine([_dact(_ids(a1), [-0.1] * len(a1)), _dact(_ids(a2), [-0.2] * len(a2))])
+    proc = _DriftyProc()
+    turn1_msgs = [{"role": "user", "content": "Q0"}]
+    turn1_len = len(_ids(proc.apply_chat_template(turn1_msgs, add_generation_prompt=True))) + len(a1)
+    short_delta_len = len(
+        _ids(proc.apply_chat_template([{"role": "user", "content": "OK"}], add_generation_prompt=True))
+    )
+
+    state = ChatServerState(engine, proc, "policy", turn1_len + short_delta_len + 8, _sampling())
+    state.open("sid", "P", "lab", None)
+    session = state.sessions["sid"]
+
+    act1, _ = _drive(state, session, turn1_msgs)
+    overflow_msgs = turn1_msgs + [{"role": "assistant", "content": act1}, {"role": "user", "content": "X" * 200}]
+    assert _drive(state, session, overflow_msgs) == ("", "length")
+    assert session.last_messages == turn1_msgs
+
+    trimmed_msgs = turn1_msgs + [{"role": "assistant", "content": act1}, {"role": "user", "content": "OK"}]
+    act2, finish2 = _drive(state, session, trimmed_msgs)
+    assert (act2, finish2) == (a2, "stop")
+    assert len(session.trajectories) == 1
+    assert len(session.trajectories[0].action_ranges) == 2
