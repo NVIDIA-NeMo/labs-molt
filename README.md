@@ -4,67 +4,57 @@
 
 **A Hugging Face-native, minimal, and scalable framework for agentic RL research.**
 
-Ray · vLLM · NeMo AutoModel — the smallest Hugging Face-native stack for
-1T-class fully-async, multimodal, multi-turn agentic RL.
+Easy to modify. Built to scale.
 
 <br/>
 
-[![Project Page](https://img.shields.io/badge/Project_Page-Website-76B900?style=for-the-badge)](https://nvidia-nemo.github.io/labs-molt/)
-[![Docs](https://img.shields.io/badge/Docs-Guide-76B900?style=for-the-badge)](https://nvidia-nemo.github.io/labs-molt/guide/)
+[![Project Page](https://img.shields.io/badge/Project_Page-76B900?style=for-the-badge)](https://nvidia-nemo.github.io/labs-molt/)
+[![Docs](https://img.shields.io/badge/Docs-0A84FF?style=for-the-badge)](https://nvidia-nemo.github.io/labs-molt/guide/)
+[![Paper](https://img.shields.io/badge/Paper-3a3a3c?style=for-the-badge)](https://www.researchgate.net/publication/409325071_Molt_A_Scalable_PyTorch-Native_Training_Framework_for_Agentic_Reinforcement_Learning)
+[![Demo Video](https://img.shields.io/badge/Demo_Video-3a3a3c?style=for-the-badge)](https://youtu.be/3DqXGFIce0o)
 
-[![License](https://img.shields.io/badge/License-Apache_2.0-2563eb?style=flat-square)](LICENSE)
-![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)
-![PyTorch](https://img.shields.io/badge/PyTorch-native-EE4C2C?style=flat-square&logo=pytorch&logoColor=white)
-![Hugging Face](https://img.shields.io/badge/Hugging_Face-native-FFD21E?style=flat-square&logo=huggingface&logoColor=black)
-![NeMo AutoModel](https://img.shields.io/badge/Training-NeMo_AutoModel-76B900?style=flat-square&logo=nvidia&logoColor=white)
-![vLLM](https://img.shields.io/badge/Rollout-vLLM-7c3aed?style=flat-square)
-![Ray](https://img.shields.io/badge/Runtime-Ray-028CF0?style=flat-square)
-![RL code](https://img.shields.io/badge/RL_code-~9.2K_LOC-10b981?style=flat-square)
-[![Tech Report](https://img.shields.io/badge/Tech_Report-ResearchGate-00CCBB?style=flat-square&logo=researchgate&logoColor=white)](https://www.researchgate.net/publication/409325071_Molt_A_Scalable_PyTorch-Native_Training_Framework_for_Agentic_Reinforcement_Learning)
-[![Demo Video](https://img.shields.io/badge/Demo_Video-YouTube-FF0000?style=flat-square&logo=youtube&logoColor=white)](https://youtu.be/3DqXGFIce0o)
-<a href="https://deepwiki.com/NVIDIA-NeMo/labs-molt"><img src="https://devin.ai/assets/deepwiki-badge.png" alt="Ask DeepWiki.com" style="height:20px;"></a>
+[![License](https://img.shields.io/badge/License-Apache_2.0-76B900?style=flat-square&labelColor=3a3a3c)](LICENSE)
+![Python](https://img.shields.io/badge/Python-3.10+-76B900?style=flat-square&labelColor=3a3a3c)
+![PyTorch](https://img.shields.io/badge/PyTorch-native-76B900?style=flat-square&labelColor=3a3a3c)
+![Hugging Face](https://img.shields.io/badge/Hugging_Face-native-76B900?style=flat-square&labelColor=3a3a3c)
+![Training](https://img.shields.io/badge/Training-NeMo_AutoModel-76B900?style=flat-square&labelColor=3a3a3c)
+![Rollout](https://img.shields.io/badge/Rollout-vLLM-76B900?style=flat-square&labelColor=3a3a3c)
+![Runtime](https://img.shields.io/badge/Runtime-Ray-76B900?style=flat-square&labelColor=3a3a3c)
+![RL code](https://img.shields.io/badge/RL_code-~9.2K_lines-76B900?style=flat-square&labelColor=3a3a3c)
+<a href="https://deepwiki.com/NVIDIA-NeMo/labs-molt"><img src="https://devin.ai/assets/deepwiki-badge.png" alt="Ask DeepWiki.com" height="20"></a>
 
 <br/>
 
-[**Project Page**](https://nvidia-nemo.github.io/labs-molt/) ·
-[**Docs**](https://nvidia-nemo.github.io/labs-molt/guide/) ·
-[**Paper**](https://www.researchgate.net/publication/409325071_Molt_A_Scalable_PyTorch-Native_Training_Framework_for_Agentic_Reinforcement_Learning) ·
-[**Video**](https://youtu.be/3DqXGFIce0o) ·
-[**News**](#-news) ·
-[**Architecture**](#-architecture) ·
-[**Why Molt**](#-why-molt) ·
-[**Installation**](#-installation) ·
-[**Quick Start**](#-quick-start) ·
-[**Comparison**](#-how-it-compares) ·
-[**Documentation**](#-documentation) ·
-[**Contributing**](#-contributing)
+<a href="https://youtu.be/3DqXGFIce0o"><img src="https://i.ytimg.com/vi/3DqXGFIce0o/maxresdefault.jpg" alt="Watch the Molt demo" width="760"/></a>
 
-| Package | SFT | RL | Runtime |
-|---|---|---|---|
-| `molt` | `molt.cli.train_sft` | `molt.cli.train_rl_ray` | vLLM |
+<br/>
+
+[News](#news) ·
+[Architecture](#architecture) ·
+[Why Molt](#why-molt) ·
+[Installation](#installation) ·
+[Quick Start](#quick-start) ·
+[Comparison](#how-it-compares) ·
+[Documentation](#documentation) ·
+[Contributing](#contributing)
 
 </div>
 
-Molt is **agentic-first**, **Hugging Face-native**, **minimal**, and **scalable**. The agent is the program;
-the trainer is a single actor; reward is any Python you write inside an `Env`
-or `ChatAgent` — graders, multi-turn tools, VLM environments, LLM-as-judge.
-Three components carry the rest — **Ray** for placement and async queues,
-**vLLM** for rollout, **NeMo AutoModel + FSDP2** for training. The model
-stays an ordinary PyTorch module in the Hugging Face layout: one checkpoint
-directory feeds both vLLM and the trainer, with no bridge to write and no
-weights to convert. That is the whole stack: **~9.2K lines of RL code that scale to
-1T-class MoE** on vLLM with TP / EP / CP — the same command runs a 4B model on
-one node and GLM-5.2 (753B) at `--fsdp.ep_size 256`, with Adam CPU offload for
-the largest actors. One agent API, one trainable actor, clean enough to read
-end-to-end.
+Agentic RL research needs two things that rarely come together: code you can read in an afternoon,
+and a trainer that reaches the largest open models. Molt is built for both.
 
-## 📰 News
+The agent is the program, and the trainer is a single actor. Three components carry the rest:
+**Ray** for placement and async queues, **vLLM** for rollout, and **NeMo AutoModel + FSDP2** for
+training. The whole RL path is about 9.2K lines, and the same command runs a 4B model on one node
+and GLM-5.2 (753B) at `--fsdp.ep_size 256`.
 
-- **2026-11** · Molt powers [REINFORCE Zero](https://github.com/hijkzzz/REINFORCE-Zero), combining trainer–inference invariance (TII) with unclipped token-level importance sampling for stable asynchronous RL through **20,000 policy updates** — see the [guide](https://nvidia-nemo.github.io/labs-molt/guide/?p=async-training) and the [kernel-alignment agent skill](.agents/skills/train-inference-consistency/SKILL.md).
+## News
 
-- **2026-09** · Molt now supports [FlashREINFORCE](https://www.alphaxiv.org/abs/2609.flashreinforce-asynchronous-rl-agentic-models), critic-free single-rollout RL with stable training beyond 6,000 steps — see the [quick start](examples/scripts/quick_start/rl_flash_reinforce_r1d_1p5b.sh).
+- **2026-11** · Molt powers [REINFORCE Zero](https://github.com/hijkzzz/REINFORCE-Zero). Trainer–inference invariance (TII) and unclipped token-level importance sampling keep asynchronous RL stable through **20,000 policy updates**. See the [guide](https://nvidia-nemo.github.io/labs-molt/guide/?p=async-training) and the [kernel-alignment agent skill](.agents/skills/train-inference-consistency/SKILL.md).
 
-## 🧩 Architecture
+- **2026-09** · [FlashREINFORCE](https://www.alphaxiv.org/abs/2609.flashreinforce-asynchronous-rl-agentic-models) lands in Molt: critic-free, single-rollout RL that trains stably beyond 6,000 steps. Start from the [quick-start script](examples/scripts/quick_start/rl_flash_reinforce_r1d_1p5b.sh).
+
+## Architecture
 
 Three boxes. One async loop.
 
@@ -72,74 +62,80 @@ Three boxes. One async loop.
   <img src="assets/molt.jpg" alt="Molt architecture: Agent · vLLM rollout · Ray async queue · single-actor AutoModel/FSDP2 trainer, fully async" width="920"/>
 </p>
 
-**Ray** owns placement and the async queue between the three boxes — that
-is the entire runtime. The contract is **token-first**: token ids,
-logprobs, action ranges, rewards, and multimodal tensors stay aligned from
-rollout to training. Anything you can compute in Python is a valid reward,
-including LLM-as-judge calls back through the same vLLM engines that drive
-rollout.
+**Ray** owns placement and the async queue between the boxes. That is the entire runtime.
 
-## ✨ Why Molt
+The contract is **token-first**: token ids, log-probs, action ranges, rewards, and multimodal
+tensors stay aligned from rollout to training. Anything you can compute in Python is a valid
+reward, including LLM-as-judge calls back through the same vLLM engines that drive rollout.
 
-| | What you get | Why it matters for research |
-|---|---|---|
-| 🤖 **Agentic-first** | One Gymnasium-aligned API — `Env.step()` or `ChatAgent.run()` — covers graders, multi-turn tools, VLM environments, and OpenAI/Anthropic-compatible servers | The agent *is* the program — iterate on environments in plain Python, the trainer stays untouched |
-| ⚙️ **Fully-async runtime** | Ray placement, async rollout queues, vLLM engines, partial rollout, weight sync | Rollout, training, and weight sync overlap — a DeepSeek-V3-class actor stays fed without bespoke infra |
-| 🔥 **Hugging Face-native, PyTorch end-to-end** | The model is an ordinary PyTorch module in the Hugging Face layout (NeMo AutoModel + FSDP2); one checkpoint directory feeds both vLLM and the trainer | Models load as released — no bridge to write, no checkpoint to convert — and you change one by editing plain PyTorch |
-| 🎯 **Single-actor simplicity** | One actor, optional KL reference — the whole RL graph fits on a page | Every gradient is explicit; every loss term is one file away |
-| 🚀 **Frontier-scale MoE** | AutoModel + FSDP2 + TP / EP / CP + Adam CPU offload, MoE-native — e.g. GLM-5.2 (753B) with `--fsdp.ep_size 256` | The 4B and 753B recipes share the entry point, the agent, and the algorithm — no rewrite between scales |
-| 🔗 **Token-first contract** | Aligned token ids, logprobs, action ranges, rewards, multimodal tensors | Multi-turn, VLM, and tool-call traces share one format end-to-end |
-| 🪶 **Small, hackable surface** | ~9.2K LOC of RL code across 3 thin layers; each mechanism (advantage, loss, token capture, training loop) is one file | The function you edit is the function that runs — read it in an afternoon, or hand it whole to a coding agent |
+## Why Molt
 
-## 📦 Installation
+<table>
+  <tr>
+    <td width="33%" valign="top"><b>Agentic-first</b><br/>One Gymnasium-aligned API, <code>Env.step()</code> or <code>ChatAgent.run()</code>, covers graders, multi-turn tools, VLM environments, and OpenAI- or Anthropic-compatible servers. Reward is any Python you write.</td>
+    <td width="33%" valign="top"><b>Hugging Face-native</b><br/>The model is an ordinary PyTorch module in the Hugging Face layout. One checkpoint directory feeds both vLLM and the trainer, with no bridge to write and no weights to convert.</td>
+    <td width="33%" valign="top"><b>Fully asynchronous</b><br/>Rollout, training, and weight sync overlap. Ray queues, vLLM engines, and partial rollout keep a DeepSeek-V3-class actor fed without bespoke infrastructure.</td>
+  </tr>
+  <tr>
+    <td width="33%" valign="top"><b>Frontier-scale MoE</b><br/>NeMo AutoModel + FSDP2 with TP / EP / CP and Adam CPU offload. The 4B and 753B recipes share the entry point, the agent, and the algorithm.</td>
+    <td width="33%" valign="top"><b>Token-first contract</b><br/>Token ids, log-probs, action ranges, rewards, and multimodal tensors stay aligned, so multi-turn, VLM, and tool-call traces share one format end to end.</td>
+    <td width="33%" valign="top"><b>Small, hackable surface</b><br/>One actor, an optional KL reference, and one file per mechanism. The function you edit is the function that runs. Read it in an afternoon, or hand it whole to a coding agent.</td>
+  </tr>
+</table>
 
-Clone the repo: the launch scripts, agents and recipes live here, and the container mounts this checkout.
+## Installation
+
+Clone the repository first. The launch scripts, agents, and recipes live in it, and the container
+mounts this checkout.
 
 ```bash
 git clone https://github.com/NVIDIA-NeMo/labs-molt.git
 cd labs-molt
 ```
 
-### 🐳 Container (recommended)
+### Container (recommended)
 
-`dockerfile/Dockerfile` bakes the whole CUDA-13 stack (torch 2.14, vLLM, TransformerEngine, flash-attn,
-mamba, DeepEP, NeMo AutoModel) for A100 / H100 / H200 / B200 / GB200. SFT and RL run in it as-is.
+`dockerfile/Dockerfile` bakes the whole CUDA 13 stack (torch 2.14, vLLM, TransformerEngine, flash-attn,
+mamba, DeepEP, NeMo AutoModel) for A100, H100, H200, B200, and GB200. SFT and RL run in it as-is.
 
 ```bash
 docker pull hijkzzz/molt:latest                                 # or a pinned release: hijkzzz/molt:0.1.10
 docker build -f dockerfile/Dockerfile -t hijkzzz/molt:latest .  # to change the CUDA / vLLM / AutoModel pins
 ```
 
-Tags from 0.1.9 are multi-arch (amd64 + arm64): the same pull works on x86 and on Grace-Blackwell hosts,
-and the one Dockerfile builds both (`docker buildx build --platform linux/amd64,linux/arm64 --push` to
-publish a tag).
+Tags from 0.1.9 are multi-arch (amd64 and arm64), so the same pull works on x86 and on
+Grace-Blackwell hosts. To publish a tag for both, use
+`docker buildx build --platform linux/amd64,linux/arm64 --push`.
 
-### 💻 Local install
+### Local install
 
-For development outside the container. It pulls the exact git-pinned AutoModel this repo is validated
-against (`setup.py`, `AUTOMODEL`), so R3 routing replay and Muon work out of the box.
+For development outside the container. It installs the exact git-pinned AutoModel this repository
+is validated against (`setup.py`, `AUTOMODEL`), so R3 routing replay and Muon work out of the box.
 
 ```bash
 # the vLLM pin is a main-branch commit: its wheels come from vLLM's per-commit index, not PyPI
 pip install -e ".[vllm]" --extra-index-url https://wheels.vllm.ai/c410543d9ffff03f5f6c4a8c0ae1d3ad082c4a15
 ```
 
-Requires CUDA 13 (`torch==2.14.0+cu130`); a CUDA-12 environment will not work. With a host driver older
-than 580, use the container: it ships the CUDA forward-compatibility layer and enables it automatically.
+CUDA 13 is required (`torch==2.14.0+cu130`). A CUDA 12 environment will not work. With a host driver
+older than 580, use the container: it ships the CUDA forward-compatibility layer and enables it
+automatically.
 
-The `molt-rl` package on PyPI cannot carry the git-pinned AutoModel, so it lags the pin and is not a
-supported install path right now. Use the container or the local install.
+The `molt-rl` package on PyPI cannot carry the git-pinned AutoModel, so it is not a supported
+install path. Use the container or the local install.
 
-### 🪶 Optional backend: AutoModel-Slim
+### Optional backend: AutoModel-Slim
 
 The default is upstream NeMo AutoModel, pinned in `setup.py`.
 [`automodel-slim`](https://github.com/NVIDIA-NeMo/labs-molt/tree/automodel-slim) is Molt's own trimmed copy
 of that pinned commit, with the same package name, import paths, and API. To opt in, see
 [Installation](https://nvidia-nemo.github.io/labs-molt/guide/?p=installation) in the guide.
 
-## 🚀 Quick Start
+## Quick Start
 
-### 📘 SFT
+One command per workflow. Run them from the repository root, inside the container.
+
+### SFT
 
 ```bash
 torchrun --standalone --nproc_per_node=8 -m molt.cli.train_sft \
@@ -151,9 +147,9 @@ torchrun --standalone --nproc_per_node=8 -m molt.cli.train_sft \
   --fsdp.attn_implementation te
 ```
 
-SFT uses the same AutoModel/FSDP2 model-loading path as RL.
+SFT uses the same AutoModel and FSDP2 model-loading path as RL.
 
-### 🎮 RL
+### RL
 
 ```bash
 python3 -m molt.cli.train_rl_ray \
@@ -172,17 +168,18 @@ python3 -m molt.cli.train_rl_ray \
   --ckpt.output_dir ./ckpt/rl
 ```
 
-The switches you are most likely to reach for next, such as sample groups, KL, asynchronous
-training, IS correction, and evaluation, are in the [Quick start](https://nvidia-nemo.github.io/labs-molt/guide/?p=quick-start) guide. Every
-flag is in the [RL flags](https://nvidia-nemo.github.io/labs-molt/guide/?p=cli-rl) reference.
+Sample groups, KL, asynchronous training, IS correction, and evaluation are each a flag or two
+away. The [Quick start](https://nvidia-nemo.github.io/labs-molt/guide/?p=quick-start) guide lists
+them, and the [RL flags](https://nvidia-nemo.github.io/labs-molt/guide/?p=cli-rl) reference has
+every flag.
 
-## 📊 How It Compares
+## How It Compares
 
-The RL ecosystem optimizes for breadth. Molt optimizes for
-**agentic research velocity at scale** — the smallest Hugging Face-native stack
-that still drives fully-async agentic RL at frontier MoE scale on vLLM.
+The RL ecosystem optimizes for breadth. Molt optimizes for **agentic research velocity at scale**:
+the smallest Hugging Face-native stack that still drives fully-async agentic RL at frontier MoE
+scale.
 
-|  | **🦋 Molt** | OpenRLHF | verl | slime |
+|  | **Molt** | OpenRLHF | verl | slime |
 |---|:-:|:-:|:-:|:-:|
 | Training backend | **PyTorch / FSDP2 + NeMo AutoModel** | DeepSpeed ZeRO-3 | FSDP / FSDP2 / Megatron | Megatron (FSDP exp.) |
 | Hugging Face models | **native** | native | native on FSDP; bridged on Megatron | bridged (rebuilt in Megatron, weights mapped both ways) |
@@ -195,10 +192,8 @@ that still drives fully-async agentic RL at frontier MoE scale on vLLM.
 | RL code size¹ | **~9.2K LOC** | ~7.2K | ~62K | ~25K |
 | Design center | **agentic-first research** | RLHF coverage | production breadth | Megatron throughput |
 
-**One framework, one job.** Molt is the smallest Hugging Face-native
-stack that takes a checkpoint from SFT to frontier-scale agentic RL on
-vLLM, with no bridge in between. Read every line that touches your
-gradients, in plain PyTorch.
+**One framework, one job.** Molt takes a checkpoint from SFT to frontier-scale agentic RL on vLLM,
+with no bridge in between. Read every line that touches your gradients, in plain PyTorch.
 
 <details>
 <summary>¹ How the RL-code line counts were measured</summary>
@@ -221,9 +216,9 @@ gradients, in plain PyTorch.
 
 </details>
 
-## 📖 Documentation
+## Documentation
 
-The [guide](https://nvidia-nemo.github.io/labs-molt/guide/) covers each area in depth. This README stays the overview.
+This README is the overview. The [guide](https://nvidia-nemo.github.io/labs-molt/guide/) goes deep on each area.
 
 | Area | Pages |
 |---|---|
@@ -234,37 +229,36 @@ The [guide](https://nvidia-nemo.github.io/labs-molt/guide/) covers each area in 
 
 The pages are Markdown files in [`docs/guide/pages/`](docs/guide/pages).
 
-## ✅ Validation
+## Validation
 
-Fast local checks:
+Locally:
 
 ```bash
 python -m compileall -q molt examples/python tests
 pytest -q
 ```
 
-Container checks:
+In the container:
 
 ```bash
 SKIP_BUILD=1 DOCKER_GPUS=all DOCKER_SHM_SIZE=32g \
   bash examples/scripts/docker_run.sh "pytest -q"
 ```
 
-## 🙏 Acknowledgement
+## Acknowledgement
 
-Molt is based on OpenRLHF and keeps its Python package layout where
-practical. The active architecture is intentionally minimal: a
-Gymnasium-aligned agent (`Env` / `ChatAgent`), a single trainable actor,
-optional KL reference workers, vLLM generation, and online policy
-optimization — all on PyTorch + AutoModel.
+Molt builds on [OpenRLHF](https://github.com/OpenRLHF/OpenRLHF) and keeps its Python package
+layout where practical. The architecture is deliberately minimal: a Gymnasium-aligned agent
+(`Env` or `ChatAgent`), a single trainable actor, optional KL reference workers, vLLM generation,
+and online policy optimization, all on PyTorch and NeMo AutoModel.
 
-## 📚 Citation
+## Citation
 
 If you use Molt in your research, please cite:
 
 ```bibtex
 @techreport{hu2026molt,
-  title       = {Molt: A Scalable PyTorch-Native Training Framework for Agentic Reinforcement Learning},
+  title       = {Molt: A Hugging Face-Native, Minimal, and Scalable Framework for Agentic Reinforcement Learning},
   author      = {Jian Hu and Molt Contributors},
   institution = {NVIDIA},
   year        = {2026},
@@ -272,13 +266,13 @@ If you use Molt in your research, please cite:
 }
 ```
 
-## 🤝 Contributing
+## Contributing
 
-External contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md).
-All commits must be signed off (`git commit -s`) per the
+External contributions are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md). Every commit must be
+signed off with `git commit -s`, per the
 [Developer Certificate of Origin (DCO)](https://developercertificate.org/).
 
-## 📄 License
+## License
 
-[Apache License 2.0](LICENSE). Copyright and third-party attributions:
-[NOTICE](NOTICE) and [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+[Apache License 2.0](LICENSE). Copyright and third-party attributions are in [NOTICE](NOTICE) and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
