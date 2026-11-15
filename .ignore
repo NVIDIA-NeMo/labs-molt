@@ -1,3 +1,10 @@
-# Keep the website out of code searches by ripgrep-based tools and coding agents: it only
-# repeats the source. Search it on purpose with `rg <pattern> docs/`.
-docs/
+# Keep website plumbing and generated pages out of code searches by ripgrep-based tools and
+# coding agents: they only repeat the source. The hand-written guide pages stay searchable.
+docs/index.html
+docs/assets/
+docs/blog/
+docs/guide/index.html
+docs/guide/pages.js
+docs/guide/pages/cli-rl.md
+docs/guide/pages/cli-sft.md
+docs/guide/pages/api-agents.md

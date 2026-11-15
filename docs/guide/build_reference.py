@@ -38,23 +38,26 @@ flags = set()  # every option string either CLI accepts
 # ---- CLI flags: run each entry point's ``__main__`` block up to ``parse_args`` and read the parser.
 for page, module in [("cli-rl", "molt.cli.train_rl_ray"), ("cli-sft", "molt.cli.train_sft")]:
     src = module.replace(".", "/") + ".py"
-    main = next(n for n in ast.parse((REPO / src).read_text()).body if isinstance(n, ast.If) and "__main__" in ast.unparse(n))
+    tree = ast.parse((REPO / src).read_text())
+    main = next(n for n in tree.body if isinstance(n, ast.If) and "__main__" in ast.unparse(n))
     setup = main.body[: next(i for i, s in enumerate(main.body) if "parse_args" in ast.unparse(s))]
     scope = {"argparse": argparse}
     exec(compile(ast.Module(setup, []), src, "exec"), scope)
 
-    groups = {}  # flag prefix -> table rows, in declaration order
+    groups = {}  # section heading -> table rows, in declaration order
     for action in scope["parser"]._actions[1:]:  # [0] is --help
         flags.update(action.option_strings)
         default = "" if action.default is None else f"`{action.default!r}`".replace("'", '"')
         default = re.sub(r"\d{4}T\d\d:\d\d", "<MMDD>T<HH:MM>", default)  # the wandb run name embeds the start time
         text = " ".join((action.help or "").replace("%(default)s", str(action.default)).split())
-        if action.choices:
+        # Help text is prose, not Markdown: outside its `code` spans, escape what Markdown would eat.
+        text = "`".join(p if i % 2 else re.sub(r"([*~|<>])", r"\\\1", p) for i, p in enumerate(text.split("`")))
+        if action.choices and not all(str(c) in text for c in action.choices):
             text += " Choices: " + ", ".join(f"`{c}`" for c in action.choices) + "."
         names = " / ".join(f"`{o}`" for o in action.option_strings)
         name = action.option_strings[0]
         heading = f"`{name.split('.')[0]}.*`" if "." in name else "Other flags"
-        groups.setdefault(heading, []).append(f"| {names} | {default} | {text.replace('|', chr(92) + '|')} |")
+        groups.setdefault(heading, []).append(f"| {names} | {default} | {text} |")
 
     lines = [f"# `python -m {module}`", "", NOTE.format(src)]
     for heading, rows in groups.items():
@@ -63,7 +66,9 @@ for page, module in [("cli-rl", "molt.cli.train_rl_ray"), ("cli-sft", "molt.cli.
 
 # ---- Python API: the classes molt.agents exports, with their fields, methods, and docstrings.
 init = ast.parse((REPO / "molt/agents/__init__.py").read_text())
-exported = next(ast.literal_eval(n.value) for n in init.body if isinstance(n, ast.Assign) and n.targets[0].id == "__all__")
+exported = next(
+    ast.literal_eval(n.value) for n in init.body if isinstance(n, ast.Assign) and n.targets[0].id == "__all__"
+)
 lines = ["# `molt.agents`", "", NOTE.format("molt/agents/"), "```text", ast.get_docstring(init), "```", ""]
 for src in ["molt/agents/base.py", "molt/agents/chat_agent.py"]:
     source = (REPO / src).read_text().splitlines()
@@ -78,16 +83,18 @@ for src in ["molt/agents/base.py", "molt/agents/chat_agent.py"]:
         if fields:
             lines += ["| Field | Type | Default | Note |", "|---|---|---|---|"]
             for f in fields:
+                kind = ast.unparse(f.annotation).replace("|", "\\|")
                 default = f"`{ast.unparse(f.value)}`" if f.value else ""
                 note = source[f.end_lineno - 1].partition("#")[2].strip()  # the trailing comment, if any
-                lines.append(f"| `{f.target.id}` | `{ast.unparse(f.annotation).replace('|', chr(92) + '|')}` | {default} | {note} |")
+                lines.append(f"| `{f.target.id}` | `{kind}` | {default} | {note} |")
             lines.append("")
         for fn in cls.body:
             if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)) or fn.name.startswith("_"):
                 continue
             prefix = "async def" if isinstance(fn, ast.AsyncFunctionDef) else "def"
             returns = f" -> {ast.unparse(fn.returns)}" if fn.returns else ""
-            lines += [f"### `{cls.name}.{fn.name}`", "", "```python", f"{prefix} {fn.name}({ast.unparse(fn.args)}){returns}", "```", ""]
+            signature = f"{prefix} {fn.name}({ast.unparse(fn.args)}){returns}"
+            lines += [f"### `{cls.name}.{fn.name}`", "", "```python", signature, "```", ""]
             if ast.get_docstring(fn):
                 lines += ["```text", ast.get_docstring(fn), "```", ""]
 pages["api-agents"] = "\n".join(lines)
@@ -100,10 +107,11 @@ if "--check" not in sys.argv:
 
 # The guide names this flag as not yet on main: its kernels are being upstreamed.
 flags.add("--train.batch_invariant")
-problems = [f"{name}.md is stale: rerun this script" for name, text in pages.items() if (PAGES / f"{name}.md").read_text() != text]
+stale = [name for name, text in pages.items() if (PAGES / f"{name}.md").read_text() != text]
+problems = [f"{name}.md is stale: rerun this script" for name in stale]
 for path in sorted(PAGES.glob("*.md")):
     # A trailing * is a wildcard such as --actor.lora_*, not a flag.
-    for flag in sorted(set(re.findall(r"--[a-z_]+(?:\.[a-z_0-9]+)+(?![\w*])", path.read_text())) - flags):
-        problems.append(f"{path.name} names {flag}, which neither CLI defines")
+    named = set(re.findall(r"--[a-z_]+(?:\.[a-z_0-9]+)+(?![\w*])", path.read_text()))
+    problems += [f"{path.name} names {flag}, which neither CLI defines" for flag in sorted(named - flags)]
 print("\n".join(problems) or "reference pages are current; every flag named in the guide exists")
 sys.exit(bool(problems))

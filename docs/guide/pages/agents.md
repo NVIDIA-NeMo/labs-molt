@@ -92,6 +92,10 @@ msg = await client.messages.create(
 )
 ```
 
+The server is launched on loopback under the session URL. External callers, such as browser
+automation or an eval harness, reach the same engine through `/v1/chat/completions` or
+`/v1/messages`.
+
 Chat agents need `--data.apply_chat_template`: the dataset rows are handed to the server as chat
 messages and rendered once with the model's own template. An agent that stops on its own turn cap
 should return `Result(truncated=True)`. The fields of `ChatContext` are listed in the
@@ -136,6 +140,12 @@ and every segment still contributes its generated tokens to the gradient.
 
 No agent-side change is needed. This also covers external harnesses whose compaction logic Molt
 cannot see.
+
+## Chat templates
+
+Assistant spans, for the SFT loss mask and for stitching multi-turn rollouts, are derived from the
+model's own chat template. No markers are hard-coded. This is verified on ChatML (Qwen3.x,
+Nemotron-Omni), Kimi-K2.6, GLM, Gemma, and DeepSeek.
 
 ## Reference agents
 

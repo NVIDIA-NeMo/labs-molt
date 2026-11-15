@@ -76,6 +76,8 @@ The advantage becomes `-kl_coef * (log pi_student - log pi_teacher)` on the stud
 There is no scalar reward, no group baseline, and no whitening.
 
 - The teacher must share the student's tokenizer and processor, so the per-token log-probs align.
+  It loads inference-only, colocated with `--train.colocate_fsdp_models` or on its own
+  `--ref.num_nodes`.
 - Without `--train.agent_path`, Molt uses the built-in single-turn generator in
   `molt/agents/distill_agent.py`. To distill a multi-turn tool-use distribution, point
   `--train.agent_path` at the task's real agent. Its reward is ignored.

@@ -27,4 +27,6 @@ policy.
   every weight sync, so it tracks the updating policy. Only the small MTP block stays at its
   checkpoint weights.
 - **Model support is on the vLLM side.** Qwen3.6-MoE works out of the box. vLLM raises an error at
-  engine start if the setting is enabled on a checkpoint without a supported MTP head.
+  engine start if the setting is enabled on a checkpoint without a supported MTP head. The
+  official Nemotron-Nano-Omni checkpoint ships none, so MTP rollout is unavailable for it until
+  upstream adds support.

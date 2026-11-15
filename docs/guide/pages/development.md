@@ -40,17 +40,18 @@ External contributions are welcome. See
 [CONTRIBUTING.md](https://github.com/NVIDIA-NeMo/labs-molt/blob/main/CONTRIBUTING.md). Every commit must be signed off with
 `git commit -s`, per the [Developer Certificate of Origin](https://developercertificate.org/).
 
+Model and parallel-stack changes to AutoModel-Slim go to the `automodel-slim` branch as PRs, with
+the same `cicd` label check as this repository.
+
 ## Cite
 
 ```bibtex
-@article{hu2026molt,
-  title         = {Molt: A Scalable PyTorch-Native Training Framework for Agentic Reinforcement Learning},
-  author        = {Jian Hu and Molt Contributors},
-  year          = {2026},
-  eprint        = {2607.21653},
-  archivePrefix = {arXiv},
-  primaryClass  = {cs.LG},
-  url           = {https://arxiv.org/abs/2607.21653}
+@techreport{hu2026molt,
+  title       = {Molt: A Scalable PyTorch-Native Training Framework for Agentic Reinforcement Learning},
+  author      = {Jian Hu and Molt Contributors},
+  institution = {NVIDIA},
+  year        = {2026},
+  url         = {https://www.researchgate.net/publication/409325071_Molt_A_Scalable_PyTorch-Native_Training_Framework_for_Agentic_Reinforcement_Learning}
 }
 ```
 

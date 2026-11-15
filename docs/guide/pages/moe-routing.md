@@ -10,7 +10,7 @@ breaks the assumption behind importance sampling. Molt closes the gap at three l
 | Level | Default | What it fixes |
 |---|---|---|
 | fp32 router precision | on | The two sides agree on the gate weights |
-| Routing replay (R3) | on in the MoE recipes | The trainer replays the engine's expert selection |
+| Routing replay (R3) | on in the Qwen3.5-MoE recipes | The trainer replays the engine's expert selection |
 | Router freeze | off | The router cannot drift at all |
 
 ## Router precision
@@ -34,6 +34,7 @@ selection ([arXiv:2510.11370](https://arxiv.org/abs/2510.11370)).
   its natural selection.
 - **It cannot be combined with `--train.partial_rollout_enable`**, because vLLM frees the routing
   on preemption.
+- **It needs AutoModel's `RouterReplay`**, in `nemo_automodel.components.moe.router_replay`.
 
 ## Router freeze
 
