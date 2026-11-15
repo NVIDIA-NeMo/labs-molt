@@ -34,6 +34,7 @@ selection ([arXiv:2510.11370](https://arxiv.org/abs/2510.11370)).
   its natural selection.
 - **It cannot be combined with `--train.partial_rollout_enable`**, because vLLM frees the routing
   on preemption.
+- **It needs AutoModel's `RouterReplay`**, in `nemo_automodel.components.moe.router_replay`.
 
 ## Router freeze
 

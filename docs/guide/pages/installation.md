@@ -61,7 +61,9 @@ and API are the same, so Molt's code does not change when you switch.
 | Image | `docker build --build-arg MOLT_AUTOMODEL=slim -f dockerfile/Dockerfile -t molt:slim .` |
 | Slurm recipes | `EXTRA_PYTHONPATH=/path/to/automodel-slim`, where a checkout wins over the baked-in package |
 
-The branch README lists the kept and removed families and the parity results against upstream.
+`setup.py` holds both pins. The slim install follows the branch head, so a merge there is live on
+the next image build or reinstall. The branch README lists the kept and removed families and the
+parity results against upstream.
 
 ## Next
 

@@ -88,3 +88,11 @@ the variance.
 ```
 
 `examples/scripts/quick_start/rl_flash_reinforce_r1d_1p5b.sh` runs it on one node.
+
+## References
+
+- **TIS**: truncated importance sampling of the train and rollout ratio.
+- **IcePop**: token-level masking of ratios outside the band.
+- **MIS**: masked importance sampling at the sequence level (Yingru Li), which motivates the
+  `seq` and `geo` filters.
+- **Score Centering**: [arXiv 2609.20807](https://arxiv.org/abs/2609.20807).

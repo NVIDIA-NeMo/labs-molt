@@ -16,9 +16,22 @@ FSDP2 shards the storage of every parameter. Three forms of parallelism divide t
 | Context | `--fsdp.cp_size 8` | One long sequence | Sequences reach 32K tokens and beyond |
 | Optimizer offload | `--fsdp.offload optimizer` | Moves the Adam state to CPU memory | GPU memory is the limit |
 
-Context parallelism is delegated to AutoModel, so each model gets the sharding its attention needs.
-Vision towers and routing replay shard with the sequence, so `--fsdp.cp_size` composes with
-`--data.image_key` and `--train.routing_replay`.
+Context parallelism is delegated to AutoModel, so each model gets the sharding its attention needs:
+round-robin for hybrid SSM and linear-attention models such as Nemotron-Omni and Qwen3.5-MoE, and
+flat THD streams for sparse-attention models such as GLM-5.2. Vision towers and routing replay
+shard with the sequence, so `--fsdp.cp_size` composes with `--data.image_key` and
+`--train.routing_replay`. Sample packing, `--fsdp.packing_samples`, is text-only and off by
+default. Under context parallelism it takes the THD path.
+
+## Model backend and optimizer
+
+NeMo AutoModel is the primary path: native TP, EP, and CP, a custom MoE and EP parallelizer, and
+TransformerEngine fused attention. The Hugging Face `transformers` path is a fallback that
+AutoModel drops to only when a model has no native class. It supports text, `flash_attention_2`,
+and packing, without TP, EP, or CP.
+
+`--actor.optim adam` is the default and the recommendation. `muon` is experimental: it runs
+distributed, but has shown no consistent win over `adam`.
 
 ## Rollout engines
 

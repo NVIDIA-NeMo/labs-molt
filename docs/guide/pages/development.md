@@ -40,6 +40,9 @@ External contributions are welcome. See
 [CONTRIBUTING.md](https://github.com/NVIDIA-NeMo/labs-molt/blob/main/CONTRIBUTING.md). Every commit must be signed off with
 `git commit -s`, per the [Developer Certificate of Origin](https://developercertificate.org/).
 
+Model and parallel-stack changes to AutoModel-Slim go to the `automodel-slim` branch as PRs, with
+the same `cicd` label check as this repository.
+
 ## Cite
 
 ```bibtex
