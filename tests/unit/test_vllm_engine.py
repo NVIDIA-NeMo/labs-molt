@@ -16,7 +16,7 @@
 import inspect
 import sys
 from dataclasses import dataclass
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 
 def _install_vllm_test_stub():
@@ -129,3 +129,26 @@ def test_rollout_ray_actor_init_is_synchronous():
     """Ray actor constructors are synchronous; an async __init__ would not be awaited."""
     actor_cls = getattr(vllm_engine.RolloutRayActor, "__ray_actor_class__", vllm_engine.RolloutRayActor)
     assert not inspect.iscoroutinefunction(actor_cls.__init__)
+
+
+def test_create_vllm_engines_asks_vllm_for_post_temperature_logprobs(monkeypatch):
+    """Every rollout records the sampled token's log-prob, and the training forward recomputes it at
+    --rollout.temperature: mismatch/* compares the two, and the IS correction / score centering / a
+    rollout-referenced KL consume them. vLLM's own default is RAW (pre-temperature) log-probs, so the
+    engine has to be created with processed_logprobs whatever the rest of the configuration is."""
+    captured = {}
+
+    def _spawn(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(ready=SimpleNamespace(remote=lambda: None))
+
+    monkeypatch.setattr(
+        vllm_engine, "RolloutRayActor", SimpleNamespace(options=lambda **_: SimpleNamespace(remote=_spawn))
+    )
+    monkeypatch.setattr(vllm_engine, "placement_group", lambda *a, **k: SimpleNamespace(ready=lambda: None))
+    monkeypatch.setattr(vllm_engine, "PlacementGroupSchedulingStrategy", lambda **k: None)
+    monkeypatch.setattr(vllm_engine.ray, "get", lambda *a, **k: None)
+
+    vllm_engine.create_vllm_engines(1, 1, "model-path", 0, False, True, 4096)
+
+    assert captured["logprobs_mode"] == "processed_logprobs"

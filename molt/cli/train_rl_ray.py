@@ -93,11 +93,11 @@ def train(args):
             args.vllm.enforce_eager,
             max_len,
             args.vllm.gpu_memory_utilization,
-            "processed_logprobs"
-            if args.algo.advantage.is_correction_level != "off"
-            or args.algo.advantage.score_centering_top_k
-            or (args.algo.kl.init_coef > 0 and args.algo.kl.ref == "rollout")
-            else None,
+            # Every rollout records the sampled token's log-prob, and the training forward recomputes
+            # it at --rollout.temperature: post-temperature engine log-probs are what makes the two
+            # comparable, for the IS correction / score centering / a rollout-referenced KL that read
+            # them back and for the mismatch/* metrics logged from them on every run.
+            logprobs_mode="processed_logprobs",
             max_images_per_prompt=getattr(args.data, "max_images_per_prompt", 0),
             mm_encoder_attn_backend=args.vllm.mm_encoder_attn_backend,
             gdn_prefill_backend=args.vllm.gdn_prefill_backend,
