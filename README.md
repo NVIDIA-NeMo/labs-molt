@@ -146,7 +146,8 @@ torchrun --standalone --nproc_per_node=8 -m molt.cli.train_sft \
   --fsdp.attn_implementation te
 ```
 
-SFT uses the same AutoModel and FSDP2 model-loading path as RL.
+SFT uses the same AutoModel and FSDP2 model-loading path as RL. Example script:
+[`examples/scripts/quick_start/sft_qwen3_4b.sh`](examples/scripts/quick_start/sft_qwen3_4b.sh).
 
 ### 🎮 RL
 
@@ -166,6 +167,9 @@ python3 -m molt.cli.train_rl_ray \
   --fsdp.attn_implementation te \
   --ckpt.output_dir ./ckpt/rl
 ```
+
+Example script: [`examples/scripts/quick_start/rl_qwen3_4b.sh`](examples/scripts/quick_start/rl_qwen3_4b.sh).
+Every launch script, single-node and Slurm, is in [`examples/scripts/`](examples/scripts).
 
 Sample groups, KL, asynchronous training, IS correction, and evaluation are each a flag or two
 away. The [Quick start](https://nvidia-nemo.github.io/labs-molt/guide/?p=quick-start) guide lists
