@@ -25,6 +25,7 @@ with the per-token importance ratio `pi_train / pi_rollout`. Three flags control
 | `level token`, `mode clip` | Per-token weight clamp |
 | `level geo`, `mode mask` | Sequence masking by geometric mean, the recipe default |
 | `level seq`, `mode mask` | Sequence masking by the product of ratios |
+| `level token`, threshold `inf` | Unclipped token-level importance sampling, the REINFORCE Zero recipe |
 
 ## Score centering
 
@@ -88,6 +89,29 @@ the variance.
 ```
 
 `examples/scripts/quick_start/rl_flash_reinforce_r1d_1p5b.sh` runs it on one node.
+
+## REINFORCE Zero
+
+[REINFORCE Zero](https://github.com/hijkzzz/REINFORCE-Zero) is the asynchronous recipe built on
+Molt. Rollout and trainer disagree for two reasons: older weights and different GPU kernels. The
+recipe aligns the kernels and corrects the weight lag with unclipped token-level importance
+sampling.
+
+```bash
+--algo.advantage.estimator dr_grpo \
+--algo.advantage.is_correction_level token \
+--algo.advantage.is_correction_threshold inf \
+--actor.loss_agg_mode seq-mean-token-mean \
+--train.force_on_policy
+```
+
+A threshold of `inf` leaves the band open: no token is masked or clipped, and each one carries its
+exact ratio.
+
+Kernel alignment ships as an agent skill,
+[`.agents/skills/train-inference-consistency`](https://github.com/NVIDIA-NeMo/labs-molt/blob/main/.agents/skills/train-inference-consistency/SKILL.md).
+The aligned kernels behind `--train.batch_invariant` are still being upstreamed. `main` ships the
+metrics, rollout dump and replay, and the skill.
 
 ## References
 

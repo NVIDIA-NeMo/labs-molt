@@ -32,7 +32,8 @@ on preemption.
 
 Every action token keeps the log-probability it was sampled with. That is what makes a sample
 from an older policy usable: [IS correction](is-correction.md) reweights or filters tokens by the
-ratio of the current to the recorded probability.
+ratio of the current to the recorded probability. That page also has the two asynchronous
+recipes, FlashREINFORCE and REINFORCE Zero.
 
 ## Measure the mismatch
 
@@ -46,23 +47,3 @@ ratio of the current to the recorded probability.
 
 `bitwise_frac` is only meaningful in a strictly synchronous run with `--train.force_sync_mode`.
 Under any lag the rollout came from older weights, and the fraction reads about 1.
-
-## Recipe: REINFORCE Zero
-
-[REINFORCE Zero](https://github.com/hijkzzz/REINFORCE-Zero) is the asynchronous recipe built on
-Molt. Rollout and trainer disagree for two reasons: older weights and different GPU kernels. The
-recipe aligns the kernels and corrects the weight lag with unclipped token-level importance
-sampling.
-
-```bash
---algo.advantage.estimator dr_grpo \
---algo.advantage.is_correction_level token \
---algo.advantage.is_correction_threshold inf \
---actor.loss_agg_mode seq-mean-token-mean \
---train.force_on_policy
-```
-
-Kernel alignment ships as an agent skill,
-[`.agents/skills/train-inference-consistency`](https://github.com/NVIDIA-NeMo/labs-molt/blob/main/.agents/skills/train-inference-consistency/SKILL.md).
-The aligned kernels behind `--train.batch_invariant` are still being upstreamed. `main` ships the
-metrics, rollout dump and replay, and the skill.
