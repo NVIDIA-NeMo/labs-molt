@@ -30,6 +30,14 @@ Gemini CLI read directly; `.claude/skills` (Claude Code) and `.codex/skills` (ol
 are symlinks to that directory, and `CLAUDE.md` is a symlink to this file. A new skill is just its
 directory under `.agents/skills/`.
 
+## Docs
+
+`docs/` is the public website: homepage, blog, and guide. Do not read or search it for code work.
+It only repeats the source, and its reference pages are generated from it, so it adds nothing to
+a code change and crowds the context. `.ignore` keeps it out of ripgrep searches by default.
+Open it only for a docs task. After changing a CLI flag or `molt.agents`, run
+`python docs/guide/build_reference.py`.
+
 ## Workflow
 
 - Reviews report findings only; fixes ship as one minimal diff per issue
