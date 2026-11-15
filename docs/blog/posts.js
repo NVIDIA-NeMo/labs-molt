@@ -8,7 +8,7 @@ window.MOLT_POSTS = [
     title: "Molt powers REINFORCE Zero",
     date: "2026-11",
     tag: "Research",
-    summary: "Trainer–inference invariance (TII) meets unclipped token-level importance sampling for stable asynchronous RL.",
+    summary: "Trainer–inference invariance (TII) meets unclipped token-level importance sampling for stable asynchronous RL. Kernel alignment ships as the train-inference-consistency agent skill.",
     url: "https://hijkzzz.github.io/REINFORCE-Zero/",
     tone: "green",
     cover: ["20,000", "policy updates, stable and asynchronous"]

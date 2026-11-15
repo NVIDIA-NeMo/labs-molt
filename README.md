@@ -55,7 +55,7 @@ MoE** with TP / EP / CP: the entry point that trains a 4B model on one node also
 
 ## 📰 News
 
-- **2026-11** · Molt powers [REINFORCE Zero](https://github.com/hijkzzz/REINFORCE-Zero). Trainer–inference invariance (TII) and unclipped token-level importance sampling keep asynchronous RL stable through **20,000 policy updates**. See the [guide](https://nvidia-nemo.github.io/labs-molt/guide/?p=async-training) and the [kernel-alignment agent skill](.agents/skills/train-inference-consistency/SKILL.md).
+- **2026-11** · Molt powers [REINFORCE Zero](https://github.com/hijkzzz/REINFORCE-Zero). Trainer–inference invariance (TII) and unclipped token-level importance sampling keep asynchronous RL stable through **20,000 policy updates**. See the [guide](https://nvidia-nemo.github.io/labs-molt/guide/?p=is-correction#reinforce-zero) and the [kernel-alignment agent skill](.agents/skills/train-inference-consistency/SKILL.md).
 
 - **2026-09** · [FlashREINFORCE](https://www.alphaxiv.org/abs/2609.flashreinforce-asynchronous-rl-agentic-models) lands in Molt: critic-free, single-rollout RL that trains stably beyond 6,000 steps. Start from the [quick-start script](examples/scripts/quick_start/rl_flash_reinforce_r1d_1p5b.sh).
 
