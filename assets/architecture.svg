@@ -1,0 +1,202 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 510" width="1000" height="510" role="img" aria-labelledby="title desc">
+  <title id="title">Molt architecture: one asynchronous loop, and how it scales</title>
+  <desc id="desc">Inside the Ray runtime, agent workers send requests to the vLLM engines (1) and receive tokens and log-probs (2). They call tools and the model in turn, then return a reward (3). Finished trajectories enter a queue (4), the trainer takes batches from it (5), and the new weights are refit into the engines (6). A panel under each of the four parts lists what it provides. The bottom row shows tensor, expert, and context parallelism, one flag each, and model sizes from 4B to 2.8T parameters on the same trainer.</desc>
+  <!-- SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved. -->
+  <!-- SPDX-License-Identifier: Apache-2.0 -->
+  <!-- The README figure, in the style of the project page (docs/index.html). It carries its own
+       background so it stays legible when the viewer's theme and GitHub's differ. -->
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans", Helvetica, Arial, sans-serif; }
+    .mono, .flag { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+    .bg { fill: #ffffff; }
+    .card { fill: #f5f5f7; }
+    .box { fill: none; stroke: #d2d2d7; }
+    .rule { stroke: #e3e3e8; }
+    .role { font-size: 11px; font-weight: 600; letter-spacing: .5px; fill: #3f7a00; }
+    .name { font-size: 17px; font-weight: 600; fill: #1d1d1f; }
+    .lead { font-size: 13px; fill: #1d1d1f; }
+    .row, .hop { font-size: 12px; fill: #6e6e73; }
+    .k { font-weight: 600; fill: #1d1d1f; }
+    .mono { font-size: 11px; }
+    .flag { font-size: 11.5px; fill: #3f7a00; }
+    .head { font-size: 15px; font-weight: 600; fill: #1d1d1f; }
+    .cap { font-size: 11.5px; fill: #6e6e73; }
+    .gpu, .model { font-size: 10px; fill: #6e6e73; text-anchor: middle; }
+    .size { font-size: 12.5px; font-weight: 700; fill: #1d1d1f; text-anchor: middle; }
+    .wire { fill: none; stroke: #8e8e93; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    .dashed { stroke-dasharray: 5 5; }
+    .stem { stroke: #c7c7cc; stroke-width: 1.5; }
+    /* An outline in the background colour: it breaks the dashed line behind the label. */
+    .cut { paint-order: stroke; stroke: #ffffff; stroke-width: 12px; stroke-linejoin: round; }
+    .dot { fill: #1d1d1f; }
+    .num { font-size: 10px; font-weight: 700; fill: #ffffff; text-anchor: middle; }
+    /* One colour per GPU; each block also sits above its GPU label. */
+    .g0 { fill: #0072b2; } .g1 { fill: #d55e00; } .g2 { fill: #009e73; } .g3 { fill: #c973a9; }
+    .o0 { stroke: #0072b2; } .o1 { stroke: #d55e00; } .o2 { stroke: #009e73; } .o3 { stroke: #c973a9; }
+    .o0, .o1, .o2, .o3 { fill: none; stroke-width: 1.5; }
+    .grid { stroke: #f5f5f7; }
+    .tile { fill: #ffffff; }
+    .peak { fill: #76b900; }
+    .on-peak { fill: #1d1d1f; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0d1117; }
+      .cut { stroke: #0d1117; }
+      .card { fill: #161b22; stroke: #30363d; }
+      .box, .rule { stroke: #30363d; }
+      .role, .flag { fill: #76b900; }
+      .name, .lead, .k, .head, .size { fill: #f0f6fc; }
+      .row, .hop, .cap, .gpu, .model { fill: #9198a1; }
+      .wire { stroke: #6e7681; }
+      .stem { stroke: #484f58; }
+      .dot { fill: #f0f6fc; }
+      .num { fill: #0d1117; }
+      .grid { stroke: #161b22; }
+      .tile { fill: #21262d; }
+      .on-peak { fill: #0d1117; }
+    }
+  </style>
+
+  <rect class="bg" width="1000" height="510" rx="14"/>
+
+  <!-- ===== The loop: four parts, six stages ===== -->
+  <text class="role" x="14" y="30">RAY RUNTIME · FULLY ASYNCHRONOUS</text>
+
+  <!-- 6: the trainer's new weights return to the engines -->
+  <path class="wire dashed" d="M868 77 V70 Q868 54 852 54 H146 Q130 54 130 69"/>
+  <path class="wire" d="M123 68 L130 75 L137 68"/>
+  <text class="hop cut" x="379" y="58">weight refit: new weights return to the engines</text>
+  <circle class="dot cut" cx="365" cy="54" r="8"/><text class="num" x="365" y="57.5">6</text>
+
+  <rect class="card" x="55" y="78" width="150" height="62" rx="14"/>
+  <text class="role" x="71" y="103">ROLLOUT</text>
+  <text class="name" x="71" y="125">vLLM engines</text>
+  <path class="stem" d="M130 140 V166"/>
+  <rect class="card" x="301" y="78" width="150" height="62" rx="14"/>
+  <text class="role" x="317" y="103">YOUR PROGRAM</text>
+  <text class="name" x="317" y="125">Agent workers</text>
+  <path class="stem" d="M376 140 V166"/>
+  <rect class="card" x="547" y="78" width="150" height="62" rx="14"/>
+  <text class="role" x="563" y="103">RAY</text>
+  <text class="name" x="563" y="125">Queue</text>
+  <path class="stem" d="M622 140 V166"/>
+  <rect class="card" x="793" y="78" width="150" height="62" rx="14"/>
+  <text class="role" x="809" y="103">TRAINING</text>
+  <text class="name" x="809" y="125">Trainer</text>
+  <path class="stem" d="M868 140 V166"/>
+
+  <!-- 1 and 2: the agents call the engines -->
+  <circle class="dot" cx="230" cy="85" r="8"/><text class="num" x="230" y="88.5">1</text><text class="hop" x="243" y="89">request</text>
+  <path class="wire" d="M296 99 H210 M217 93 L210 99 L217 105"/>
+  <path class="wire" d="M210 115 H296 M289 109 L296 115 L289 121"/>
+  <circle class="dot" cx="227" cy="131" r="8"/><text class="num" x="227" y="134.5">2</text><text class="hop" x="240" y="135">tokens +</text>
+  <text class="hop" x="253" y="149" text-anchor="middle">log-probs</text>
+  <!-- 4: finished trajectories -->
+  <circle class="dot" cx="470" cy="93" r="8"/><text class="num" x="470" y="96.5">4</text><text class="hop" x="483" y="97">trajectory</text>
+  <path class="wire" d="M456 109 H542 M535 103 L542 109 L535 115"/>
+  <!-- 5: training batches -->
+  <circle class="dot" cx="728" cy="93" r="8"/><text class="num" x="728" y="96.5">5</text><text class="hop" x="741" y="97">batch</text>
+  <path class="wire" d="M702 109 H788 M781 103 L788 109 L781 115"/>
+
+  <!-- ===== What each part provides ===== -->
+  <rect class="box" x="14.5" y="166.5" width="231" height="143" rx="14"/>
+  <text class="lead" x="30" y="191">Generate tokens for the agents</text>
+  <text class="lead" x="30" y="208">and return their log-probs.</text>
+  <path class="rule" d="M30 221.5 H230"/>
+  <text class="row" x="30" y="241"><tspan class="k">Same checkpoint</tspan> as the trainer</text>
+  <text class="row" x="30" y="260"><tspan class="k">TP · EP · DP</tspan> inside each engine</text>
+  <text class="row" x="30" y="279"><tspan class="k">MTP</tspan> speculative decoding</text>
+  <text class="row" x="30" y="298"><tspan class="k">Partial rollout</tspan> survives a refit</text>
+  <rect class="box" x="260.5" y="166.5" width="231" height="143" rx="14"/>
+  <circle class="dot" cx="284" cy="187" r="8"/><text class="num" x="284" y="190.5">3</text>
+  <text class="lead" x="297" y="191">Call tools and the model in</text>
+  <text class="lead" x="276" y="208">turn, then return a reward.</text>
+  <path class="rule" d="M276 221.5 H476"/>
+  <text class="row" x="276" y="241"><tspan class="k mono">Env.step()</tspan> Molt runs the loop</text>
+  <text class="row" x="276" y="260"><tspan class="k mono">ChatAgent.run()</tspan> you run it</text>
+  <text class="row" x="276" y="279"><tspan class="k">OpenAI / Anthropic</tspan> SDK agents</text>
+  <text class="row" x="276" y="298"><tspan class="k">Reward</tspan> is any Python you write</text>
+  <rect class="box" x="506.5" y="166.5" width="231" height="143" rx="14"/>
+  <text class="lead" x="522" y="191">Buffers finished trajectories</text>
+  <text class="lead" x="522" y="208">between rollout and training.</text>
+  <path class="rule" d="M522 221.5 H722"/>
+  <text class="row" x="522" y="241"><tspan class="k">References only</tspan> in the queue</text>
+  <text class="row" x="522" y="260"><tspan class="k">Data</tspan> stays in the object store</text>
+  <text class="row" x="522" y="279"><tspan class="k">Queue size</tspan> bounds policy lag</text>
+  <text class="row" x="522" y="298"><tspan class="k">Batches</tspan> from completed groups</text>
+  <rect class="box" x="752.5" y="166.5" width="231" height="143" rx="14"/>
+  <text class="lead" x="768" y="191">A single actor, updated by</text>
+  <text class="lead" x="768" y="208">NeMo AutoModel and FSDP2.</text>
+  <path class="rule" d="M768 221.5 H968"/>
+  <text class="row" x="768" y="241"><tspan class="k">Estimators</tspan> REINFORCE, GRPO, PPO</text>
+  <text class="row" x="768" y="260"><tspan class="k">KL, PPO critic</tspan> both optional</text>
+  <text class="row" x="768" y="279"><tspan class="k">IS correction</tspan> for stale samples</text>
+  <text class="row" x="768" y="298"><tspan class="k">Adam</tspan> with CPU offload</text>
+
+  <!-- ===== Scaling: three forms of parallelism, and the model sizes they reach ===== -->
+  <text class="role" x="14" y="340">SCALING · NEMO AUTOMODEL + FSDP2, ONE FLAG EACH</text>
+  <rect class="card" x="14" y="352" width="232" height="144" rx="14"/>
+  <text class="flag" x="30" y="377">--fsdp.tp_size</text>
+  <text class="head" x="30" y="398">Tensor parallelism</text>
+  <text class="cap" x="30" y="415">one weight matrix, split</text>
+  <rect class="g0" x="30" y="427" width="47" height="36" rx="5"/>
+  <path class="grid" d="M41.75 427 v36M53.5 427 v36M65.25 427 v36M30 439 h47M30 451 h47"/>
+  <text class="gpu" x="53.5" y="480">GPU 0</text>
+  <rect class="g1" x="81" y="427" width="47" height="36" rx="5"/>
+  <path class="grid" d="M92.75 427 v36M104.5 427 v36M116.25 427 v36M81 439 h47M81 451 h47"/>
+  <text class="gpu" x="104.5" y="480">GPU 1</text>
+  <rect class="g2" x="132" y="427" width="47" height="36" rx="5"/>
+  <path class="grid" d="M143.75 427 v36M155.5 427 v36M167.25 427 v36M132 439 h47M132 451 h47"/>
+  <text class="gpu" x="155.5" y="480">GPU 2</text>
+  <rect class="g3" x="183" y="427" width="47" height="36" rx="5"/>
+  <path class="grid" d="M194.75 427 v36M206.5 427 v36M218.25 427 v36M183 439 h47M183 451 h47"/>
+  <text class="gpu" x="206.5" y="480">GPU 3</text>
+  <rect class="card" x="260" y="352" width="232" height="144" rx="14"/>
+  <text class="flag" x="276" y="377">--fsdp.ep_size</text>
+  <text class="head" x="276" y="398">Expert parallelism</text>
+  <text class="cap" x="276" y="415">tokens, routed to their experts</text>
+  <rect class="o0" x="276.75" y="439.75" width="45.5" height="22.5" rx="6"/>
+  <rect class="g0" x="285" y="445" width="12" height="12" rx="3"/><rect class="g0" x="302" y="445" width="12" height="12" rx="3"/>
+  <text class="gpu" x="299.5" y="480">GPU 0</text>
+  <rect class="o1" x="327.75" y="439.75" width="45.5" height="22.5" rx="6"/>
+  <rect class="g1" x="336" y="445" width="12" height="12" rx="3"/><rect class="g1" x="353" y="445" width="12" height="12" rx="3"/>
+  <text class="gpu" x="350.5" y="480">GPU 1</text>
+  <rect class="o2" x="378.75" y="439.75" width="45.5" height="22.5" rx="6"/>
+  <rect class="g2" x="387" y="445" width="12" height="12" rx="3"/><rect class="g2" x="404" y="445" width="12" height="12" rx="3"/>
+  <text class="gpu" x="401.5" y="480">GPU 2</text>
+  <rect class="o3" x="429.75" y="439.75" width="45.5" height="22.5" rx="6"/>
+  <rect class="g3" x="438" y="445" width="12" height="12" rx="3"/><rect class="g3" x="455" y="445" width="12" height="12" rx="3"/>
+  <text class="gpu" x="452.5" y="480">GPU 3</text>
+  <circle class="g2" cx="284" cy="431" r="3.5"/><circle class="g0" cx="300.7" cy="431" r="3.5"/><circle class="g3" cx="317.4" cy="431" r="3.5"/><circle class="g1" cx="334.1" cy="431" r="3.5"/><circle class="g0" cx="350.8" cy="431" r="3.5"/><circle class="g2" cx="367.5" cy="431" r="3.5"/><circle class="g1" cx="384.2" cy="431" r="3.5"/><circle class="g3" cx="400.9" cy="431" r="3.5"/><circle class="g0" cx="417.6" cy="431" r="3.5"/><circle class="g1" cx="434.3" cy="431" r="3.5"/><circle class="g3" cx="451" cy="431" r="3.5"/><circle class="g2" cx="467.7" cy="431" r="3.5"/>
+  <rect class="card" x="506" y="352" width="232" height="144" rx="14"/>
+  <text class="flag" x="522" y="377">--fsdp.cp_size</text>
+  <text class="head" x="522" y="398">Context parallelism</text>
+  <text class="cap" x="522" y="415">one long sequence, split</text>
+  <rect class="g0" x="522" y="433" width="47" height="24" rx="4"/>
+  <path class="grid" opacity=".6" d="M530.5 433 v24M536.5 433 v24M542.5 433 v24M548.5 433 v24M554.5 433 v24M560.5 433 v24"/>
+  <text class="gpu" x="545.5" y="480">GPU 0</text>
+  <rect class="g1" x="573" y="433" width="47" height="24" rx="4"/>
+  <path class="grid" opacity=".6" d="M581.5 433 v24M587.5 433 v24M593.5 433 v24M599.5 433 v24M605.5 433 v24M611.5 433 v24"/>
+  <text class="gpu" x="596.5" y="480">GPU 1</text>
+  <rect class="g2" x="624" y="433" width="47" height="24" rx="4"/>
+  <path class="grid" opacity=".6" d="M632.5 433 v24M638.5 433 v24M644.5 433 v24M650.5 433 v24M656.5 433 v24M662.5 433 v24"/>
+  <text class="gpu" x="647.5" y="480">GPU 2</text>
+  <rect class="g3" x="675" y="433" width="47" height="24" rx="4"/>
+  <path class="grid" opacity=".6" d="M683.5 433 v24M689.5 433 v24M695.5 433 v24M701.5 433 v24M707.5 433 v24M713.5 433 v24"/>
+  <text class="gpu" x="698.5" y="480">GPU 3</text>
+  <rect class="card" x="752" y="352" width="232" height="144" rx="14"/>
+  <text class="role" x="768" y="377">MODEL SCALE</text>
+  <text class="head" x="768" y="398">4B to 2.8T parameters</text>
+  <text class="cap" x="768" y="415">on the same trainer</text>
+  <rect class="tile" x="768" y="452" width="47" height="31" rx="6"/>
+  <text class="size" x="791.5" y="466">4B</text>
+  <text class="model" x="791.5" y="477">Qwen3</text>
+  <rect class="tile" x="819" y="446" width="47" height="37" rx="6"/>
+  <text class="size" x="842.5" y="466">753B</text>
+  <text class="model" x="842.5" y="477">GLM-5.2</text>
+  <rect class="tile" x="870" y="440" width="47" height="43" rx="6"/>
+  <text class="size" x="893.5" y="466">1T</text>
+  <text class="model" x="893.5" y="477">Kimi K2</text>
+  <rect class="peak" x="921" y="434" width="47" height="49" rx="6"/>
+  <text class="size on-peak" x="944.5" y="466">2.8T</text>
+  <text class="model on-peak" x="944.5" y="477">Kimi K3</text>
+</svg>
