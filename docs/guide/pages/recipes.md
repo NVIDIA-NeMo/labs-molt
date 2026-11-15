@@ -1,6 +1,6 @@
 # Recipes
 
-The repository ships launch scripts for every workload it is validated on. Each one is a complete
+The repository ships launch scripts for the workloads it is validated on. Each one is a complete
 command, so the fastest way to start a new experiment is to copy the closest script and change
 the paths.
 
@@ -16,7 +16,9 @@ the paths.
 | Qwen3.6-35B-A3B VLM SFT on geo3k | `quick_start/sft_qwen3_6_35b.sh` | `slurm/sft_qwen3_6_35b.sh` |
 | FlashREINFORCE on DeepSeek-R1-Distill-Qwen-1.5B | `quick_start/rl_flash_reinforce_r1d_1p5b.sh` | |
 | Nemotron-Omni-30B-A3B VLM RL on geo3k, CP8 + EP8 | | `slurm/rl_omni3_30b.sh` |
+| Nemotron-Omni-30B-A3B VLM SFT on geo3k | | `slurm/sft_omni3_30b.sh` |
 | Nemotron-Omni-30B-A3B on-policy distillation | | `slurm/rl_distill_omni3_30b.sh` |
+| Muse-Glimmer-30B dense RL, TP2 | | `slurm/rl_muse_glimmer_30b.sh` |
 | GLM-5.2 RL on text math, EP256 | | `slurm/rl_glm5_2_753b.sh` |
 
 All paths are under `examples/scripts/`.

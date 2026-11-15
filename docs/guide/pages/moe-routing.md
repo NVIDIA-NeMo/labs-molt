@@ -10,7 +10,7 @@ breaks the assumption behind importance sampling. Molt closes the gap at three l
 | Level | Default | What it fixes |
 |---|---|---|
 | fp32 router precision | on | The two sides agree on the gate weights |
-| Routing replay (R3) | on in the MoE recipes | The trainer replays the engine's expert selection |
+| Routing replay (R3) | on in the Qwen3.5-MoE recipes | The trainer replays the engine's expert selection |
 | Router freeze | off | The router cannot drift at all |
 
 ## Router precision

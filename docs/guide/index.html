@@ -135,7 +135,8 @@ limitations under the License.
         toc.appendChild(a);
       });
       if (sections.length > 2) prose.insertBefore(toc, prose.querySelector('h1').nextSibling);
-      if (location.hash) d.getElementById(location.hash.slice(1)).scrollIntoView();
+      var target = d.getElementById(location.hash.slice(1));
+      if (target) target.scrollIntoView();
 
       pager.appendChild(at > 0 ? pageLink(pages[at - 1], 'more back') : el('span'));
       if (at < pages.length - 1) pager.appendChild(pageLink(pages[at + 1], 'more'));
