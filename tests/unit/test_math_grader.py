@@ -20,7 +20,9 @@ against over-counting. Run: python3 tests/unit/test_math_grader.py
 """
 
 import asyncio
+import builtins
 import importlib.util
+import sys
 import threading
 from pathlib import Path
 
@@ -220,6 +222,45 @@ def test_answer_equivalence_sympy() -> None:
         fails.append(f"score_response nested-boxed reward={rs['reward']} (expected 1.0)")
 
     assert not fails, "\n".join(fails)
+
+
+@pytest.mark.parametrize(
+    "response,target,expected_prediction,expected_reward",
+    [
+        ("<think>180 - 144 = 36</think><answer>36</answer>", "36", "36", 1.0),
+        ("<think>angle</think>\n<answer>\n36^\\circ\n</answer>", "36", "36^\\circ", 1.0),
+        (r"<answer>\boxed{\frac{1}{2}}</answer>", "0.5", r"\frac{1}{2}", 1.0),
+        (r"<think>First guess \boxed{7}</think><answer>36</answer>", "36", "36", 1.0),
+        ("<answer>7</answer> then <answer>36</answer> and truncated <answer>9", "36", "36", 1.0),
+        ("There were 5 unanswered questions; final answer: 36", "36", "36", 1.0),
+    ],
+)
+def test_score_response_extracts_answer_tags_and_word_bounded_phrases(
+    response, target, expected_prediction, expected_reward
+):
+    result = mg.score_response(response, "", {"ground_truth": target})
+    assert result["prediction"] == expected_prediction
+    assert result["reward"] == expected_reward
+
+
+def test_sympy_equivalence_degrades_cleanly_without_pylatexenc(monkeypatch):
+    pytest.importorskip("sympy")
+    real_import = builtins.__import__
+
+    def block_pylatexenc(name, *args, **kwargs):
+        if name == "pylatexenc" or name.startswith("pylatexenc."):
+            raise ImportError("pylatexenc unavailable")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.delitem(sys.modules, "pylatexenc", raising=False)
+    monkeypatch.setattr(builtins, "__import__", block_pylatexenc)
+
+    assert mg.answers_match(r"\sqrt{12}", r"2\sqrt{3}")
+    assert mg.answers_match(r"\frac{\sqrt{12}}{2}", r"\sqrt{3}")
+    assert mg.answers_match(r"7\frac{3}{4}", "31/4")
+    assert mg.answers_match(r"2\pi", r"\frac{6\pi}{3}")
+    assert not mg.answers_match(r"\frac{1}{3}", r"\frac{2}{6}")
+    assert not mg.answers_match(r"7\frac{3}{4}", "73/4")
 
 
 if __name__ == "__main__":
