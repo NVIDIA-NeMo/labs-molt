@@ -64,9 +64,10 @@ MoE** with TP / EP / CP: the entry point that trains a 4B model on one node also
 One loop. Six stages.
 
 <p align="center">
-  <img src="assets/architecture.svg" alt="Molt architecture, one loop in six stages: agent workers request tokens from the vLLM engines, return a reward, and send trajectories to a Ray queue; the trainer takes batches and refits the engines with the new weights" width="900"/>
+  <img src="assets/architecture.svg" alt="Molt architecture. Top: one loop in six stages, where agent workers request tokens from the vLLM engines, return a reward, and send trajectories to a Ray queue, and the trainer takes batches and refits the engines with the new weights. Middle: what each of the four parts provides. Bottom: tensor, expert, and context parallelism, one flag each, and model sizes from 4B to 2.8T parameters on the same trainer." width="1000"/>
 </p>
 
+Read the figure top to bottom: the loop, what each part provides, and how the trainer scales.
 **Ray** places three kinds of processes (agent workers, vLLM engines, and one trainer) and carries
 the queue between them. That is the entire runtime. In asynchronous mode the six stages overlap,
 so a slow episode delays only itself. The contract is **token-first**: token ids, log-probs, action
