@@ -57,36 +57,59 @@ def _strip_prompt(query: str, prompt: Any) -> str:
     return query
 
 
-def _last_braced_answer(text: str) -> str | None:
+def _last_braced_answer_span(text: str) -> tuple[str, int] | None:
     matches = list(re.finditer(r"\\(?:boxed|fbox)\s*{", text))
     for match in reversed(matches):
         start = match.end()
         depth = 1
         chars = []
-        for char in text[start:]:
+        for offset, char in enumerate(text[start:], start=start):
             if char == "{":
                 depth += 1
             elif char == "}":
                 depth -= 1
                 if depth == 0:
-                    return "".join(chars).strip()
+                    candidate = "".join(chars).strip()
+                    if candidate:
+                        return candidate, offset + 1
+                    break
             chars.append(char)
     return None
 
 
+def _last_braced_answer(text: str) -> str | None:
+    found = _last_braced_answer_span(text)
+    return found[0] if found is not None else None
+
+
+def _last_tagged_answer_span(text: str) -> tuple[str, int] | None:
+    matches = list(re.finditer(r"<answer>\s*(.*?)\s*</answer>", text, flags=re.IGNORECASE | re.DOTALL))
+    for match in reversed(matches):
+        candidate = match.group(1).strip()
+        if candidate:
+            nested_boxed = _last_braced_answer(candidate)
+            return (nested_boxed if nested_boxed else candidate), match.end()
+    return None
+
+
 def extract_answer(text: str) -> str | None:
-    """Extract the final answer: prefer the last balanced \\boxed{}/\\fbox{},
-    then an "answer is ..." phrase, then the last number."""
+    """Extract the final answer: prefer the last explicit \\boxed{}/\\fbox{} or
+    <answer>...</answer> marker, then an "answer is ..." phrase, then the last number."""
     if not text:
         return None
 
-    boxed = _last_braced_answer(text)
+    boxed = _last_braced_answer_span(text)
+    tagged = _last_tagged_answer_span(text)
+    if boxed and tagged:
+        return tagged[0] if tagged[1] >= boxed[1] else boxed[0]
     if boxed:
-        return boxed
+        return boxed[0]
+    if tagged:
+        return tagged[0]
 
     answer_matches = list(
         re.finditer(
-            r"(?:final\s+answer|answer|therefore|thus)\s*(?:is|:|=)?\s*([^\n<|]+)",
+            r"(?<![<\w])(?:final\s+answer|answer|therefore|thus)\b(?:\s*(?:is|:|=)\s*|\s+)([^\n<|>]+)",
             text,
             flags=re.IGNORECASE,
         )
@@ -238,13 +261,55 @@ def _sympy_parse(expr: str):
     )
 
 
-def _parse_latex(expr: str) -> str:
-    from pylatexenc import latex2text
+def _replace_braced_cmd(expr: str, cmd: str, repl) -> str:
+    pattern = re.compile(rf"\\{cmd}\s*\{{([^{{}}]*)\}}")
+    while True:
+        updated = pattern.sub(lambda m: repl(m.group(1)), expr)
+        if updated == expr:
+            return expr
+        expr = updated
 
+
+def _fallback_latex_to_text(expr: str) -> str:
+    """Convert common math LaTeX macros when ``pylatexenc`` is not installed."""
+    expr = re.sub(r"\\(?:left|right)(?![a-zA-Z])", "", expr)
+    expr = _replace_braced_cmd(expr, "text", lambda inner: inner)
+    expr = _replace_braced_cmd(expr, "mathrm", lambda inner: inner)
+    sqrt_root_re = re.compile(r"\\sqrt\s*\[([^\[\]]+)\]\s*\{([^{}]*)\}")
+    frac_re = re.compile(r"\\frac\s*\{([^{}]*)\}\s*\{([^{}]*)\}")
+
+    def _fmt_frac(match: re.Match) -> str:
+        num, den = match.group(1).strip(), match.group(2).strip()
+        if re.fullmatch(r"[+-]?\d+", num) and re.fullmatch(r"[+-]?\d+", den):
+            return f" {num}/{den}"
+        return f"(({num})/({den}))"
+
+    while True:
+        updated = sqrt_root_re.sub(r"((\2)**(1/(\1)))", expr)
+        updated = _replace_braced_cmd(updated, "sqrt", lambda inner: f"sqrt({inner})")
+        updated = re.sub(r"\\sqrt\s*([0-9a-zA-Z])", r"sqrt(\1)", updated)
+        updated = frac_re.sub(_fmt_frac, updated)
+        if updated == expr:
+            break
+        expr = updated
+
+    expr = re.sub(r"\\pi(?![a-zA-Z])", " pi ", expr)
+    expr = re.sub(r"\\infty(?![a-zA-Z])", " inf ", expr)
+    expr = re.sub(r"\\(?:cdot|times)(?![a-zA-Z])", "*", expr)
+    expr = re.sub(r"\\(?:,|;|!|quad|qquad)(?![a-zA-Z])", " ", expr)
+    return expr
+
+
+def _parse_latex(expr: str) -> str:
     expr = expr.replace("\\tfrac", "\\frac")
     expr = expr.replace("\\dfrac", "\\frac")
-    expr = expr.replace("\\frac", " \\frac")  # play nice with mixed numbers
-    expr = latex2text.LatexNodes2Text().latex_to_text(expr)
+    try:
+        from pylatexenc import latex2text
+
+        expr = expr.replace("\\frac", " \\frac")  # play nice with mixed numbers
+        expr = latex2text.LatexNodes2Text().latex_to_text(expr)
+    except ImportError:
+        expr = _fallback_latex_to_text(expr)
     expr = expr.replace("√", "sqrt")
     expr = expr.replace("π", "pi")
     expr = expr.replace("∞", "inf")
