@@ -394,6 +394,7 @@ h2 { margin-top: 6px; font-size: clamp(28px, 4.2vw, 46px); line-height: 1.08; le
 .t-flag, .t-key { color: #b5e853; }
 .t-str { color: #ffd479; }
 .t-com { color: #7d7d85; }
+.t-num { color: #9fd6ff; }
 .term-links { display: flex; flex-wrap: wrap; justify-content: center; gap: 10px 32px; margin-top: 28px; }
 
 /* ---------- Footer ---------- */
@@ -433,7 +434,39 @@ h2 { margin-top: 6px; font-size: clamp(28px, 4.2vw, 46px); line-height: 1.08; le
 .prose th, .prose td { padding: 9px 14px 9px 0; border-bottom: 1px solid var(--line); text-align: left; }
 .prose hr { margin: 2.2em 0; border: 0; border-top: 1px solid var(--line); }
 .math-block { overflow-x: auto; text-align: center; }
+.prose .t-com { color: var(--ink-2); }
+.prose .t-str { color: #c41a16; }
+.prose .t-key { color: #9b2393; }
+.prose .t-num { color: #1c00cf; }
+.prose .t-cmd { color: var(--ink); }
+.prose .t-flag { color: var(--green-ink); }
 .article-foot { margin-top: 48px; padding-top: 24px; border-top: 1px solid var(--line); }
+
+/* ---------- Docs ---------- */
+.docs { max-width: var(--wrap); margin: 0 auto; padding: calc(var(--nav-h) + clamp(24px, 4vw, 44px)) var(--gutter) clamp(56px, 8vw, 96px); display: grid; gap: clamp(20px, 4vw, 48px); }
+.docs-main { min-width: 0; }
+.docs-nav { font-size: 14px; line-height: 1.35; letter-spacing: -.01em; }
+.docs-nav summary { padding: 10px 14px; border-radius: 12px; background: var(--mist); font-weight: 600; cursor: pointer; }
+.docs-nav h4 { margin: 18px 0 6px 10px; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-3); }
+.docs-nav a { display: block; padding: 5px 10px; border-radius: 8px; color: var(--ink-2); text-decoration: none; }
+.docs-nav a:hover { color: var(--ink); }
+.docs-nav a[aria-current] { background: var(--mist); color: var(--ink); font-weight: 600; }
+.docs-title { margin-top: 6px; font-size: clamp(32px, 5vw, 48px); line-height: 1.08; letter-spacing: -.018em; }
+.lib-head { margin: 32px 0 12px; font-size: 20px; letter-spacing: 0; }
+.lib { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+.lib-item { padding: 16px 18px; border-radius: 14px; background: var(--mist); color: inherit; text-decoration: none; transition: background .25s; }
+.lib-item:hover { background: #ececf0; }
+.lib-item h3 { font-size: 17px; line-height: 1.25; letter-spacing: 0; }
+.lib-item p { margin-top: 4px; font-size: 14px; line-height: 1.43; letter-spacing: -.01em; color: var(--ink-2); }
+.docs .prose { margin-top: 0; padding-top: 0; border-top: 0; font-size: 16px; }
+.docs .prose h1 { margin-bottom: .7em; font-size: clamp(28px, 4.4vw, 40px); line-height: 1.1; letter-spacing: -.016em; }
+.docs .prose td:first-child code { white-space: nowrap; }
+.toc { display: flex; flex-wrap: wrap; gap: 6px 8px; font-size: 13px; line-height: 1.3; }
+.toc a { padding: 4px 11px; border-radius: 980px; background: var(--mist); color: var(--ink-2); text-decoration: none; }
+.toc a:hover { color: var(--ink); }
+.docs .prose blockquote { padding: 0; border: 0; font-size: 13px; }
+.docs .prose h2 { scroll-margin-top: calc(var(--nav-h) + 16px); }
+.pager { display: flex; justify-content: space-between; gap: 16px; margin-top: 48px; padding-top: 24px; border-top: 1px solid var(--line); }
 
 /* ---------- Wide: two-column hero, horizontal loop ---------- */
 @media (min-width: 900px) {
@@ -443,6 +476,11 @@ h2 { margin-top: 6px; font-size: clamp(28px, 4.2vw, 46px); line-height: 1.08; le
 
   .kit { grid-template-columns: repeat(4, 1fr); }
   .card.split-wide { grid-template-columns: 1fr 1fr; }
+
+  .docs { grid-template-columns: 210px minmax(0, 1fr); }
+  .docs-nav { position: sticky; top: calc(var(--nav-h) + 24px); align-self: start; max-height: calc(100vh - var(--nav-h) - 48px); overflow-y: auto; }
+  .docs-nav summary { display: none; }
+  .docs-nav h4:first-of-type { margin-top: 0; }
 
   .loop { --lk: clamp(92px, 10vw, 116px); max-width: var(--wrap); padding-left: 0; display: grid; grid-template-columns: 1fr var(--lk) 1fr var(--lk) 1fr var(--lk) 1fr; }
   .node { display: block; min-height: 0; padding: 20px 18px 22px; border-radius: 20px; }

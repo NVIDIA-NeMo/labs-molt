@@ -37,6 +37,7 @@ limitations under the License.
     <nav aria-label="Sections">
       <ul class="nav-links">
         <li class="keep"><a href="./" aria-current="page">Blog</a></li>
+        <li class="keep"><a href="../guide/">Docs</a></li>
         <li><a href="../#architecture">Architecture</a></li>
         <li><a href="../#automodel">AutoModel</a></li>
         <li><a href="../#features">Features</a></li>
@@ -68,9 +69,6 @@ limitations under the License.
 (function () {
   var d = document, M = window.Molt, el = M.el, root = d.getElementById('blog-root');
   var slug = new URLSearchParams(location.search).get('p');
-  var KATEX = 'https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/';
-  var KATEX_JS = 'sha384-7zkQWkzuo3B5mTepMUcHkMB5jZaolc2xDwL6VFqjFALcbeS9Ggm/Yr2r3Dy4lfFg';
-  var KATEX_CSS = 'sha384-nB0miv6/jRmo5UMMR1wu3Gz6NLsoTkbqJghGIsx//Rlm+ZU03BU6SQNC66uf4l5+';
   function backLink() { var a = el('a', 'more back', 'All posts'); a.href = './'; return a; }
 
   if (!slug) {
@@ -101,27 +99,6 @@ limitations under the License.
     var h1 = md.match(/^#[ \t]+(.+)\n/);
     if (h1) md = md.slice(h1[0].length);
 
-    // Lift math out before Markdown runs, so underscores and backslashes survive:
-    // $inline$, $$display$$, and GitHub-style ```math fences. Code is left alone.
-    var math = [];
-    function keep(tex, display) {
-      math.push({ tex: tex, display: display });
-      var token = '@@MATH' + (math.length - 1) + '@@';
-      return display ? '\n\n' + token + '\n\n' : token;
-    }
-    md = md.split(/(^```[^\n]*\n[\s\S]*?\n```[ \t]*$)/m).map(function (seg, i) {
-      if (i % 2) {
-        var fence = seg.match(/^```math[ \t]*\n([\s\S]*?)\n```[ \t]*$/);
-        return fence ? keep(fence[1].trim(), true) : seg;
-      }
-      return seg.split(/(`[^`\n]*`)/).map(function (text, j) {
-        if (j % 2) return text;
-        return text
-          .replace(/\$\$([\s\S]+?)\$\$/g, function (_, tex) { return keep(tex.trim(), true); })
-          .replace(/(^|[^\\$\w])\$(?!\s)([^$\n]*?[^\s$\\])\$(?![\w$])/g, function (_, pre, tex) { return pre + keep(tex, false); });
-      }).join('');
-    }).join('');
-
     var article = el('article', 'article'), head = el('header', 'article-head');
     var info = el('p', 'meta'), prose = el('div', 'prose'), foot = el('footer', 'article-foot');
     var title = meta.title || (h1 ? h1[1] : slug);
@@ -131,9 +108,6 @@ limitations under the License.
     head.appendChild(info);
     head.appendChild(el('h1', null, title));
     if (meta.summary) head.appendChild(el('p', 'dek', meta.summary));
-    prose.innerHTML = window.marked.parse(md)
-      .replace(/<p>\s*@@MATH(\d+)@@\s*<\/p>/g, '<div class="math-block" data-math="$1"></div>')
-      .replace(/@@MATH(\d+)@@/g, '<span data-math="$1"></span>');
     foot.appendChild(backLink());
     article.appendChild(head);
     article.appendChild(prose);
@@ -141,30 +115,7 @@ limitations under the License.
     root.appendChild(article);
     d.title = title + ' · Molt Blog';
 
-    // Resolve relative links and images against the Markdown file, so the same
-    // paths work here and when the file is viewed on GitHub.
-    var base = new URL('posts/' + slug + '.md', location.href);
-    [].forEach.call(prose.querySelectorAll('[src], a[href]'), function (n) {
-      var attr = n.hasAttribute('src') ? 'src' : 'href', v = n.getAttribute(attr);
-      if (!/^([a-z][a-z0-9+.\-]*:|\/|#)/i.test(v)) n.setAttribute(attr, new URL(v, base).href);
-      if (attr === 'href' && n.host !== location.host) { n.target = '_blank'; n.rel = 'noopener'; }
-    });
-
-    // KaTeX loads only for posts that contain math. Until it does, the TeX source shows.
-    var nodes = [].slice.call(prose.querySelectorAll('[data-math]'));
-    if (!nodes.length) return;
-    nodes.forEach(function (n) { n.textContent = math[n.getAttribute('data-math')].tex; });
-    var css = el('link'), js = el('script');
-    css.rel = 'stylesheet'; css.href = KATEX + 'katex.min.css'; css.integrity = KATEX_CSS; css.crossOrigin = 'anonymous';
-    js.src = KATEX + 'katex.min.js'; js.integrity = KATEX_JS; js.crossOrigin = 'anonymous';
-    js.onload = function () {
-      nodes.forEach(function (n) {
-        var m = math[n.getAttribute('data-math')];
-        window.katex.render(m.tex, n, { displayMode: m.display, throwOnError: false });
-      });
-    };
-    d.head.appendChild(css);
-    d.head.appendChild(js);
+    M.markdown(md, new URL('posts/' + slug + '.md', location.href), prose);
   }
 })();
 </script>

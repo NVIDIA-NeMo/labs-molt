@@ -40,6 +40,7 @@ limitations under the License.
     <nav aria-label="Sections">
       <ul class="nav-links">
         <li class="keep"><a href="blog/">Blog</a></li>
+        <li class="keep"><a href="guide/">Docs</a></li>
         <li><a href="#architecture">Architecture</a></li>
         <li><a href="#automodel">AutoModel</a></li>
         <li><a href="#features">Features</a></li>
@@ -384,9 +385,9 @@ class AgentRunner(ChatAgentRunner):
     </div>
 
     <p class="term-links">
-      <a class="more" href="https://github.com/NVIDIA-NeMo/labs-molt#-installation">Installation guide</a>
-      <a class="more" href="https://github.com/NVIDIA-NeMo/labs-molt/tree/main/examples/scripts">Reference scripts</a>
-      <a class="more" href="https://github.com/NVIDIA-NeMo/labs-molt#-agent-contract">Agent contract</a>
+      <a class="more" href="guide/?p=installation">Installation guide</a>
+      <a class="more" href="guide/?p=agents">Agent contract</a>
+      <a class="more" href="guide/?p=cli-rl">Every RL flag</a>
     </p>
   </section>
 
@@ -408,10 +409,11 @@ class AgentRunner(ChatAgentRunner):
       <div>
         <h4>Get started</h4>
         <ul>
-          <li><a href="https://github.com/NVIDIA-NeMo/labs-molt#-installation">Installation</a></li>
-          <li><a href="https://github.com/NVIDIA-NeMo/labs-molt#-quick-start">Quick start</a></li>
-          <li><a href="https://github.com/NVIDIA-NeMo/labs-molt#-recipes">Recipes</a></li>
-          <li><a href="https://github.com/NVIDIA-NeMo/labs-molt#-scaling-knobs">Scaling knobs</a></li>
+          <li><a href="guide/">Docs</a></li>
+          <li><a href="guide/?p=installation">Installation</a></li>
+          <li><a href="guide/?p=quick-start">Quick start</a></li>
+          <li><a href="guide/?p=recipes">Recipes</a></li>
+          <li><a href="guide/?p=scaling">Scaling knobs</a></li>
         </ul>
       </div>
       <div>
@@ -467,19 +469,8 @@ class AgentRunner(ChatAgentRunner):
     poster.parentNode.replaceChild(f, poster);
   });
 
-  // Quick start: color comments, then Python keywords and strings or shell commands and flags.
   d.querySelectorAll('code[data-lang]').forEach(function (code) {
-    var python = code.getAttribute('data-lang') === 'python';
-    code.innerHTML = code.innerHTML.split('\n').map(function (line) {
-      if (/^\s*#/.test(line)) return '<span class="t-com">' + line + '</span>';
-      if (python) {
-        return line.replace(/("[^"]*")|\b(from|import|class|async|def|await|return|super)\b/g, function (m, str) {
-          return '<span class="' + (str ? 't-str' : 't-key') + '">' + m + '</span>';
-        });
-      }
-      return line.replace(/(^|\s)(--[\w.\-]+)/g, '$1<span class="t-flag">$2</span>')
-                 .replace(/^(\S+)/, '<span class="t-cmd">$1</span>');
-    }).join('\n');
+    window.Molt.highlight(code, code.getAttribute('data-lang'));
   });
 
   var tabs = [].slice.call(d.querySelectorAll('[role="tab"]'));
