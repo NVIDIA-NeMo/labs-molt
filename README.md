@@ -10,6 +10,7 @@ Ray · vLLM · NeMo AutoModel — the smallest Hugging Face-native stack for
 <br/>
 
 [![Project Page](https://img.shields.io/badge/Project_Page-Website-76B900?style=for-the-badge)](https://nvidia-nemo.github.io/labs-molt/)
+[![Docs](https://img.shields.io/badge/Docs-Guide-76B900?style=for-the-badge)](https://nvidia-nemo.github.io/labs-molt/guide/)
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-2563eb?style=flat-square)](LICENSE)
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)
