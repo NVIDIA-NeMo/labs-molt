@@ -331,7 +331,6 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict, gone=
         )
         remaining = state.max_length - len(prompt_ids) - image_budget
         if remaining <= 0:  # prompt alone fills the context -> generate nothing; stitch drops empty rollouts
-            session.last_messages = messages
             return "", "length"
         # Built but NOT yet attached to the session: a failed generate below must leave the session
         # untouched (see the commit note) so a client retry re-runs cleanly.
@@ -364,6 +363,7 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict, gone=
         closing = prefix[len(generated) :] if prefix.startswith(generated) else ""
         delta_text = closing + full[len(prefix) :]
         _, new_pil = await loop.run_in_executor(_TOKENIZE_EXECUTOR, _messages_to_chat, state, messages[n + 1 :])
+        saved_mm = (list(traj.pil_images), traj.mm_train_inputs, traj.image_budget)
         delta_ids = await loop.run_in_executor(
             _TOKENIZE_EXECUTOR, _tokenize_feedback, state.processor, delta_text, new_pil, traj, state.max_length
         )
@@ -371,8 +371,8 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict, gone=
         gen_tokens = traj.observation_tokens + delta_ids
         remaining = state.max_length - len(gen_tokens) - traj.image_budget
         if remaining <= 0:  # grown context fills the window -> end truncated; prior turns are kept
+            traj.pil_images, traj.mm_train_inputs, traj.image_budget = saved_mm
             traj.truncated = True
-            session.last_messages = messages
             return "", "length"
 
     # Clamp generation to the remaining budget (the step runner clamps the same way).
@@ -382,34 +382,39 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict, gone=
         sp.min_tokens = sp.max_tokens
 
     mm_data = {"image": traj.pil_images} if traj.pil_images else None
-    request_output, off_policy_len = await state.transport.generate(
-        gen_tokens, sp, multi_modal_data=mm_data, session_id=session.session_id
-    )
-    # A client that hung up while this turn generated never sees the reply and asks again: recording
-    # it would leave a turn in the rollout that the agent never acted on.
-    if gone is not None and await gone():
-        raise HTTPException(status_code=499, detail="client disconnected")
-    generation = request_output.outputs[0]
-    action_ids = list(generation.token_ids)
-    # /inference/v1/generate is token-only (generation.text == ""); decode the action text from the
-    # ids so the agent/grader sees it. skip_special_tokens=False keeps answer markers (<answer>,
-    # \boxed, tool tags) — matches observation_text decoding in base.py — but the trailing stop /
-    # EOS tokens are dropped: an agent echoes the content verbatim and the template adds its own
-    # end-of-turn token, so leaving them in doubles the token on every re-render.
-    tokenizer = getattr(state.processor, "tokenizer", state.processor)
-    special_ids = set(getattr(tokenizer, "all_special_ids", None) or ())
-    end = len(action_ids)
-    while end and action_ids[end - 1] in special_ids:
-        end -= 1
-    raw_action_text = generation.text or (
-        state.processor.decode(action_ids, skip_special_tokens=False) if action_ids else ""
-    )
-    action_text = generation.text or (
-        state.processor.decode(action_ids[:end], skip_special_tokens=False) if end else ""
-    )
-    finish_reason = generation.finish_reason or "stop"
-    # a non-empty completion MUST carry aligned per-token logprobs — fails fast otherwise (IS correction).
-    action_logprobs = _extract_generation_logprobs(action_ids, generation.logprobs) if action_ids else []
+    try:
+        request_output, off_policy_len = await state.transport.generate(
+            gen_tokens, sp, multi_modal_data=mm_data, session_id=session.session_id
+        )
+        # A client that hung up while this turn generated never sees the reply and asks again: recording
+        # it would leave a turn in the rollout that the agent never acted on.
+        if gone is not None and await gone():
+            raise HTTPException(status_code=499, detail="client disconnected")
+        generation = request_output.outputs[0]
+        action_ids = list(generation.token_ids)
+        # /inference/v1/generate is token-only (generation.text == ""); decode the action text from the
+        # ids so the agent/grader sees it. skip_special_tokens=False keeps answer markers (<answer>,
+        # \boxed, tool tags) — matches observation_text decoding in base.py — but the trailing stop /
+        # EOS tokens are dropped: an agent echoes the content verbatim and the template adds its own
+        # end-of-turn token, so leaving them in doubles the token on every re-render.
+        tokenizer = getattr(state.processor, "tokenizer", state.processor)
+        special_ids = set(getattr(tokenizer, "all_special_ids", None) or ())
+        end = len(action_ids)
+        while end and action_ids[end - 1] in special_ids:
+            end -= 1
+        raw_action_text = generation.text or (
+            state.processor.decode(action_ids, skip_special_tokens=False) if action_ids else ""
+        )
+        action_text = generation.text or (
+            state.processor.decode(action_ids[:end], skip_special_tokens=False) if end else ""
+        )
+        finish_reason = generation.finish_reason or "stop"
+        # a non-empty completion MUST carry aligned per-token logprobs — fails fast otherwise (IS correction).
+        action_logprobs = _extract_generation_logprobs(action_ids, generation.logprobs) if action_ids else []
+    except BaseException:
+        if extends:
+            traj.pil_images, traj.mm_train_inputs, traj.image_budget = saved_mm
+        raise
 
     # Commit the turn only now that generate succeeded. A failed generate above left the session
     # untouched, so the stock client's retry (same messages) re-runs this turn cleanly — no
