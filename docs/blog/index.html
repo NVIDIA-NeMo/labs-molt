@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+<!-- blog/ lists every entry in posts.js; blog/?p=<slug> renders posts/<slug>.md. See README.md here. -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Blog · Molt</title>
+<meta name="description" content="News, releases, and research notes from Molt, a Hugging Face-native framework for agentic RL research.">
+<meta name="theme-color" content="#000000">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Molt Blog">
+<meta property="og:description" content="News, releases, and research notes from Molt.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🦋</text></svg>">
+<link rel="stylesheet" href="../assets/site.css">
+</head>
+<body>
+
+<header class="nav">
+  <div class="nav-inner">
+    <a class="brand" href="../" aria-label="Molt home">Molt</a>
+    <nav aria-label="Sections">
+      <ul class="nav-links">
+        <li class="keep"><a href="./" aria-current="page">Blog</a></li>
+        <li><a href="../#architecture">Architecture</a></li>
+        <li><a href="../#automodel">AutoModel</a></li>
+        <li><a href="../#features">Features</a></li>
+        <li><a href="../#quickstart">Quick Start</a></li>
+      </ul>
+    </nav>
+    <a class="nav-cta" href="https://github.com/NVIDIA-NeMo/labs-molt">GitHub</a>
+  </div>
+</header>
+
+<main class="blog-main" id="blog-root">
+  <noscript><p class="blog-head">The blog needs JavaScript. You can also read the news on <a href="https://github.com/NVIDIA-NeMo/labs-molt#-news">GitHub</a>.</p></noscript>
+</main>
+
+<footer class="footer">
+  <div class="footer-inner">
+    <div class="legal" style="border-top:0;padding-top:0">
+      <span>Copyright © 2026 NVIDIA Corporation &amp; Affiliates. All rights reserved.</span>
+      <span><a href="../">Molt</a> · <a href="https://github.com/NVIDIA-NeMo/labs-molt">GitHub</a> · <a href="https://arxiv.org/abs/2607.21653">Paper</a></span>
+    </div>
+  </div>
+</footer>
+
+<script src="posts.js"></script>
+<script src="../assets/site.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"
+        integrity="sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi" crossorigin="anonymous"></script>
+<script>
+(function () {
+  var d = document, M = window.Molt, el = M.el, root = d.getElementById('blog-root');
+  var slug = new URLSearchParams(location.search).get('p');
+  var KATEX = 'https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/';
+  var KATEX_JS = 'sha384-7zkQWkzuo3B5mTepMUcHkMB5jZaolc2xDwL6VFqjFALcbeS9Ggm/Yr2r3Dy4lfFg';
+  var KATEX_CSS = 'sha384-nB0miv6/jRmo5UMMR1wu3Gz6NLsoTkbqJghGIsx//Rlm+ZU03BU6SQNC66uf4l5+';
+  function backLink() { var a = el('a', 'more back', 'All posts'); a.href = './'; return a; }
+
+  if (!slug) {
+    var head = el('div', 'blog-head'), grid = el('div', 'news-grid');
+    head.appendChild(el('p', 'kicker', 'Molt'));
+    head.appendChild(el('h1', null, 'News & Blog'));
+    head.appendChild(el('p', 'sub', 'Releases, research notes, and deep dives.'));
+    root.appendChild(head);
+    root.appendChild(grid);
+    M.render(grid, { base: '', cards: true });
+    return;
+  }
+
+  // Only a file name inside posts/ is ever fetched, so ?p= cannot load other content.
+  (/^[\w-]+$/.test(slug) ? fetch('posts/' + slug + '.md') : Promise.reject())
+    .then(function (r) { return r.ok ? r.text() : Promise.reject(); })
+    .then(show, function () {
+      var head = el('div', 'blog-head');
+      head.appendChild(el('h1', null, 'Post not found'));
+      head.appendChild(backLink());
+      root.appendChild(head);
+    });
+
+  function show(md) {
+    var meta = window.MOLT_POSTS.filter(function (p) { return p.slug === slug; })[0] || {};
+    // The leading comment and "# Title" keep the file readable on GitHub; the page shows its own header.
+    md = md.replace(/^\s*<!--[\s\S]*?-->\s*/, '');
+    var h1 = md.match(/^#[ \t]+(.+)\n/);
+    if (h1) md = md.slice(h1[0].length);
+
+    // Lift math out before Markdown runs, so underscores and backslashes survive:
+    // $inline$, $$display$$, and GitHub-style ```math fences. Code is left alone.
+    var math = [];
+    function keep(tex, display) {
+      math.push({ tex: tex, display: display });
+      var token = '@@MATH' + (math.length - 1) + '@@';
+      return display ? '\n\n' + token + '\n\n' : token;
+    }
+    md = md.split(/(^```[^\n]*\n[\s\S]*?\n```[ \t]*$)/m).map(function (seg, i) {
+      if (i % 2) {
+        var fence = seg.match(/^```math[ \t]*\n([\s\S]*?)\n```[ \t]*$/);
+        return fence ? keep(fence[1].trim(), true) : seg;
+      }
+      return seg.split(/(`[^`\n]*`)/).map(function (text, j) {
+        if (j % 2) return text;
+        return text
+          .replace(/\$\$([\s\S]+?)\$\$/g, function (_, tex) { return keep(tex.trim(), true); })
+          .replace(/(^|[^\\$\w])\$(?!\s)([^$\n]*?[^\s$\\])\$(?![\w$])/g, function (_, pre, tex) { return pre + keep(tex, false); });
+      }).join('');
+    }).join('');
+
+    var article = el('article', 'article'), head = el('header', 'article-head');
+    var info = el('p', 'meta'), prose = el('div', 'prose'), foot = el('footer', 'article-foot');
+    var title = meta.title || (h1 ? h1[1] : slug);
+    if (meta.tag) info.appendChild(el('span', 'tag', meta.tag));
+    if (meta.date) info.appendChild(el('time', null, M.fmtDate(meta.date)));
+    head.appendChild(backLink());
+    head.appendChild(info);
+    head.appendChild(el('h1', null, title));
+    if (meta.summary) head.appendChild(el('p', 'dek', meta.summary));
+    prose.innerHTML = window.marked.parse(md)
+      .replace(/<p>\s*@@MATH(\d+)@@\s*<\/p>/g, '<div class="math-block" data-math="$1"></div>')
+      .replace(/@@MATH(\d+)@@/g, '<span data-math="$1"></span>');
+    foot.appendChild(backLink());
+    article.appendChild(head);
+    article.appendChild(prose);
+    article.appendChild(foot);
+    root.appendChild(article);
+    d.title = title + ' · Molt Blog';
+
+    // Resolve relative links and images against the Markdown file, so the same
+    // paths work here and when the file is viewed on GitHub.
+    var base = new URL('posts/' + slug + '.md', location.href);
+    [].forEach.call(prose.querySelectorAll('[src], a[href]'), function (n) {
+      var attr = n.hasAttribute('src') ? 'src' : 'href', v = n.getAttribute(attr);
+      if (!/^([a-z][a-z0-9+.\-]*:|\/|#)/i.test(v)) n.setAttribute(attr, new URL(v, base).href);
+      if (attr === 'href' && n.host !== location.host) { n.target = '_blank'; n.rel = 'noopener'; }
+    });
+
+    // KaTeX loads only for posts that contain math. Until it does, the TeX source shows.
+    var nodes = [].slice.call(prose.querySelectorAll('[data-math]'));
+    if (!nodes.length) return;
+    nodes.forEach(function (n) { n.textContent = math[n.getAttribute('data-math')].tex; });
+    var css = el('link'), js = el('script');
+    css.rel = 'stylesheet'; css.href = KATEX + 'katex.min.css'; css.integrity = KATEX_CSS; css.crossOrigin = 'anonymous';
+    js.src = KATEX + 'katex.min.js'; js.integrity = KATEX_JS; js.crossOrigin = 'anonymous';
+    js.onload = function () {
+      nodes.forEach(function (n) {
+        var m = math[n.getAttribute('data-math')];
+        window.katex.render(m.tex, n, { displayMode: m.display, throwOnError: false });
+      });
+    };
+    d.head.appendChild(css);
+    d.head.appendChild(js);
+  }
+})();
+</script>
+</body>
+</html>

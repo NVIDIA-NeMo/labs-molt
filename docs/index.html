@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Molt · Agentic RL, Hugging Face-native</title>
+<meta name="description" content="Molt is an open-source, Hugging Face-native framework for agentic RL research: easy to modify, and built to scale with NeMo AutoModel's native tensor, expert, and context parallelism.">
+<meta name="theme-color" content="#000000">
+<link rel="canonical" href="https://nvidia-nemo.github.io/labs-molt/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Molt · Easy to modify. Built to scale.">
+<meta property="og:description" content="A Hugging Face-native framework for agentic RL research.">
+<meta property="og:url" content="https://nvidia-nemo.github.io/labs-molt/">
+<meta property="og:image" content="https://i.ytimg.com/vi/3DqXGFIce0o/maxresdefault.jpg">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🦋</text></svg>">
+<link rel="stylesheet" href="assets/site.css">
+</head>
+<body>
+
+<header class="nav">
+  <div class="nav-inner">
+    <a class="brand" href="#top" aria-label="Molt home">Molt</a>
+    <nav aria-label="Sections">
+      <ul class="nav-links">
+        <li class="keep"><a href="blog/">Blog</a></li>
+        <li><a href="#architecture">Architecture</a></li>
+        <li><a href="#automodel">AutoModel</a></li>
+        <li><a href="#features">Features</a></li>
+        <li><a href="#quickstart">Quick Start</a></li>
+      </ul>
+    </nav>
+    <a class="nav-cta" href="https://github.com/NVIDIA-NeMo/labs-molt">GitHub</a>
+  </div>
+</header>
+
+<main id="top">
+
+  <!-- ============ HERO + DEMO ============ -->
+  <section class="hero dark">
+    <div class="hero-inner">
+      <div>
+        <a class="chip" id="latest" href="blog/"><b>New</b><span>Read the blog</span></a>
+        <h1>Molt</h1>
+        <p class="tagline">Easy to modify. Built to scale.</p>
+        <p class="lede">A Hugging Face-native framework for agentic RL research.</p>
+        <div class="actions">
+          <a class="btn btn-primary" href="#quickstart">Get started</a>
+          <a class="btn btn-ghost" href="https://arxiv.org/abs/2607.21653">Read the paper</a>
+        </div>
+      </div>
+
+      <div class="demo" id="demo">
+        <div class="player">
+          <a class="player-poster" href="https://www.youtube.com/watch?v=3DqXGFIce0o"
+             data-video="3DqXGFIce0o"
+             data-title="Molt: A Hugging Face-Native, Minimal, and Scalable Framework for Agentic Reinforcement Learning"
+             aria-label="Play the Molt demo video">
+            <img src="https://i.ytimg.com/vi/3DqXGFIce0o/maxresdefault.jpg" alt="" width="1280" height="720">
+            <span class="play" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 3.6v16.8a1 1 0 0 0 1.5.86l14.2-8.4a1 1 0 0 0 0-1.72L7.5 2.74A1 1 0 0 0 6 3.6z"/></svg></span>
+          </a>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ NEWS & BLOG ============
+       Rows come from blog/posts.js (newest first). See blog/README.md to add a post. -->
+  <section class="section mist" id="blog">
+    <div class="news-head">
+      <div>
+        <p class="kicker">News &amp; Blog</p>
+        <h2>The latest.</h2>
+      </div>
+      <a class="more" href="blog/">All posts</a>
+    </div>
+    <div class="news-list" id="latest-posts"></div>
+    <noscript><p class="after"><a class="more" href="https://github.com/NVIDIA-NeMo/labs-molt#-news">Read the news on GitHub</a></p></noscript>
+  </section>
+
+  <!-- ============ ARCHITECTURE ============ -->
+  <section class="section" id="architecture">
+    <div class="head">
+      <p class="kicker">Architecture</p>
+      <h2>One loop.</h2>
+      <p class="sub">Ray coordinates three kinds of processes: agent workers, vLLM rollout engines, and one trainer. In asynchronous mode the six stages overlap.</p>
+    </div>
+
+    <div class="loop">
+      <div class="node">
+        <span class="role">Rollout</span>
+        <h3>vLLM engines</h3>
+        <p>Generate tokens for the agents.</p>
+      </div>
+      <div class="link">
+        <span class="hop"><i class="arrow back"></i><span><i class="n">1</i>request</span></span>
+        <span class="hop under"><i class="arrow"></i><span><i class="n">2</i>tokens + log&#8209;probs</span></span>
+      </div>
+      <div class="node">
+        <span class="role">Your program</span>
+        <h3>Agent workers</h3>
+        <p><i class="n">3</i>Call tools and the model in turn, then return a reward.</p>
+      </div>
+      <div class="link">
+        <span class="hop"><i class="arrow"></i><span><i class="n">4</i>trajectory</span></span>
+      </div>
+      <div class="node">
+        <span class="role">Ray</span>
+        <h3>Queue</h3>
+        <p>Buffers finished trajectories and bounds policy lag.</p>
+      </div>
+      <div class="link">
+        <span class="hop"><i class="arrow"></i><span><i class="n">5</i>batch</span></span>
+      </div>
+      <div class="node">
+        <span class="role">Training</span>
+        <h3>Trainer</h3>
+        <p>NeMo AutoModel + FSDP2 update the policy.</p>
+      </div>
+      <div class="refit"><span><i class="n">6</i>weight refit<span class="wide">: new weights return to the engines</span></span></div>
+    </div>
+
+    <ul class="trio">
+      <li>
+        <span class="role">Black-box agents</span>
+        <h3>Train the agent you already&nbsp;have.</h3>
+        <p>Redirect an OpenAI or Anthropic client to Molt. When the agent rewrites its own context, the rollout is segmented automatically.</p>
+      </li>
+      <li>
+        <span class="role">Fully asynchronous</span>
+        <h3>A slow episode delays only&nbsp;itself.</h3>
+        <p>Batches come from completed groups while other rollouts stay in flight. Stale samples are corrected with the log-probabilities recorded at sampling time.</p>
+      </li>
+      <li>
+        <span class="role">Distributed experience</span>
+        <h3>Heavy data stays where it is&nbsp;produced.</h3>
+        <p>Screenshots and token sequences live in each node’s Ray object store. The queue carries only references.</p>
+      </li>
+    </ul>
+  </section>
+
+  <!-- ============ NEMO AUTOMODEL ============ -->
+  <section class="section mist" id="automodel">
+    <div class="head">
+      <p class="kicker">NeMo AutoModel</p>
+      <h2>Parallelism, applied from&nbsp;outside.</h2>
+      <p class="sub">The policy stays an ordinary PyTorch module in the Hugging Face layout. FSDP2 shards its parameters, and three forms of parallelism divide the computation. Each is one flag.</p>
+    </div>
+
+    <div class="bento">
+      <article class="card full moss split">
+        <div>
+          <span class="label">The trainer, as released</span>
+          <p class="giant">2.8T</p>
+          <p>parameters, fully fine-tuned on 256 GPUs with NeMo AutoModel. Molt uses that trainer unchanged, so a trillion-parameter policy takes the same command as a 4B one.</p>
+        </div>
+        <div class="ladder" role="img" aria-label="Model sizes on the same trainer: Qwen3 at 4 billion parameters, GLM-5.2 at 753 billion, Kimi K2 at 1 trillion, Kimi K3 at 2.8 trillion.">
+          <div><b>4B</b>Qwen3</div>
+          <div><b>753B</b>GLM-5.2</div>
+          <div><b>1T</b>Kimi K2</div>
+          <div><b>2.8T</b>Kimi K3</div>
+        </div>
+      </article>
+
+      <article class="card">
+        <span class="label"><code>--fsdp.tp_size</code></span>
+        <h3>Tensor parallelism</h3>
+        <p>Splits each weight matrix across GPUs.</p>
+        <div class="art pviz" aria-hidden="true">
+          <span class="cap">one weight matrix</span>
+          <div class="stage slabs"><i class="g0"></i><i class="g1"></i><i class="g2"></i><i class="g3"></i></div>
+          <div class="gpus"><span>GPU 0</span><span>GPU 1</span><span>GPU 2</span><span>GPU 3</span></div>
+        </div>
+      </article>
+
+      <article class="card">
+        <span class="label"><code>--fsdp.ep_size</code></span>
+        <h3>Expert parallelism</h3>
+        <p>Places MoE experts on different GPUs and routes each token to the GPU that holds its expert.</p>
+        <div class="art pviz" aria-hidden="true">
+          <span class="cap">tokens, routed to their experts</span>
+          <div class="stage">
+            <div class="toks"><i class="g2"></i><i class="g0"></i><i class="g3"></i><i class="g1"></i><i class="g0"></i><i class="g2"></i><i class="g1"></i><i class="g3"></i><i class="g0"></i><i class="g1"></i><i class="g3"></i><i class="g2"></i></div>
+            <div class="experts"><div class="g0"><i></i><i></i></div><div class="g1"><i></i><i></i></div><div class="g2"><i></i><i></i></div><div class="g3"><i></i><i></i></div></div>
+          </div>
+          <div class="gpus"><span>GPU 0</span><span>GPU 1</span><span>GPU 2</span><span>GPU 3</span></div>
+        </div>
+      </article>
+
+      <article class="card">
+        <span class="label"><code>--fsdp.cp_size</code></span>
+        <h3>Context parallelism</h3>
+        <p>Splits one long sequence across GPUs, for trajectories of tens of thousands of tokens.</p>
+        <div class="art pviz" aria-hidden="true">
+          <span class="cap">one long sequence</span>
+          <div class="stage seq"><i class="g0"></i><i class="g1"></i><i class="g2"></i><i class="g3"></i></div>
+          <div class="gpus"><span>GPU 0</span><span>GPU 1</span><span>GPU 2</span><span>GPU 3</span></div>
+        </div>
+      </article>
+
+      <article class="card full ink">
+        <span class="label">Hugging Face-native</span>
+        <h3>A new model needs no&nbsp;bridge.</h3>
+        <p>The checkpoint loads directly, the rollout engines read the same directory, and the model code contains no parallel logic.</p>
+        <div class="art flows">
+          <div>
+            <div class="flow-label"><span>Bridged, the Megatron path</span><span class="key">code written for each model family</span></div>
+            <div class="flow">
+              <span class="step">Hugging Face checkpoint</span><span class="sep" aria-hidden="true">→</span>
+              <span class="step per">Translate the configuration</span><span class="sep" aria-hidden="true">→</span>
+              <span class="step per">Convert weights to Megatron’s layout</span><span class="sep" aria-hidden="true">→</span>
+              <span class="step">Megatron model</span><span class="sep" aria-hidden="true">→</span>
+              <span class="step per">Convert back at every weight refit</span><span class="sep" aria-hidden="true">→</span>
+              <span class="step">Rollout engine</span>
+            </div>
+          </div>
+          <div>
+            <div class="flow-label"><span>Native, the Molt path</span></div>
+            <div class="flow">
+              <span class="step">Hugging Face checkpoint</span><span class="sep" aria-hidden="true">→</span>
+              <span class="step nat">Ordinary PyTorch module in the Hugging Face layout<small>FSDP2 + TP / EP / CP wrap it from outside</small></span><span class="sep" aria-hidden="true">→</span>
+              <span class="step">Rollout engine</span>
+            </div>
+          </div>
+        </div>
+      </article>
+    </div>
+  </section>
+
+  <!-- ============ FEATURES ============ -->
+  <section class="section dark" id="features">
+    <div class="head">
+      <p class="kicker">Easy to modify</p>
+      <h2>One path. Flat&nbsp;code. Small&nbsp;files.</h2>
+      <p class="sub">One training backend, one rollout engine, and command-line flags as the only configuration. The function you edit is the function that runs.</p>
+    </div>
+
+    <div class="bento">
+      <article class="card full slate split-wide">
+        <div>
+          <span class="label">Code map</span>
+          <h3>Where a research change&nbsp;goes.</h3>
+          <p>Each mechanism is one Python file of a few hundred lines, small enough to read in a sitting or hand whole to a coding agent.</p>
+        </div>
+        <table class="spec">
+          <thead><tr><th>To change</th><th>Edit</th><th class="num">Lines</th></tr></thead>
+          <tbody>
+            <tr><td>Advantage estimator</td><td><code>trainer/algorithm/advantage.py</code></td><td class="num">249</td></tr>
+            <tr><td>Policy loss</td><td><code>models/loss.py</code></td><td class="num">393</td></tr>
+            <tr><td>Token capture</td><td><code>agents/_chat_server.py</code></td><td class="num">379</td></tr>
+            <tr><td>Training loop</td><td><code>trainer/rl_trainer.py</code></td><td class="num">735</td></tr>
+          </tbody>
+        </table>
+      </article>
+    </div>
+
+    <div class="kit">
+      <article class="kit-card">
+        <span class="role">Algorithms</span>
+        <h3>Pick an estimator by name.</h3>
+        <ul class="chips">
+          <li>REINFORCE</li><li>GRPO</li><li>Dr. GRPO</li><li>RLOO</li><li>GAE (PPO)</li>
+          <li>FlashREINFORCE</li><li>On-policy distillation</li>
+        </ul>
+      </article>
+      <article class="kit-card">
+        <span class="role">Agents &amp; rewards</span>
+        <h3>Reward is any Python you write.</h3>
+        <ul class="chips">
+          <li>Graders</li><li>Multi-turn tools</li><li>VLM environments</li><li>LLM-as-judge</li>
+          <li>Gymnasium-style Env</li><li>ChatAgent</li>
+        </ul>
+      </article>
+      <article class="kit-card">
+        <span class="role">Models</span>
+        <h3>Train them as released.</h3>
+        <ul class="chips">
+          <li>Qwen3</li><li>DeepSeek-V3</li><li>GLM-5</li><li>Kimi K2</li><li>Gemma 4</li>
+          <li>Llama</li><li>Nemotron 3</li><li>60+ families</li>
+        </ul>
+      </article>
+      <article class="kit-card">
+        <span class="role">Training controls</span>
+        <h3>Stay stable at scale.</h3>
+        <ul class="chips">
+          <li>Importance sampling</li><li>MoE routing replay</li><li>Router freeze</li>
+          <li>KL regularization</li><li>LoRA</li><li>Adam CPU offload</li>
+        </ul>
+      </article>
+    </div>
+
+    <p class="after"><a class="more" href="https://arxiv.org/abs/2607.21653">Benchmarks and results in the paper</a></p>
+  </section>
+
+  <!-- ============ QUICK START ============ -->
+  <section class="section" id="quickstart">
+    <div class="head">
+      <p class="kicker">Quick start</p>
+      <h2>From clone to&nbsp;rollout.</h2>
+      <p class="sub">A run is one command that names the checkpoint, the agent module, and the advantage estimator.</p>
+    </div>
+
+    <div class="term">
+      <div class="term-bar">
+        <div class="seg" role="tablist" aria-label="Quick start commands">
+          <button role="tab" id="tab-install" aria-controls="panel-install" aria-selected="true">Install</button>
+          <button role="tab" id="tab-agent" aria-controls="panel-agent" aria-selected="false">Agent</button>
+          <button role="tab" id="tab-rl" aria-controls="panel-rl" aria-selected="false">RL</button>
+          <button role="tab" id="tab-sft" aria-controls="panel-sft" aria-selected="false">SFT</button>
+        </div>
+        <button class="copy" type="button">Copy</button>
+      </div>
+      <div role="tabpanel" id="panel-install" aria-labelledby="tab-install">
+<pre><code data-lang="bash">git clone https://github.com/NVIDIA-NeMo/labs-molt.git
+cd labs-molt
+
+# recommended: the prebuilt container with the whole CUDA 13 stack
+docker pull hijkzzz/molt:latest</code></pre>
+      </div>
+      <div role="tabpanel" id="panel-agent" aria-labelledby="tab-agent">
+<pre><code data-lang="python">from openai import AsyncOpenAI
+from molt.agents import ChatAgent, ChatAgentRunner, ChatContext, Result
+
+
+class MyAgent(ChatAgent):
+    async def run(self, ctx: ChatContext) -&gt; Result:
+        # ctx.base_url carries the session id and auto-captures the token
+        # trace — no extra_body, no logprobs=True, no session plumbing.
+        client = AsyncOpenAI(base_url=ctx.base_url, api_key=ctx.api_key)
+        resp = await client.chat.completions.create(
+            model=ctx.model_name,
+            messages=[{"role": "user", "content": ctx.prompt}],
+            max_tokens=ctx.sampling_params.max_tokens,
+            temperature=ctx.sampling_params.temperature,
+        )
+        return Result(reward=grade(resp.choices[0].message.content, ctx.label))
+
+
+class AgentRunner(ChatAgentRunner):
+    def __init__(self):
+        super().__init__(MyAgent)</code></pre>
+      </div>
+      <div role="tabpanel" id="panel-rl" aria-labelledby="tab-rl">
+<pre><code data-lang="bash">python3 -m molt.cli.train_rl_ray \
+  --actor.model_name_or_path /path/to/automodel \
+  --data.prompt_dataset /path/to/prompts.jsonl \
+  --data.input_key input \
+  --data.label_key answer \
+  --train.agent_path examples/python/agents/math.py \
+  --vllm.num_engines 2 \
+  --vllm.tensor_parallel_size 2 \
+  --rollout.batch_size 128 \
+  --train.batch_size 128 \
+  --train.micro_batch_size 1 \
+  --algo.advantage.estimator reinforce \
+  --fsdp.attn_implementation te \
+  --ckpt.output_dir ./ckpt/rl</code></pre>
+      </div>
+      <div role="tabpanel" id="panel-sft" aria-labelledby="tab-sft">
+<pre><code data-lang="bash">torchrun --standalone --nproc_per_node=8 -m molt.cli.train_sft \
+  --model.model_name_or_path /path/to/automodel \
+  --data.dataset /path/to/sft.jsonl \
+  --data.input_key input \
+  --data.output_key output \
+  --ckpt.output_dir ./ckpt/sft \
+  --fsdp.attn_implementation te</code></pre>
+      </div>
+    </div>
+
+    <p class="term-links">
+      <a class="more" href="https://github.com/NVIDIA-NeMo/labs-molt#-installation">Installation guide</a>
+      <a class="more" href="https://github.com/NVIDIA-NeMo/labs-molt/tree/main/examples/scripts">Reference scripts</a>
+      <a class="more" href="https://github.com/NVIDIA-NeMo/labs-molt#-agent-contract">Agent contract</a>
+    </p>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <div class="footer-inner">
+    <div class="footer-cols">
+      <div>
+        <h4>Project</h4>
+        <ul>
+          <li><a href="https://github.com/NVIDIA-NeMo/labs-molt">GitHub</a></li>
+          <li><a href="https://arxiv.org/abs/2607.21653">Paper</a></li>
+          <li><a href="https://www.researchgate.net/publication/409325071_Molt_A_Scalable_PyTorch-Native_Training_Framework_for_Agentic_Reinforcement_Learning">Tech report</a></li>
+          <li><a href="https://youtu.be/3DqXGFIce0o">Demo video</a></li>
+          <li><a href="https://deepwiki.com/NVIDIA-NeMo/labs-molt">DeepWiki</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>Get started</h4>
+        <ul>
+          <li><a href="https://github.com/NVIDIA-NeMo/labs-molt#-installation">Installation</a></li>
+          <li><a href="https://github.com/NVIDIA-NeMo/labs-molt#-quick-start">Quick start</a></li>
+          <li><a href="https://github.com/NVIDIA-NeMo/labs-molt#-recipes">Recipes</a></li>
+          <li><a href="https://github.com/NVIDIA-NeMo/labs-molt#-scaling-knobs">Scaling knobs</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>Research</h4>
+        <ul>
+          <li><a href="blog/">Blog</a></li>
+          <li><a href="https://hijkzzz.github.io/REINFORCE-Zero/">REINFORCE Zero</a></li>
+          <li><a href="https://www.alphaxiv.org/abs/2609.flashreinforce-asynchronous-rl-agentic-models">FlashREINFORCE</a></li>
+          <li><a href="https://github.com/NVIDIA-NeMo/labs-molt/tree/automodel-slim">AutoModel-Slim</a></li>
+        </ul>
+      </div>
+      <div>
+        <h4>Community</h4>
+        <ul>
+          <li><a href="https://github.com/NVIDIA-NeMo/labs-molt/issues">Issues</a></li>
+          <li><a href="https://github.com/NVIDIA-NeMo/labs-molt/blob/main/CONTRIBUTING.md">Contributing</a></li>
+          <li><a href="https://github.com/NVIDIA-NeMo/labs-molt/blob/main/SECURITY.md">Security</a></li>
+          <li><a href="https://github.com/NVIDIA-NeMo/labs-molt/blob/main/LICENSE">Apache 2.0 License</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="legal">
+      <span>Copyright © 2026 NVIDIA Corporation &amp; Affiliates. All rights reserved.</span>
+      <span>Released under the Apache License 2.0.</span>
+    </div>
+  </div>
+</footer>
+
+<script src="blog/posts.js"></script>
+<script src="assets/site.js"></script>
+<script>
+(function () {
+  var d = document;
+
+  // News & Blog: the newest posts as rows. The chip in the hero mirrors the first one.
+  var list = d.getElementById('latest-posts'), chip = d.getElementById('latest');
+  window.Molt.render(list, { base: 'blog/', limit: 8 });
+  var first = list.firstElementChild;
+  chip.href = first.href; chip.target = first.target; chip.rel = first.rel;
+  chip.querySelector('span').textContent = first.querySelector('h3').textContent;
+
+  // Demo video: swap the poster for the YouTube player on click.
+  var poster = d.querySelector('.player-poster');
+  poster.addEventListener('click', function (e) {
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return;
+    e.preventDefault();
+    var f = d.createElement('iframe');
+    f.src = 'https://www.youtube-nocookie.com/embed/' + poster.getAttribute('data-video') + '?autoplay=1&rel=0';
+    f.title = poster.getAttribute('data-title');
+    f.allow = 'autoplay; encrypted-media; picture-in-picture';
+    f.referrerPolicy = 'strict-origin-when-cross-origin';
+    f.allowFullscreen = true;
+    poster.parentNode.replaceChild(f, poster);
+  });
+
+  // Quick start: color comments, then Python keywords and strings or shell commands and flags.
+  d.querySelectorAll('code[data-lang]').forEach(function (code) {
+    var python = code.getAttribute('data-lang') === 'python';
+    code.innerHTML = code.innerHTML.split('\n').map(function (line) {
+      if (/^\s*#/.test(line)) return '<span class="t-com">' + line + '</span>';
+      if (python) {
+        return line.replace(/("[^"]*")|\b(from|import|class|async|def|await|return|super)\b/g, function (m, str) {
+          return '<span class="' + (str ? 't-str' : 't-key') + '">' + m + '</span>';
+        });
+      }
+      return line.replace(/(^|\s)(--[\w.\-]+)/g, '$1<span class="t-flag">$2</span>')
+                 .replace(/^(\S+)/, '<span class="t-cmd">$1</span>');
+    }).join('\n');
+  });
+
+  var tabs = [].slice.call(d.querySelectorAll('[role="tab"]'));
+  function select(tab) {
+    tabs.forEach(function (t) {
+      var on = t === tab;
+      t.setAttribute('aria-selected', on);
+      t.tabIndex = on ? 0 : -1;
+      d.getElementById(t.getAttribute('aria-controls')).hidden = !on;
+    });
+  }
+  tabs.forEach(function (t, i) {
+    t.addEventListener('click', function () { select(t); });
+    t.addEventListener('keydown', function (e) {
+      if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return;
+      var next = tabs[(i + (e.key === 'ArrowRight' ? 1 : tabs.length - 1)) % tabs.length];
+      select(next); next.focus();
+    });
+  });
+  select(tabs[0]);
+
+  var copy = d.querySelector('.copy');
+  copy.addEventListener('click', function () {
+    var code = d.querySelector('.term [role="tabpanel"]:not([hidden]) code');
+    navigator.clipboard.writeText(code.textContent).then(function () {
+      copy.textContent = 'Copied';
+      setTimeout(function () { copy.textContent = 'Copy'; }, 1600);
+    });
+  });
+})();
+</script>
+</body>
+</html>
