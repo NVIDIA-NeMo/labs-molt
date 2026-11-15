@@ -27,7 +27,7 @@ Ray · vLLM · NeMo AutoModel — the smallest Hugging Face-native stack for
 
 [**Project Page**](https://nvidia-nemo.github.io/labs-molt/) ·
 [**Docs**](https://nvidia-nemo.github.io/labs-molt/guide/) ·
-[**Paper**](https://arxiv.org/abs/2607.21653) ·
+[**Paper**](https://www.researchgate.net/publication/409325071_Molt_A_Scalable_PyTorch-Native_Training_Framework_for_Agentic_Reinforcement_Learning) ·
 [**Video**](https://youtu.be/3DqXGFIce0o) ·
 [**News**](#-news) ·
 [**Architecture**](#-architecture) ·
@@ -879,14 +879,12 @@ optimization — all on PyTorch + AutoModel.
 If you use Molt in your research, please cite:
 
 ```bibtex
-@article{hu2026molt,
-  title         = {Molt: A Scalable PyTorch-Native Training Framework for Agentic Reinforcement Learning},
-  author        = {Jian Hu and Molt Contributors},
-  year          = {2026},
-  eprint        = {2607.21653},
-  archivePrefix = {arXiv},
-  primaryClass  = {cs.LG},
-  url           = {https://arxiv.org/abs/2607.21653}
+@techreport{hu2026molt,
+  title       = {Molt: A Scalable PyTorch-Native Training Framework for Agentic Reinforcement Learning},
+  author      = {Jian Hu and Molt Contributors},
+  institution = {NVIDIA},
+  year        = {2026},
+  url         = {https://www.researchgate.net/publication/409325071_Molt_A_Scalable_PyTorch-Native_Training_Framework_for_Agentic_Reinforcement_Learning}
 }
 ```
 
