@@ -47,7 +47,7 @@ the same `cicd` label check as this repository.
 
 ```bibtex
 @techreport{hu2026molt,
-  title       = {Molt: A Scalable PyTorch-Native Training Framework for Agentic Reinforcement Learning},
+  title       = {Molt: A Hugging Face-Native, Minimal, and Scalable Framework for Agentic Reinforcement Learning},
   author      = {Jian Hu and Molt Contributors},
   institution = {NVIDIA},
   year        = {2026},
