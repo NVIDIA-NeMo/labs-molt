@@ -26,6 +26,7 @@ from typing import Dict, List, Optional
 import ray
 import torch
 import torch.distributed
+from torch.distributed.tensor import DTensor
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -85,6 +86,11 @@ def _lora_merge_map(model: torch.nn.Module, sd: dict) -> dict:
             )
         merge[w_name] = (name, b_name, scales[base])
     return merge
+
+
+def _local_data(param: torch.Tensor) -> torch.Tensor:
+    """This rank's storage of a parameter: its shard under FSDP2, the whole tensor on a single-rank trainer."""
+    return param.detach().to_local() if isinstance(param, DTensor) else param.detach()
 
 
 @torch.no_grad()
@@ -693,7 +699,7 @@ class PolicyTrainer:
     def swap_fp32_master(self):
         """Exchange the served bf16 copy in the parameters with the fp32 master set aside at the last refit."""
         for param, other in self._fp32_master or ():
-            local = param.detach().to_local()
+            local = _local_data(param)
             held = local.clone()
             local.copy_(other)
             other.copy_(held)
@@ -704,22 +710,22 @@ class PolicyTrainer:
         # (no DS-engine `.module` indirection); params are DTensors when sharded.
         model = self.actor.model
 
-        from torch.distributed.tensor import DTensor
-
         ep_size = getattr(self.strategy.args.fsdp, "ep_size", 1) or 1
         model_config = getattr(model, "config", None)
 
         # Round-to-nearest hides every update smaller than half a bf16 step from vLLM. Each rank
-        # rounds its own shards stochastically instead, so the refit below sends that copy and
-        # the next forward trains on the same one; training_step restores the master.
+        # rounds its own storage stochastically instead, in place: the refit below sends that copy
+        # and the next forward, whose bf16 cast of it is exact, trains on the same one. An unsharded
+        # parameter on several ranks is a replica and is left alone, or the replicas would differ.
         if self.args.train.stochastic_rounding and self._fp32_master is None:
+            single_rank = torch.distributed.get_world_size() == 1
             self._fp32_master = [
-                (param, param.detach().to_local().clone())
+                (param, _local_data(param).clone())
                 for param in model.parameters()
-                if isinstance(param, DTensor) and param.dtype == torch.float32 and param.requires_grad
+                if param.dtype == torch.float32 and param.requires_grad and (single_rank or isinstance(param, DTensor))
             ]
             for param, _ in self._fp32_master:
-                _stochastic_round_to_bf16_(param.detach().to_local())
+                _stochastic_round_to_bf16_(_local_data(param))
 
         # LoRA: vLLM serves full weights, so refit broadcasts the adapter merged
         # into its base weight (W + scale·B@A) and skips the adapter entries.
