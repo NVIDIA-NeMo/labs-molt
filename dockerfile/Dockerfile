@@ -196,8 +196,8 @@ RUN apt-get update && apt-get install -y --allow-change-held-packages rdma-core 
 # vision-only RL and the encoder is frozen — but the weights must load. Torch-pinned so the
 # [audio] extra (librosa/soundfile; torchaudio already in base) can't swap the torch trio.
 # Baking it here removes the per-run, per-node rl_omni3 MOLT_INSTALL_AUDIO install.
-ARG VLLM_COMMIT=c410543d9ffff03f5f6c4a8c0ae1d3ad082c4a15
-ARG VLLM_VERSION=0.34.0rc1.dev388+gc410543d9
+ARG VLLM_COMMIT=75f3967ac127cb5cf36b2fee7b7377dca5725d51
+ARG VLLM_VERSION=0.34.0rc1.dev539+g75f3967ac
 RUN python -m pip install -c /opt/torch-pin.txt --extra-index-url "https://wheels.vllm.ai/${VLLM_COMMIT}" "vllm[audio]==${VLLM_VERSION}"
 
 # --- VLM modeling-code runtime deps + molt requirements + fla -----------
