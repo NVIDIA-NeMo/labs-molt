@@ -88,6 +88,8 @@ class Experience:
     action_log_probs: torch.Tensor = tensor_field("step", default=None)  # (B, T-1) log pi_theta(a|s)
     base_action_log_probs: torch.Tensor = tensor_field("step", default=None)  # (B, T-1) log pi_ref(a|s)
     rollout_log_probs: torch.Tensor = tensor_field("step", default=None)  # (B, T-1) log pi_old(a|s)
+    # (B, T-1) action steps whose rollout log-prob mismatch/* compares: each request's first one dropped.
+    mismatch_mask: torch.BoolTensor = tensor_field("step", default=None)
     # Score centering: the rollout sampler's top-k candidate ids and their log-probs per step,
     # stored seq-last (B, k, T-1) like routed_experts so the right-pad/concat machinery applies.
     rollout_top_ids: torch.Tensor = tensor_field("step", default=None)

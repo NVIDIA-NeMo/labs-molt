@@ -218,40 +218,32 @@ class PolicyTrainer:
     def _record_status(self, status, status_list, pbar):
         metrics = status["metrics"]
         weights = status["weights"]
-        n_tokens = status["num_action_tokens"]
-        n_samples = status["num_samples"]
+        counts = status["counts"]
 
         # Weighted mean of each metric across DP ranks: scale this rank's value by
-        # its local token/sample count, all-reduce the weighted sums together with
-        # the counts (carried as "_num_*" so they ride the same reduce), then divide
-        # by the reduced totals. weight is None means "report as-is" (e.g. lr) -> kept
-        # out of the reduce in last_metrics.
-        reduced_status = {"_num_action_tokens": n_tokens, "_num_samples": n_samples}
+        # its local count of what its weight names (action tokens, samples, or the
+        # tokens mismatch/* compares), all-reduce the weighted sums together with the
+        # counts (carried as "_num_*" so they ride the same reduce), then divide by the
+        # reduced totals. A metric whose total count is 0 is not reported (a 0 would read as a pass).
+        # weight is None means "report as-is" (e.g. lr) -> kept out of the reduce.
+        reduced_status = {f"_num_{kind}": n for kind, n in counts.items()}
         last_metrics = {}
         for k, value in metrics.items():
             weight = weights[k]
             if weight is None:
                 last_metrics[k] = value
                 continue
-            scale = n_tokens if weight == "token" else n_samples
+            scale = counts[weight]
             reduced_status[k] = (
                 value.float().mean().item() * scale if isinstance(value, torch.Tensor) else value * scale
             )
 
         reduced_status = self.strategy.all_reduce(reduced_status)
 
-        # n_tokens/n_samples above were this rank's local counts; these are the
-        # cross-rank totals that serve as the weighted-mean denominators.
-        total_tokens = reduced_status.pop("_num_action_tokens")
-        total_samples = reduced_status.pop("_num_samples")
-        merged_status = {}
-        for k, value in reduced_status.items():
-            denom = total_tokens if weights[k] == "token" else total_samples
-            merged_status[k] = value / denom
-
+        totals = {kind: reduced_status.pop(f"_num_{kind}") for kind in counts}
+        merged_status = {k: v / totals[weights[k]] for k, v in reduced_status.items() if totals[weights[k]] > 0}
         merged_status.update(last_metrics)
-        merged_status["_num_samples"] = total_samples
-        merged_status["_num_action_tokens"] = total_tokens
+        merged_status["_counts"] = totals
         merged_status["_weights"] = weights
 
         short_status = {
@@ -385,7 +377,7 @@ class PolicyTrainer:
 
         if status_list:
             for k in set().union(*(s.keys() for s in status_list)):
-                if k in ("_num_samples", "_num_action_tokens", "_weights"):
+                if k in ("_counts", "_weights"):
                     continue
                 # Average over the microbatches that report k: grad_norm exists on optimizer-step
                 # microbatches only, and an env info key set on some samples only (e.g. a failure
@@ -397,8 +389,10 @@ class PolicyTrainer:
                 elif k == "actor_lr":
                     status_mean[k] = present[-1][k]
                 else:
-                    n = "_num_action_tokens" if present[0]["_weights"].get(k) == "token" else "_num_samples"
-                    status_mean[k] = sum(s[k] * s[n] for s in present) / sum(s[n] for s in present)
+                    n = present[0]["_weights"][k]
+                    status_mean[k] = sum(s[k] * s["_counts"][n] for s in present) / sum(
+                        s["_counts"][n] for s in present
+                    )
 
         status_mean.update(
             self.strategy.compute_perf_metrics(self._mfu, local_seq_count, local_token_sum, time.time() - perf_t0)
@@ -514,9 +508,10 @@ class PolicyTrainer:
             experience.info["vllm_kl"] = vllm_kl.detach()
         if is_filter_ratio is not None:
             experience.info["is_filter_ratio"] = is_filter_ratio.detach()
+        mismatch = {}
         if rollout_log_probs is not None:
-            experience.info.update(
-                mismatch_metrics(rollout_log_probs, action_log_probs, action_mask, self.args.rollout.top_p)
+            mismatch = mismatch_metrics(
+                rollout_log_probs, action_log_probs, experience.mismatch_mask, self.args.rollout.top_p
             )
         if rollout_top_log_probs is not None:
             # Score centering runs without the IS path, so report the train/rollout drift it would have
@@ -634,6 +629,10 @@ class PolicyTrainer:
         metrics["advantage_mean"] = masked_mean(advantages, action_mask).detach()
         weights["advantage_mean"] = "token"
 
+        # Averaged over the comparable tokens only, which a rank or microbatch can have none of.
+        metrics.update(mismatch)
+        weights.update(dict.fromkeys(mismatch, "mismatch"))
+
         metrics["actor_lr"] = self.actor_scheduler.get_last_lr()[0]
         weights["actor_lr"] = None
         # grad_norm is meaningful only on the optimizer-step microbatch, where
@@ -667,12 +666,10 @@ class PolicyTrainer:
                 metrics[f.name] = value
                 weights[f.name] = "sample"
 
-        return {
-            "metrics": metrics,
-            "weights": weights,
-            "num_samples": float(experience.action_mask.shape[0]),
-            "num_action_tokens": float(action_mask.sum().item()),
-        }
+        counts = {"token": float(action_mask.sum().item()), "sample": float(experience.action_mask.shape[0])}
+        if mismatch:
+            counts["mismatch"] = float(experience.mismatch_mask.sum().item())
+        return {"metrics": metrics, "weights": weights, "counts": counts}
 
     def broadcast_to_vllm(self):
         torch.cuda.empty_cache()
