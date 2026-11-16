@@ -167,8 +167,7 @@ def test_reload_mode_reaches_vllm_through_its_environment_variable(monkeypatch):
 )
 def test_create_vllm_engines_forwards_the_logprobs_mode(monkeypatch, logprobs_mode, expected):
     """The caller's choice has to reach vLLM: post-temperature log-probs when it asks for them, and
-    nothing at all when it wants vLLM's raw default (molt asks for raw at temperature 1, where the
-    full vocabulary is what the training forward recomputes)."""
+    nothing at all when it passes None for vLLM's raw default."""
     captured = {}
 
     def _spawn(**kwargs):

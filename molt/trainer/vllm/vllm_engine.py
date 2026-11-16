@@ -288,8 +288,8 @@ def create_vllm_engines(
     # temperature, so raw rollout log-probs would mismatch by the temperature
     # factor and bias the TIS / vLLM-IS correction whenever rollout temperature
     # != 1.0. "processed_logprobs" makes vLLM return post-temperature log-probs
-    # that align with the actor. They are also post-MASK, though (top_p/top_k, and the min_tokens
-    # stop-token mask on a turn's first token), so raw is the exact match at temperature 1.
+    # that align with the actor. They are also post-mask (top_p/top_k, and the min_tokens stop mask
+    # on each request's first token); mismatch/* leaves those steps out of its comparison.
     # Pass None to fall back to vLLM's raw behavior.
     logprobs_mode="processed_logprobs",
     max_images_per_prompt: int = 0,
