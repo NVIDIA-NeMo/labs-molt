@@ -158,25 +158,22 @@ def masked_mean(tensor: torch.Tensor, mask: Optional[torch.Tensor], dim: int = N
 def mismatch_metrics(
     rollout_log_probs: torch.Tensor, train_log_probs: torch.Tensor, mask: torch.Tensor, top_p: float = 1.0
 ) -> dict:
-    """Train-inference consistency of the sampled-token logprobs over the comparable valid tokens.
+    """Train-inference consistency of the sampled-token logprobs over the comparable tokens in ``mask``.
 
     ``bitwise_frac`` is the fraction of comparable tokens whose fp32 logprob bytes differ between the
-    rollout engine and this forward; 0 with valid tokens is the bitwise pass. The others are
+    rollout engine and this forward; 0 with comparable tokens is the bitwise pass. The others are
     diagnostics on d = train - rollout: mean |d| and the k3 KL estimate exp(d) - 1 - d. All three
-    are masked means, so the token-weighted reduction over microbatches and ranks stays exact
-    (a max would not survive that reduction; replay comparisons report it).
+    are masked means, so weighting them by ``mask.sum()`` keeps the reduction over microbatches and
+    ranks exact (a max would not survive that reduction; replay comparisons report it).
 
     The engine's log-probs are post-sampling-mask while this forward recomputes over the full
     vocabulary, and a renormalized step is a different quantity rather than a mismatch. ``top_p`` < 1
-    renormalizes every step, leaving nothing to compare, and vLLM's min_tokens stop mask renormalizes
-    each turn's first generated step, which drops out below.
+    renormalizes every step, leaving nothing to compare; vLLM's min_tokens stop mask renormalizes
+    each request's first step, which ``Experience.mismatch_mask`` already leaves out.
     """
     if top_p < 1.0:
         return {}
     valid = mask.bool()
-    previous_step = torch.zeros_like(valid)
-    previous_step[:, 1:] = valid[:, :-1]
-    valid = valid & previous_step  # not a turn's first step: vLLM masked the stop tokens there
     rollout = rollout_log_probs.float().contiguous()
     train = train_log_probs.detach().float().contiguous()
     d = torch.where(valid, train - rollout, torch.zeros_like(train))

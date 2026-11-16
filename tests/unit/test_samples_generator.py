@@ -409,6 +409,30 @@ def test_process_response_preserves_text_info_through_replay_buffer_append():
     assert replay_buffer.items[0].info["feedback"] == "wrong unit"
 
 
+def test_mismatch_mask_drops_each_requests_first_token_even_back_to_back():
+    """vLLM's min_tokens stop mask renormalizes each request's first token, so mismatch/* skips it.
+    A step env can answer with empty feedback, which leaves two requests adjacent and indistinguishable
+    in action_mask; the recorded ranges still tell them apart."""
+    experience, _ = SamplesGenerator._process_response_into_experience(
+        Trajectory(
+            prompt="p",
+            label="l",
+            images=None,
+            observation_text="",
+            observation_tokens=list(range(7)),
+            action_ranges=[(2, 4), (4, 6)],  # no feedback between the two requests
+            rollout_log_probs=[0.0] * 7,
+            reward=1.0,
+            scores=1.0,
+        ),
+        media_ids=set(),
+        truncate_length=8,
+    )
+
+    torch.testing.assert_close(experience.action_mask, torch.tensor([[False, True, True, True, True, False]]))
+    torch.testing.assert_close(experience.mismatch_mask, torch.tensor([[False, False, True, False, True, False]]))
+
+
 def test_process_response_rejects_action_ranges_outside_trajectory():
     with pytest.raises(ValueError, match="Invalid action range"):
         SamplesGenerator._process_response_into_experience(
