@@ -155,9 +155,7 @@ def masked_mean(tensor: torch.Tensor, mask: Optional[torch.Tensor], dim: int = N
     return valid.sum(dim=dim) / denom
 
 
-def mismatch_metrics(
-    rollout_log_probs: torch.Tensor, train_log_probs: torch.Tensor, mask: torch.Tensor, top_p: float = 1.0
-) -> dict:
+def mismatch_metrics(rollout_log_probs: torch.Tensor, train_log_probs: torch.Tensor, mask: torch.Tensor) -> dict:
     """Train-inference consistency of the sampled-token logprobs over the comparable tokens in ``mask``.
 
     ``bitwise_frac`` is the fraction of comparable tokens whose fp32 logprob bytes differ between the
@@ -167,12 +165,10 @@ def mismatch_metrics(
     ranks exact (a max would not survive that reduction; replay comparisons report it).
 
     The engine's log-probs are post-sampling-mask while this forward recomputes over the full
-    vocabulary, and a renormalized step is a different quantity rather than a mismatch. ``top_p`` < 1
-    renormalizes every step, leaving nothing to compare; vLLM's min_tokens stop mask renormalizes
-    each request's first step, which ``Experience.mismatch_mask`` already leaves out.
+    vocabulary, and a renormalized step is a different quantity rather than a mismatch.
+    ``Experience.mismatch_mask`` already leaves those out: each request's first step (vLLM's
+    min_tokens stop mask) and every step of a request sampled with top_p < 1.
     """
-    if top_p < 1.0:
-        return {}
     valid = mask.bool()
     rollout = rollout_log_probs.float().contiguous()
     train = train_log_probs.detach().float().contiguous()

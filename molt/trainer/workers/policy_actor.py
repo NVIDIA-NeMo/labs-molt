@@ -489,9 +489,7 @@ class PolicyTrainer:
             experience.info["is_filter_ratio"] = is_filter_ratio.detach()
         mismatch = {}
         if rollout_log_probs is not None:
-            mismatch = mismatch_metrics(
-                rollout_log_probs, action_log_probs, experience.mismatch_mask, self.args.rollout.top_p
-            )
+            mismatch = mismatch_metrics(rollout_log_probs, action_log_probs, experience.mismatch_mask)
         if rollout_top_log_probs is not None:
             # Score centering runs without the IS path, so report the train/rollout drift it would have
             # (k1 log-ratio mean) and how much of each distribution the top-k head covers: 1 - sampler
