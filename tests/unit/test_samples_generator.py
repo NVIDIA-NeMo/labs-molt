@@ -433,6 +433,23 @@ def test_mismatch_mask_drops_each_requests_first_token_even_back_to_back():
     torch.testing.assert_close(experience.mismatch_mask, torch.tensor([[False, False, True, False, True, False]]))
 
 
+def test_mismatch_mask_drops_every_token_of_a_nucleus_sampled_request():
+    """At top_p < 1 vLLM renormalizes each log-prob over the nucleus it kept: [0.75, 0.25] reads 1.0
+    for the kept token where the forward reads 0.75, a false gap of 0.288. An env can lower top_p for
+    one turn only, so the whole of that turn leaves the comparison and the other turn stays in."""
+    trajectory = Trajectory(
+        prompt="p", label="l", images=None, observation_text="", observation_tokens=[0, 1], rollout_log_probs=[0.0] * 2
+    )
+    trajectory.append_action([2, 3, 4], [0.0] * 3, top_p=1.0)
+    trajectory.append_feedback("", "", [5])
+    trajectory.append_action([6, 7, 8], [0.0] * 3, top_p=0.7)
+    experience, _ = SamplesGenerator._process_response_into_experience(trajectory, media_ids=set(), truncate_length=16)
+
+    torch.testing.assert_close(
+        experience.mismatch_mask, torch.tensor([[False, False, True, True, False, False, False, False]])
+    )
+
+
 def test_process_response_rejects_action_ranges_outside_trajectory():
     with pytest.raises(ValueError, match="Invalid action range"):
         SamplesGenerator._process_response_into_experience(

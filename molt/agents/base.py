@@ -137,6 +137,9 @@ class Trajectory:
     # from the action mask so they get zero gradient and leave the token-mean
     # denominator (slime's mask_offpolicy_in_partial_rollout). 0 when on-policy.
     off_policy_action_lens: list = field(default_factory=list)
+    # Per action range: the top_p its request sampled with (an env can change it per turn). Below 1
+    # the engine's log-probs are renormalized over the nucleus, so mismatch/* skips the whole range.
+    action_top_ps: list = field(default_factory=list)
     rollout_log_probs: list | None = None
     # Score centering: one ``(ids [n, k], log_probs [n, k])`` pair per action range — the sampler's
     # top-k per generated token, parsed by the transport (``generation.top_logprobs``). None unless
@@ -158,11 +161,14 @@ class Trajectory:
     group_id: str | None = None  # one per prompt group (N rollouts); GRPO baseline averaging
     rollout_id: str | None = None  # one per rollout; multi-turn step-samples dedup
 
-    def append_action(self, action_tokens, action_logprobs=None, off_policy_len=0, action_top_logprobs=None):
+    def append_action(
+        self, action_tokens, action_logprobs=None, off_policy_len=0, action_top_logprobs=None, top_p=1.0
+    ):
         start = len(self.observation_tokens)
         self.observation_tokens.extend(action_tokens)
         self.action_ranges.append((start, len(self.observation_tokens)))
         self.off_policy_action_lens.append(int(off_policy_len))
+        self.action_top_ps.append(float(top_p))
         if self.rollout_log_probs is not None:
             self.rollout_log_probs.extend(action_logprobs or [0.0] * len(action_tokens))
         if self.rollout_top_logprobs is not None:
@@ -432,6 +438,7 @@ class StepEnvRunner(Runner):
                     action_logprobs,
                     off_policy_len=off_policy_len,
                     action_top_logprobs=getattr(generation, "top_logprobs", None),
+                    top_p=turn_sp.top_p,
                 )
                 trajectory.absorb_routing(request_output)  # fills routing by absolute position (R3)
 

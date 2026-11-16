@@ -76,16 +76,6 @@ def test_identical_bytes_read_exactly_zero_everywhere():
     assert all(v.item() == 0.0 for v in m.values())
 
 
-def test_nucleus_sampling_leaves_nothing_to_compare():
-    """With --rollout.top_p below 1 vLLM renormalizes EVERY step over the nucleus it kept, so the
-    metrics would report that renormalization as train/rollout drift. Report nothing instead."""
-    rollout = torch.zeros(1, 4)
-    mask = torch.ones(1, 4, dtype=torch.bool)
-
-    assert mismatch_metrics(rollout, rollout + 0.3, mask, top_p=0.95) == {}
-    assert mismatch_metrics(rollout, rollout + 0.3, mask, top_p=1.0)["mismatch/abs_diff_mean"].item() > 0
-
-
 def _record_across_ranks(statuses):
     """Run the actor's metric reduction for several simulated DP ranks: every rank's all_reduce
     returns the sum of what all of them sent. Returns rank 0's merged status, or None if empty."""
