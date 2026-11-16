@@ -117,7 +117,7 @@ validated against (`setup.py`, `AUTOMODEL`), so R3 routing replay and Muon work 
 
 ```bash
 # the vLLM pin is a main-branch commit: its wheels come from vLLM's per-commit index, not PyPI
-pip install -e ".[vllm]" --extra-index-url https://wheels.vllm.ai/c410543d9ffff03f5f6c4a8c0ae1d3ad082c4a15
+pip install -e ".[vllm]" --extra-index-url https://wheels.vllm.ai/75f3967ac127cb5cf36b2fee7b7377dca5725d51
 ```
 
 CUDA 13 is required (`torch==2.14.0+cu130`). A CUDA 12 environment will not work. With a host driver

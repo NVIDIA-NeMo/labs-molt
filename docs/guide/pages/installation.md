@@ -35,7 +35,7 @@ Tags from 0.1.9 are multi-arch, so the same pull works on x86 and on Grace-Black
 ## Local install
 
 ```bash
-pip install -e ".[vllm]" --extra-index-url https://wheels.vllm.ai/c410543d9ffff03f5f6c4a8c0ae1d3ad082c4a15
+pip install -e ".[vllm]" --extra-index-url https://wheels.vllm.ai/75f3967ac127cb5cf36b2fee7b7377dca5725d51
 ```
 
 - The command installs the git-pinned AutoModel this repository is validated against, so routing
