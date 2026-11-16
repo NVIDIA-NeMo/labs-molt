@@ -963,6 +963,13 @@ if __name__ == "__main__":
         default=False,
         help="After each vLLM weight broadcast, warn which params vLLM did NOT refresh (stale rollout weights).",
     )
+    parser.add_argument(
+        "--train.stochastic_rounding",
+        action="store_true",
+        default=False,
+        help="Round the fp32 master weights to bf16 stochastically (unbiased) instead of to nearest; "
+        "vLLM serves that copy and the trainer's forward runs on it (https://arxiv.org/abs/2610.41073).",
+    )
 
     # Eval
     parser.add_argument("--eval.dataset", type=str, default=None, help="Path to the evaluation dataset")

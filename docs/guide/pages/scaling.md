@@ -33,6 +33,14 @@ and packing, without TP, EP, or CP.
 `--actor.optim adam` is the default and the recommendation. `muon` is experimental: it runs
 distributed, but has shown no consistent win over `adam`.
 
+The trainer keeps fp32 master weights and computes in bf16, and vLLM is refit with the weights
+rounded to bf16. Rounding to nearest leaves a served weight where it was whenever the update is
+smaller than half a bf16 step. `--train.stochastic_rounding` rounds each weight up or down at
+random instead, with the probabilities that make the served value equal the master on average
+([Fair Cast](https://arxiv.org/abs/2610.41073)). The trainer's forward pass runs on that same
+rounded copy until its next optimizer step, which updates the fp32 master; checkpoints keep the
+master.
+
 ## Rollout engines
 
 | Setting | Flag | Notes |

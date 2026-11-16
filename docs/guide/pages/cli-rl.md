@@ -184,6 +184,7 @@
 | `--train.rollout_dump_dir` |  | Save each rollout batch to \<dir\>/rollout_step{N}.pt for later train-only replay. |
 | `--train.rollout_replay_dir` |  | Load \<dir\>/rollout_step{N}.pt instead of generating (train-only replay). |
 | `--train.check_weight_update_equal` | `False` | After each vLLM weight broadcast, warn which params vLLM did NOT refresh (stale rollout weights). |
+| `--train.stochastic_rounding` | `False` | Round the fp32 master weights to bf16 stochastically (unbiased) instead of to nearest; vLLM serves that copy and the trainer's forward runs on it (https://arxiv.org/abs/2610.41073). |
 
 ## `--vllm.*`
 

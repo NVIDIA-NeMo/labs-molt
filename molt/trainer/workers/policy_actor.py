@@ -87,6 +87,18 @@ def _lora_merge_map(model: torch.nn.Module, sd: dict) -> dict:
     return merge
 
 
+@torch.no_grad()
+def _stochastic_round_to_bf16_(weight: torch.Tensor) -> None:
+    """Round an fp32 tensor in place onto the bf16 grid, without bias (https://arxiv.org/abs/2610.41073).
+
+    A float's bit pattern orders its magnitude, so adding 16 random bits and clearing the low 16
+    rounds away from zero with probability equal to how far the value sits past its lower bf16
+    neighbour. The expected result is the input itself.
+    """
+    bits = weight.view(torch.int32)
+    bits.add_(torch.randint_like(bits, 1 << 16)).bitwise_and_(-(1 << 16))
+
+
 class PolicyTrainer:
     """Owns actor-side policy optimization on each Ray/FSDP worker."""
 
@@ -123,6 +135,8 @@ class PolicyTrainer:
         self.actor_scheduler = actor_scheduler
         self.vllm_engines = vllm_engines
         self.max_epochs = self.args.train.max_epochs
+        # --train.stochastic_rounding: [(param, fp32 master)] while the parameters hold the served bf16 copy.
+        self._fp32_master = None
 
         self.actor_loss_fn = PolicyLoss(
             clip_eps_low=self.args.actor.eps_clip_low_high[0],
@@ -615,6 +629,9 @@ class PolicyTrainer:
         # force-on-policy alike. Accumulate until then; step on the final
         # microbatch, where .grad is the fully reduced batch gradient.
         if is_optimizer_step:
+            # The gradient was taken on the served copy; the update belongs to the fp32 master.
+            self.swap_fp32_master()
+            self._fp32_master = None
             self.strategy.optimizer_step(
                 self.actor_optim, self.actor, self.actor_scheduler, name="actor", accumulate=False
             )
@@ -672,6 +689,15 @@ class PolicyTrainer:
             "num_action_tokens": float(action_mask.sum().item()),
         }
 
+    @torch.no_grad()
+    def swap_fp32_master(self):
+        """Exchange the served bf16 copy in the parameters with the fp32 master set aside at the last refit."""
+        for param, other in self._fp32_master or ():
+            local = param.detach().to_local()
+            held = local.clone()
+            local.copy_(other)
+            other.copy_(held)
+
     def broadcast_to_vllm(self):
         torch.cuda.empty_cache()
         # FSDP2/AutoModel: `actor.model` is the FSDP2-wrapped HF model directly
@@ -682,6 +708,18 @@ class PolicyTrainer:
 
         ep_size = getattr(self.strategy.args.fsdp, "ep_size", 1) or 1
         model_config = getattr(model, "config", None)
+
+        # Round-to-nearest hides every update smaller than half a bf16 step from vLLM. Each rank
+        # rounds its own shards stochastically instead, so the refit below sends that copy and
+        # the next forward trains on the same one; training_step restores the master.
+        if self.args.train.stochastic_rounding and self._fp32_master is None:
+            self._fp32_master = [
+                (param, param.detach().to_local().clone())
+                for param in model.parameters()
+                if isinstance(param, DTensor) and param.dtype == torch.float32 and param.requires_grad
+            ]
+            for param, _ in self._fp32_master:
+                _stochastic_round_to_bf16_(param.detach().to_local())
 
         # LoRA: vLLM serves full weights, so refit broadcasts the adapter merged
         # into its base weight (W + scale·B@A) and skips the adapter entries.
@@ -1044,6 +1082,7 @@ class PolicyModelActor(BaseModelActor):
     def save_checkpoint(self, tag, client_states=None, metric_value=None, metric_key=None):
         args = self.strategy.args
         client_states = client_states or {}
+        self.trainer.swap_fp32_master()  # checkpoint the fp32 master, not the served copy
         self.strategy.save_ckpt(
             self.actor.model,
             os.path.join(args.ckpt.path, "_actor"),
@@ -1062,4 +1101,5 @@ class PolicyModelActor(BaseModelActor):
             hf_root = os.path.join(args.ckpt.path, "_hf")
             self.strategy.save_model(self.actor, self.tokenizer, os.path.join(hf_root, tag))
             self.strategy.prune_checkpoints(hf_root, tag, args.ckpt.max_num, args.ckpt.max_mem)
+        self.trainer.swap_fp32_master()
         torch_dist_barrier_and_cuda_sync()
