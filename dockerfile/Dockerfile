@@ -21,7 +21,7 @@
 #   toolkit + cuDNN 9, Ubuntu 24.04) plus Ubuntu's python 3.12 and torch 2.14.0+cu130 from
 #   download.pytorch.org, which ships x86_64 and aarch64 wheels. (pytorch/pytorch:2.14.0-cuda13.0-
 #   cudnn9-devel carries the same torch but publishes no arm64 manifest.)
-#   torch 2.14.0+cu130 matches the vLLM commit's hard torch==2.14.0 pin — NO torch swap. The whole
+#   torch 2.14.0+cu130 matches the vLLM release's hard torch==2.14.0 pin — NO torch swap. The whole
 #   source stack (TE / flash-attn / mamba / DeepEP) is compiled against this torch, so the torch
 #   version and vLLM must stay in lockstep.
 #
@@ -90,11 +90,10 @@ RUN ln -snf /usr/share/zoneinfo/Etc/UTC /etc/localtime && echo Etc/UTC > /etc/ti
 
 # --- torch trio (cu130 torch, both architectures) --------------------------------
 # Debian's pip/setuptools/wheel carry no RECORD and cannot be upgraded in place, so current ones are
-# layered over them. The trio is pinned to exactly what the vLLM commit below requires: torch from the
-# cu130 index (its +cu130 build outranks PyPI's), torchvision 0.29.2 and torchaudio 2.11.1 from PyPI,
-# the only place they are published (one wheel per architecture for every python).
+# layered over them. The trio is pinned to exactly what the vLLM release below requires, all three from
+# the cu130 index (its +cu130 builds outrank PyPI's).
 RUN python -m pip install --ignore-installed pip setuptools wheel && \
-    python -m pip install torch==2.14.0 torchvision==0.29.2 torchaudio==2.11.1 --extra-index-url https://download.pytorch.org/whl/cu130
+    python -m pip install torch==2.14.0 torchvision==0.29.0 torchaudio==2.11.0 --extra-index-url https://download.pytorch.org/whl/cu130
 
 # --- pip tooling + source-build deps + dion -------------------------------------
 # --no-build-isolation builds use the system python, so their build + runtime deps must
@@ -184,10 +183,9 @@ RUN apt-get update && apt-get install -y --allow-change-held-packages rdma-core 
     rm -rf /var/lib/apt/lists/* /opt/deepep.patch && cd / && rm -rf /opt/DeepEP
 # RDMA_CORE_HOME=/opt/rdma-core/build symlinks to the system (apt) rdma-core at runtime.
 
-# --- (e) vLLM main at VLLM_COMMIT (cu130) ----------------------------------------
-# A main-branch commit, installed from vLLM's per-commit wheel index, https://wheels.vllm.ai/<full commit
-# hash>, which serves both architectures; VLLM_VERSION is that wheel's version. The exact version pin is
-# what lets pip take a pre-release; --pre would open every dependency to pre-releases too.
+# --- (e) vLLM release VLLM_VERSION (cu130) ---------------------------------------
+# The release wheel from PyPI, for both architectures; it is the cu130 build (vLLM's cu130 index,
+# https://wheels.vllm.ai/<version>/cu130, lists the same file).
 # Pin the base cu130 torch trio via a constraints file so pip can never swap it; let pip
 # pull vLLM's cu13 kernel deps (flashinfer-cu13, nvidia-cutlass-dsl, etc.).
 # vllm[audio] (not bare vllm): the official Nemotron-Omni GA model carries a Parakeet
@@ -196,9 +194,8 @@ RUN apt-get update && apt-get install -y --allow-change-held-packages rdma-core 
 # vision-only RL and the encoder is frozen — but the weights must load. Torch-pinned so the
 # [audio] extra (librosa/soundfile; torchaudio already in base) can't swap the torch trio.
 # Baking it here removes the per-run, per-node rl_omni3 MOLT_INSTALL_AUDIO install.
-ARG VLLM_COMMIT=75f3967ac127cb5cf36b2fee7b7377dca5725d51
-ARG VLLM_VERSION=0.34.0rc1.dev539+g75f3967ac
-RUN python -m pip install -c /opt/torch-pin.txt --extra-index-url "https://wheels.vllm.ai/${VLLM_COMMIT}" "vllm[audio]==${VLLM_VERSION}"
+ARG VLLM_VERSION=0.34.0
+RUN python -m pip install -c /opt/torch-pin.txt "vllm[audio]==${VLLM_VERSION}"
 
 # --- VLM modeling-code runtime deps + molt requirements + fla -----------
 # setup.py resolves requirements.txt plus the AutoModel source selected by MOLT_AUTOMODEL (upstream,
