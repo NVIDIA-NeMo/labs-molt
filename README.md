@@ -26,7 +26,7 @@ fully asynchronous, multimodal, multi-turn agentic RL at 1T-class scale.
 
 [**Project Page**](https://nvidia-nemo.github.io/labs-molt/) ·
 [**Docs**](https://nvidia-nemo.github.io/labs-molt/guide/) ·
-[**Paper**](https://www.researchgate.net/publication/409325071_Molt_A_Scalable_PyTorch-Native_Training_Framework_for_Agentic_Reinforcement_Learning) ·
+[**Technical Report**](https://www.researchgate.net/publication/409325071_Molt_A_Scalable_PyTorch-Native_Training_Framework_for_Agentic_Reinforcement_Learning) ·
 [**Video**](https://youtu.be/3DqXGFIce0o) ·
 [**News**](#-news) ·
 [**Architecture**](#-architecture) ·
