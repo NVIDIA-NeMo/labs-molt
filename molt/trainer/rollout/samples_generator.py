@@ -589,8 +589,16 @@ class SamplesGenerator:
                 )
                 return None, "logprob_misalign"
             rollout_log_probs = torch.tensor(raw_rollout_log_probs[step_slice]).to("cpu")
+            # mismatch/* skips the tokens vLLM renormalized: each request's first one (min_tokens stop
+            # mask), or all of a request sampled with top_p < 1. Taken from the recorded ranges, since
+            # back-to-back requests look like one in action_mask.
+            comparable = action_token_mask.clone()
+            top_ps = response.action_top_ps or [1.0] * len(response.action_ranges)
+            for (start, end), top_p in zip(response.action_ranges, top_ps, strict=True):
+                comparable[start : end if top_p < 1.0 else start + 1] = False
+            mismatch_mask = comparable[step_slice]
         else:
-            rollout_log_probs = None
+            rollout_log_probs = mismatch_mask = None
 
         # Number of generated action tokens (multi-turn observation gaps don't count).
         response_length = int(action_mask.sum().item())
@@ -661,6 +669,7 @@ class SamplesGenerator:
             attention_mask=attention_mask.unsqueeze(0),
             action_mask=action_mask.unsqueeze(0),
             rollout_log_probs=rollout_log_probs.unsqueeze(0) if rollout_log_probs is not None else None,
+            mismatch_mask=mismatch_mask.unsqueeze(0) if mismatch_mask is not None else None,
             rollout_top_ids=rollout_top_ids,
             rollout_top_log_probs=rollout_top_log_probs,
             routed_experts=routed_experts,

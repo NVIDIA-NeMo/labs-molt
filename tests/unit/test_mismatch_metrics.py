@@ -16,6 +16,7 @@
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -73,3 +74,49 @@ def test_identical_bytes_read_exactly_zero_everywhere():
     mask = torch.ones(2, 5, dtype=torch.bool)
     m = mismatch_metrics(rollout, rollout.clone(), mask)
     assert all(v.item() == 0.0 for v in m.values())
+
+
+def _record_across_ranks(statuses):
+    """Run the actor's metric reduction for several simulated DP ranks: every rank's all_reduce
+    returns the sum of what all of them sent. Returns rank 0's merged status, or None if empty."""
+    from molt.trainer.workers.policy_actor import PolicyTrainer
+
+    sent = []
+    trainer = SimpleNamespace(strategy=SimpleNamespace(all_reduce=lambda d: sent.append(dict(d)) or d))
+    pbar = SimpleNamespace(set_postfix=lambda _: None)
+    for status in statuses:
+        PolicyTrainer._record_status(trainer, status, [], pbar)
+    total = {k: sum(d[k] for d in sent) for k in sent[0]}
+    trainer.strategy = SimpleNamespace(all_reduce=lambda d: total)
+    merged = []
+    PolicyTrainer._record_status(trainer, statuses[0], merged, pbar)
+    return merged[0]
+
+
+def _status(train, mismatch_mask):
+    action_mask = torch.ones_like(mismatch_mask)
+    mismatch = mismatch_metrics(torch.zeros_like(train), train, mismatch_mask)
+    return {
+        "metrics": {"policy_loss": torch.tensor(0.0), **mismatch},
+        "weights": {"policy_loss": "token", **dict.fromkeys(mismatch, "mismatch")},
+        "counts": {"token": float(action_mask.sum()), "sample": 1.0, "mismatch": float(mismatch_mask.sum())},
+    }
+
+
+def test_ranks_are_weighted_by_comparable_tokens_not_action_tokens():
+    """One rank compares a single token, which mismatches; the other has eight single-token turns,
+    none of them comparable. Weighting by action tokens would read 1 * 2 / 10 = 20%."""
+    one_mismatch = _status(torch.tensor([[0.0, 1.0]]), torch.tensor([[False, True]]))
+    nothing_comparable = _status(torch.zeros(1, 8), torch.zeros(1, 8, dtype=torch.bool))
+
+    merged = _record_across_ranks([one_mismatch, nothing_comparable])
+    assert merged["mismatch/bitwise_frac"] == 1.0
+    assert merged["_counts"] == {"token": 10.0, "sample": 2.0, "mismatch": 1.0}
+
+
+def test_no_comparable_token_anywhere_reports_nothing_rather_than_a_pass():
+    nothing_comparable = _status(torch.ones(1, 4), torch.zeros(1, 4, dtype=torch.bool))
+
+    merged = _record_across_ranks([nothing_comparable, nothing_comparable])
+    assert not any(k.startswith("mismatch/") for k in merged)
+    assert merged["policy_loss"] == 0.0

@@ -50,6 +50,7 @@ use whichever directly; the server speaks both wires against the same engine.
 | `image_budget` | `int` | `0` |  |
 | `action_ranges` | `list` | `field(default_factory=list)` |  |
 | `off_policy_action_lens` | `list` | `field(default_factory=list)` |  |
+| `action_top_ps` | `list` | `field(default_factory=list)` |  |
 | `rollout_log_probs` | `list \| None` | `None` |  |
 | `rollout_top_logprobs` | `list \| None` | `None` |  |
 | `routed_experts` | `list \| None` | `None` |  |
@@ -63,7 +64,7 @@ use whichever directly; the server speaks both wires against the same engine.
 ### `Trajectory.append_action`
 
 ```python
-def append_action(self, action_tokens, action_logprobs=None, off_policy_len=0, action_top_logprobs=None)
+def append_action(self, action_tokens, action_logprobs=None, off_policy_len=0, action_top_logprobs=None, top_p=1.0)
 ```
 
 ### `Trajectory.append_feedback`

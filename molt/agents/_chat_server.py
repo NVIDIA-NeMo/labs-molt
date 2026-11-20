@@ -431,6 +431,7 @@ async def _run_turn(state: ChatServerState, session: _Session, body: dict, gone=
         action_logprobs,
         off_policy_len=off_policy_len,
         action_top_logprobs=getattr(generation, "top_logprobs", None),
+        top_p=sp.top_p,
     )
     # R3: absorb this turn's prefill+gen routing by absolute position (first-writer-wins). The full
     # prefill covers the prior action's trailing token too, so the turn-boundary backfills naturally.
