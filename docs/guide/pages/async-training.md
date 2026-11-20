@@ -25,8 +25,8 @@ its generated prefix and continues under the new weights. One trajectory can the
 versions. Molt records how many leading tokens of each action were generated under the old
 weights and drops them from the action mask, so they receive no gradient.
 
-Partial rollout cannot be combined with `--train.routing_replay`, because vLLM frees the routing
-on preemption.
+Partial rollout cannot be combined with `--train.routing_replay`. Every weight sync preempts the
+requests still in flight, and vLLM frees the routing it captured for a preempted request.
 
 ## Stale samples
 

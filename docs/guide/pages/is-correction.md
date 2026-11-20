@@ -67,7 +67,7 @@ about 95% of the mass.
 | Score centering alone | `--algo.advantage.score_centering_top_k 32 --algo.advantage.is_correction_level off` |
 | Score centering with TIS | add `--algo.advantage.is_correction_level token --algo.advantage.is_correction_mode trunc` |
 | Score centering with IcePop | add `--algo.advantage.is_correction_level token --algo.advantage.is_correction_mode mask` |
-| Score centering with KL to the rollout policy | add `--algo.kl.use_loss --algo.kl.estimator k3 --algo.kl.init_coef 0.3` |
+| Score centering with reverse KL to the rollout policy | add `--algo.kl.use_loss --algo.kl.estimator k2 --algo.kl.init_coef 0.001` |
 | The FlashREINFORCE gate | keep `level seq` or `geo` and do not add score centering |
 
 Score centering cannot be stacked on a sequence-level gate. With the exact ratio the centering
@@ -84,11 +84,12 @@ the variance.
 --algo.advantage.estimator flash_reinforce \
 --algo.advantage.is_correction_level seq \
 --algo.advantage.is_correction_gating binary_kl \
---algo.advantage.is_correction_threshold 5e-3 \
+--algo.advantage.is_correction_threshold 0.05 \
 --actor.loss_agg_mode seq-mean-token-mean
 ```
 
-`examples/scripts/quick_start/rl_flash_reinforce_r1d_1p5b.sh` runs it on one node.
+Start from `0.05`, which works well in most settings. `examples/scripts/quick_start/rl_flash_reinforce_r1d_1p5b.sh`
+runs it on one node with the tighter `5e-3` that the FlashREINFORCE paper uses for that model.
 
 ## REINFORCE Zero
 
@@ -108,10 +109,12 @@ sampling.
 A threshold of `inf` leaves the band open: no token is masked or clipped, and each one carries its
 exact ratio.
 
-Kernel alignment ships as an agent skill,
+The full recipe also turns on `--train.batch_invariant`, which runs the engine and the trainer on
+the same batch-invariant kernels; the REINFORCE Zero runs use it. Those kernels are still being
+upstreamed and the flag arrives with them, so `main` does not accept it yet and the command above
+corrects only the weight lag. `main` already ships the metrics, rollout dump and replay, and the
+kernel-alignment agent skill,
 [`.agents/skills/train-inference-consistency`](https://github.com/NVIDIA-NeMo/labs-molt/blob/main/.agents/skills/train-inference-consistency/SKILL.md).
-The aligned kernels behind `--train.batch_invariant` are still being upstreamed. `main` ships the
-metrics, rollout dump and replay, and the skill.
 
 ## References
 
