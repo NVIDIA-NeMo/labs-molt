@@ -60,9 +60,6 @@ The expected update at every position becomes zero and no sample is thrown away.
 reports its top-k log-probs per token, so the sum runs over those `k` tokens. `k = 32` recovers
 about 95% of the mass.
 
-Score centering can also carry a KL penalty to the rollout policy: the forward KL(rollout ‖ policy)
-with `k3`, which is SFC+KL, or the reverse direction with `k2`. The table below lists the flags.
-
 ## Combine them
 
 | You want | Flags |
@@ -70,8 +67,7 @@ with `k3`, which is SFC+KL, or the reverse direction with `k2`. The table below 
 | Score centering alone | `--algo.advantage.score_centering_top_k 32 --algo.advantage.is_correction_level off` |
 | Score centering with TIS | add `--algo.advantage.is_correction_level token --algo.advantage.is_correction_mode trunc` |
 | Score centering with IcePop | add `--algo.advantage.is_correction_level token --algo.advantage.is_correction_mode mask` |
-| Score centering with forward KL to the rollout policy (SFC+KL) | add `--algo.kl.use_loss --algo.kl.estimator k3 --algo.kl.init_coef 0.3` |
-| Score centering with reverse KL to the rollout policy | add `--algo.kl.use_loss --algo.kl.estimator k2 --algo.kl.init_coef 0.3` |
+| Score centering with reverse KL to the rollout policy | add `--algo.kl.use_loss --algo.kl.estimator k2 --algo.kl.init_coef 0.001` |
 | The FlashREINFORCE gate | keep `level seq` or `geo` and do not add score centering |
 
 Score centering cannot be stacked on a sequence-level gate. With the exact ratio the centering
@@ -127,5 +123,3 @@ kernel-alignment agent skill,
 - **MIS**: masked importance sampling at the sequence level (Yingru Li), which motivates the
   `seq` and `geo` filters.
 - **Score Centering**: [arXiv 2609.20807](https://arxiv.org/abs/2609.20807).
-- **SFC+KL**: the [trainer–generator KL](https://huggingface.co/blog/NormalUhr/sfc-kl) that the `k3`
-  option implements.
