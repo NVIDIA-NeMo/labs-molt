@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -146,3 +147,71 @@ def test_step_env_runner_caps_feedback_at_max_length():
     trajectory = _execute(_NeverEndsEnv, max_length=32)
     assert len(trajectory.observation_tokens) == 32
     assert trajectory.truncated is True
+
+
+def test_step_env_runner_tokenizes_feedback_without_blocking_event_loop(monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+    timed_out = threading.Event()
+
+    def slow_tokenize_feedback(*args):
+        started.set()
+        if not release.wait(timeout=5):
+            timed_out.set()
+        return []
+
+    monkeypatch.setattr("molt.agents.base._tokenize_feedback", slow_tokenize_feedback)
+
+    async def run():
+        params = SimpleNamespace(max_tokens=8, logprobs=None)
+        task = asyncio.create_task(
+            StepEnvRunner(_TerminatesEnv).execute("p", "l", params, 64, _Tokenizer(), _Engine())
+        )
+        try:
+            await asyncio.wait_for(asyncio.to_thread(started.wait), timeout=5)
+            loop_remained_responsive = not timed_out.is_set()
+            release.set()
+            return await asyncio.wait_for(task, timeout=5), loop_remained_responsive
+        finally:
+            release.set()
+
+    trajectory, loop_remained_responsive = asyncio.run(run())
+
+    assert trajectory.reward == 1.0
+    assert loop_remained_responsive
+
+
+def test_step_env_runner_finishes_feedback_worker_before_cancellation_cleanup(monkeypatch):
+    started = threading.Event()
+    release = threading.Event()
+    worker_finished = threading.Event()
+    close_after_worker = []
+
+    def slow_tokenize_feedback(*args):
+        started.set()
+        if not release.wait(timeout=5):
+            raise TimeoutError("feedback worker was not released")
+        worker_finished.set()
+        return []
+
+    class ClosingEnv(_TerminatesEnv):
+        async def close(self):
+            close_after_worker.append(worker_finished.is_set())
+
+    monkeypatch.setattr("molt.agents.base._tokenize_feedback", slow_tokenize_feedback)
+
+    async def run():
+        params = SimpleNamespace(max_tokens=8, logprobs=None)
+        task = asyncio.create_task(StepEnvRunner(ClosingEnv).execute("p", "l", params, 64, _Tokenizer(), _Engine()))
+        try:
+            await asyncio.wait_for(asyncio.to_thread(started.wait), timeout=5)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert close_after_worker == []
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=5)
+
+    asyncio.run(run())
+    assert close_after_worker == [True]
