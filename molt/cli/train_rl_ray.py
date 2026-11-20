@@ -50,20 +50,6 @@ def _ray_runtime_env_vars():
     return env_vars
 
 
-def _rollout_logprobs_mode(temperature: float) -> str | None:
-    """Which log-probs vLLM returns with a rollout (None = its raw default).
-
-    The training forward recomputes the sampled token's log-prob over the FULL vocabulary at
-    --rollout.temperature, and mismatch/* compares the two (the IS correction and a rollout-referenced
-    KL consume them as well). vLLM's raw log-probs are the full vocabulary before temperature; its
-    processed ones are after temperature but also after every sampling mask (top_p/top_k, and the
-    min_tokens stop-token mask on a turn's first token). So raw is the exact match at temperature 1,
-    and processed is the closer one away from it. Away from 1 with --rollout.top_p < 1 neither is
-    exact, and that combination is already rejected for the consumers above.
-    """
-    return "processed_logprobs" if temperature != 1.0 else None
-
-
 def train(args):
     import ray
     from ray.util.placement_group import placement_group
@@ -107,7 +93,11 @@ def train(args):
             args.vllm.enforce_eager,
             max_len,
             args.vllm.gpu_memory_utilization,
-            logprobs_mode=_rollout_logprobs_mode(args.rollout.temperature),
+            # The IS correction, score centering and a rollout-referenced KL consume these as the
+            # density the tokens were sampled from, which is post-temperature AND post-mask, so the
+            # engine always returns the processed ones. mismatch_metrics compares them against the
+            # forward's full-vocabulary log-probs and skips the steps a mask renormalized.
+            logprobs_mode="processed_logprobs",
             max_images_per_prompt=getattr(args.data, "max_images_per_prompt", 0),
             mm_encoder_attn_backend=args.vllm.mm_encoder_attn_backend,
             gdn_prefill_backend=args.vllm.gdn_prefill_backend,
