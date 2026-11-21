@@ -75,8 +75,14 @@ class WorkerWrap:
             (name, part.view(dtype).view(*shape)) for (name, dtype, shape), part in zip(metas, buf.split(sizes))
         ]
         # A layer whose last weight lands in this flush is processed right here (begin_weight_update).
+        model = self.model_runner.model
         with set_current_vllm_config(self.vllm_config):
-            loaded = self.model_runner.model.load_weights(weights=weights)
+            if self._refits_in_place():
+                from molt.trainer.vllm import inkling2
+
+                loaded = inkling2.load_weights(model, weights, self.model_config.model)
+            else:
+                loaded = model.load_weights(weights=weights)
         # Collect the names vLLM says it assigned, for the exact by-name coverage check
         # (--train.check_weight_update_equal). Only armed between reset/report calls.
         if getattr(self, "_weight_update_loaded", None) is not None and loaded:
@@ -98,6 +104,12 @@ class WorkerWrap:
             )
         del buf
 
+    def _refits_in_place(self) -> bool:
+        """Inkling 2 serves packed 4-bit experts, loads only whole checkpoints, and stops generating
+        sensible text after vLLM's layerwise reload; ``inkling2.load_weights`` writes the live
+        parameters instead."""
+        return self.model_config.hf_config.model_type.startswith("inkling2")
+
     def begin_weight_update(self):
         """Defer vLLM's post-load weight processing to the end of this refit.
 
@@ -106,6 +118,8 @@ class WorkerWrap:
         alone leave checkpoint-layout bytes under the kernel. vLLM's layerwise reload re-runs the
         processing per completed layer, in place.
         """
+        if self._refits_in_place():
+            return
         from vllm.config import set_current_vllm_config
         from vllm.model_executor.model_loader.reload import initialize_layerwise_reload
 
@@ -114,6 +128,8 @@ class WorkerWrap:
 
     def end_weight_update(self):
         """Process the layers the broadcast left incomplete; restore the ones it never touched."""
+        if self._refits_in_place():
+            return
         from vllm.config import set_current_vllm_config
         from vllm.model_executor.model_loader.reload import finalize_layerwise_reload
 

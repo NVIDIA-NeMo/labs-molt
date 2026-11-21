@@ -40,7 +40,8 @@ def test_bracket_drives_vllm_layerwise_reload(monkeypatch):
     sys.modules[reload].finalize_layerwise_reload = lambda model, cfg: calls.append(("finalize", model, cfg))
 
     worker = WorkerWrap()
-    worker.vllm_config, worker.model_config = object(), object()
+    worker.vllm_config = object()
+    worker.model_config = SimpleNamespace(hf_config=SimpleNamespace(model_type="qwen3_5_moe"))
     worker.model_runner = SimpleNamespace(model=object())
 
     worker.begin_weight_update()

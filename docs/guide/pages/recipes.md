@@ -20,6 +20,7 @@ the paths.
 | Nemotron-Omni-30B-A3B on-policy distillation | | `slurm/rl_distill_omni3_30b.sh` |
 | Muse-Glimmer-30B dense RL, TP2 | | `slurm/rl_muse_glimmer_30b.sh` |
 | GLM-5.2 RL on text math, EP256 | | `slurm/rl_glm5_2_753b.sh` |
+| Inkling 2 Mini RL on text math, EP4, 4-bit rollout experts | | `slurm/rl_inkling2_mini.sh` |
 
 All paths are under `examples/scripts/`.
 
@@ -50,6 +51,29 @@ python3 examples/python/utils/prepare_geo3k.py --num-proc 8 --out-dir .tmp/geo3k
 ```
 
 To use your own data, point `PROMPT_DATASET` and `EVAL_DATASET` at it.
+
+## The Inkling 2 recipe
+
+`slurm/rl_inkling2_mini.sh` trains Inkling 2 Mini on DAPO-Math-17k with two 4-GPU Blackwell nodes: one
+trains with EP4, the other hosts four vLLM engines. It needs a vLLM build that serves the model
+([vllm-project/vllm#69028](https://github.com/vllm-project/vllm/pull/69028)) and an AutoModel that loads the
+looped checkpoint ([NVIDIA-NeMo/Automodel#4861](https://github.com/NVIDIA-NeMo/Automodel/pull/4861)).
+
+The two sides hold the experts in different precisions. The trainer keeps FP32 master weights and runs them
+in BF16. vLLM serves the experts in the checkpoint's packed 4-bit layout: NVFP4 in layers 0-19, MXFP8 in
+layers 20-23. At each refit `molt/trainer/vllm/inkling2.py` encodes the trained expert weights back into
+that layout on the block scales the checkpoint was released with:
+
+- A weight moves to one of its two neighbouring codes; the upper one wins when the weight's position
+  between them exceeds a random threshold. The released weights sit exactly on the 4-bit grid, so rounding
+  to nearest would keep them there until training had moved a weight by half a grid step.
+- The thresholds are fixed per weight. All engines agree, and a code changes only when training moves its
+  weight.
+- The refit writes the engine's live parameters; vLLM's layerwise reload is not used for this model.
+
+The recipe covers text prompts. The checkpoint's chat template asks for thinking effort 0.9 by default, at
+which many answers do not finish within a few thousand tokens; the reward then also pays for shorter
+answers.
 
 ## The tool-use recipe
 

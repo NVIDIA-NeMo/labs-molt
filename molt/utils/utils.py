@@ -67,8 +67,10 @@ def get_tokenizer(pretrain, model, padding_side="left", use_fast=True):
         # detects VLM via hasattr(tokenizer, "image_processor").
         tokenizer = AutoProcessor.from_pretrained(pretrain, trust_remote_code=True)
         # AutoProcessor doesn't delegate tokenizer attributes, so set them on
-        # the inner tokenizer and mirror the essentials back.
-        inner = tokenizer.tokenizer
+        # the inner tokenizer and mirror the essentials back. It returns the bare
+        # tokenizer when transformers has no processor class for the checkpoint
+        # (Inkling 2); such a model trains on text prompts only.
+        inner = getattr(tokenizer, "tokenizer", tokenizer)
         inner.padding_side = padding_side
         if inner.pad_token is None:
             inner.pad_token = inner.eos_token
