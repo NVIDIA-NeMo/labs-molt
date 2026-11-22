@@ -158,7 +158,7 @@ def test_build_routing_targets_selects_sparse_hybrid_global_layer_ids():
 
     assert len(targets) == len(global_ids)
     for i, gid in enumerate(global_ids):
-        assert targets[i].shape == (1, B * S, K)  # one visit per layer
+        assert targets[i].shape == (1, B * S, K)
         # gate i replays its global-layer gid row (not row i); token order row-major B*S
         expected = [100 * (tok // S) + 10 * gid + (tok % S) for tok in range(B * S)]
         assert targets[i][0, :, 0].tolist() == expected
@@ -176,7 +176,7 @@ def test_build_routing_targets_gives_a_looped_layer_one_row_per_visit():
     targets = BaseModel._build_routing_targets(stub, routed, indices=None, cp_forward=False)
 
     assert [tuple(target.shape) for target in targets] == [(1, S, K), (3, S, K), (1, S, K)]
-    assert targets[1][:, :, 0].tolist() == [[10, 11], [20, 21], [30, 31]]  # pass by pass
+    assert targets[1][:, :, 0].tolist() == [[10, 11], [20, 21], [30, 31]]
 
 
 def test_build_routing_targets_cp_delegates_to_sharder():

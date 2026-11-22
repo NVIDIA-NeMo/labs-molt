@@ -489,9 +489,7 @@ class BaseModel(nn.Module):
 
             from nemo_automodel.components.moe.router_replay import RouterReplay, RouterReplayMode
 
-            # The target of a gate is (visits, tokens, topk): one selection per visit of its
-            # layer. -1 marks a position with no captured routing and keeps the live selection
-            # (torch.gather forbids negative indices).
+            # One target per visit of the gate's layer, (visits, tokens, topk); -1 keeps the live selection.
             class _VisitRouterReplay(RouterReplay):
                 def set_target(self, indices: torch.Tensor) -> None:
                     super().set_target(indices)
@@ -500,17 +498,16 @@ class BaseModel(nn.Module):
                 def apply(self, indices: torch.Tensor) -> torch.Tensor:
                     if self.mode != RouterReplayMode.REPLAY:
                         return super().apply(indices)
-                    # The forward visits the layer in order. Activation checkpointing runs every
-                    # visit again during backward, in any order and with the same operations, so
-                    # a visit is recognised by a key of the live selection it reproduces.
-                    key = (int(indices.sum()), tuple(indices.flatten()[:64].tolist()))
-                    visit = self.visits.setdefault(key, len(self.visits))
+                    visit = 0
+                    if len(self.target_indices) > 1:
+                        # Activation checkpointing reruns the visits during backward in any order,
+                        # so a visit is keyed by the live selection it reproduces.
+                        key = (int(indices.sum()), tuple(indices.flatten()[:64].tolist()))
+                        visit = self.visits.setdefault(key, len(self.visits))
                     target = self.target_indices[visit].to(indices.device)
                     return torch.where(target >= 0, target, indices)
 
-            # A looped model (Inkling 2) runs its core layers once per pass. vLLM keeps one
-            # routing row per layer visit in execution order: the layers before the core, every
-            # pass of the core, the layers after it.
+            # vLLM keeps one routing row per layer visit; a looped model (Inkling 2) visits its core once per pass.
             config = getattr(self.model.config, "text_config", self.model.config)
             loop = getattr(config, "loop_config", None)
             core = config.loop_core_layers if loop else range(0)
