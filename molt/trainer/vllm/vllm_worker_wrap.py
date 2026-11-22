@@ -103,22 +103,24 @@ class WorkerWrap:
 
         FlashInfer MoE kernels rewrite the expert weights after loading (TRT-LLM block layout,
         CUTLASS swapped gate/up halves; vllm-project/vllm#54699), so plain ``load_weights`` flushes
-        alone leave checkpoint-layout bytes under the kernel. vLLM's layerwise reload re-runs the
-        processing per completed layer, in place.
+        alone leave checkpoint-layout bytes under the kernel. vLLM's reload re-runs the processing,
+        in place. ``start_reload`` is vLLM's own entry point for a weight update: it picks the reload
+        mode (layerwise unless ``VLLM_RELOAD_MODE=direct``) and marks the update as running, which
+        models that check a ``load_weights`` call for completeness rely on to accept a partial flush.
         """
         from vllm.config import set_current_vllm_config
-        from vllm.model_executor.model_loader.reload import initialize_layerwise_reload
+        from vllm.model_executor.model_loader.reload import start_reload
 
         with set_current_vllm_config(self.vllm_config):
-            initialize_layerwise_reload(self.model_runner.model)
+            start_reload(self.model_runner.model)
 
     def end_weight_update(self):
         """Process the layers the broadcast left incomplete; restore the ones it never touched."""
         from vllm.config import set_current_vllm_config
-        from vllm.model_executor.model_loader.reload import finalize_layerwise_reload
+        from vllm.model_executor.model_loader.reload import finish_reload
 
         with set_current_vllm_config(self.vllm_config):
-            finalize_layerwise_reload(self.model_runner.model, self.model_config)
+            finish_reload(self.model_runner.model, self.model_config, self.device)
 
     def reset_weight_update_check(self):
         """Start collecting the param names ``load_weights`` assigns in the coming broadcast."""

@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""begin/end_weight_update bracket a refit with vLLM's layerwise reload: initialize it on the engine's
-model before the first flush, finalize it with the engine's model config after the last."""
+"""begin/end_weight_update bracket a refit with vLLM's reload lifecycle: start it on the engine's model
+before the first flush, finish it with the engine's model config and device after the last."""
 
 import sys
 import types
@@ -24,7 +24,7 @@ from types import SimpleNamespace
 from molt.trainer.vllm.vllm_worker_wrap import WorkerWrap
 
 
-def test_bracket_drives_vllm_layerwise_reload(monkeypatch):
+def test_bracket_drives_vllm_reload_lifecycle(monkeypatch):
     calls = []
 
     @contextmanager
@@ -36,18 +36,18 @@ def test_bracket_drives_vllm_layerwise_reload(monkeypatch):
     for name in ("vllm", "vllm.config", "vllm.model_executor", "vllm.model_executor.model_loader", reload):
         monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
     sys.modules["vllm.config"].set_current_vllm_config = set_current_vllm_config
-    sys.modules[reload].initialize_layerwise_reload = lambda model: calls.append(("initialize", model))
-    sys.modules[reload].finalize_layerwise_reload = lambda model, cfg: calls.append(("finalize", model, cfg))
+    sys.modules[reload].start_reload = lambda model: calls.append(("start", model))
+    sys.modules[reload].finish_reload = lambda model, cfg, device: calls.append(("finish", model, cfg, device))
 
     worker = WorkerWrap()
-    worker.vllm_config, worker.model_config = object(), object()
+    worker.vllm_config, worker.model_config, worker.device = object(), object(), object()
     worker.model_runner = SimpleNamespace(model=object())
 
     worker.begin_weight_update()
     worker.end_weight_update()
     assert calls == [
         ("config", worker.vllm_config),
-        ("initialize", worker.model_runner.model),
+        ("start", worker.model_runner.model),
         ("config", worker.vllm_config),
-        ("finalize", worker.model_runner.model, worker.model_config),
+        ("finish", worker.model_runner.model, worker.model_config, worker.device),
     ]
