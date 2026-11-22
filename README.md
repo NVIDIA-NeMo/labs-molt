@@ -116,7 +116,8 @@ For development outside the container. It installs the exact git-pinned AutoMode
 validated against (`setup.py`, `AUTOMODEL`), so R3 routing replay and Muon work out of the box.
 
 ```bash
-pip install -e ".[vllm]"
+# the vLLM pin is a main-branch commit: its wheels come from vLLM's per-commit index, not PyPI
+pip install -e ".[vllm]" --extra-index-url https://wheels.vllm.ai/c32251b5d192f0f72f9ca8c5595d1d43f1dd37b8
 ```
 
 CUDA 13 is required (`torch==2.14.0+cu130`). A CUDA 12 environment will not work. With a host driver

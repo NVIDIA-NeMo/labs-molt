@@ -35,12 +35,12 @@ Tags from 0.1.9 are multi-arch, so the same pull works on x86 and on Grace-Black
 ## Local install
 
 ```bash
-pip install -e ".[vllm]"
+pip install -e ".[vllm]" --extra-index-url https://wheels.vllm.ai/c32251b5d192f0f72f9ca8c5595d1d43f1dd37b8
 ```
 
 - The command installs the git-pinned AutoModel this repository is validated against, so routing
   replay and Muon work out of the box.
-- The vLLM pin is the 0.34.0 release from PyPI.
+- The vLLM pin is a main-branch commit. Its wheels come from vLLM's per-commit index, not PyPI.
 - CUDA 13 is required (`torch==2.14.0+cu130`). A CUDA 12 environment will not work.
 - With a host driver older than 580, use the container. It ships the CUDA forward-compatibility
   layer and enables it automatically.
