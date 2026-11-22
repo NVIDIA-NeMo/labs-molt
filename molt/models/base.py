@@ -500,11 +500,11 @@ class BaseModel(nn.Module):
                     result = super().apply(indices)
                     return torch.where(result >= 0, result, indices)
 
-            # vLLM keeps one routing row per layer visit; a looped model (Inkling 2) visits its core once per pass.
-            config = getattr(self.model.config, "text_config", self.model.config)
-            loop = getattr(config, "loop_config", None)
-            core = config.loop_core_layers if loop else range(0)
-            passes = loop["num_passes"] if loop else 1
+            # vLLM keeps one routing row per layer visit; a looped model (Inkling 2) visits its core once per
+            # pass. A model without a loop is one pass over no core layers.
+            no_loop = {"core_start": 0, "core_end": 0, "num_passes": 1}
+            loop = getattr(self.model.config.get_text_config(), "loop_config", None) or no_loop
+            core, passes = range(loop["core_start"], loop["core_end"]), loop["num_passes"]
 
             RouterReplay.clear_registry()
             self._routing_rows: list[list[int]] = []
