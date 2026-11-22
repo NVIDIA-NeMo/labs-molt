@@ -158,10 +158,10 @@ def test_build_routing_targets_selects_sparse_hybrid_global_layer_ids():
 
     assert len(targets) == len(global_ids)
     for i, gid in enumerate(global_ids):
-        assert targets[i].shape == (1, B * S, K)
+        assert targets[i].shape == (B * S, K)
         # gate i replays its global-layer gid row (not row i); token order row-major B*S
         expected = [100 * (tok // S) + 10 * gid + (tok % S) for tok in range(B * S)]
-        assert targets[i][0, :, 0].tolist() == expected
+        assert targets[i][:, 0].tolist() == expected
 
 
 def test_build_routing_targets_gives_a_looped_layer_one_row_per_visit():
@@ -175,7 +175,7 @@ def test_build_routing_targets_gives_a_looped_layer_one_row_per_visit():
     stub = SimpleNamespace(packing_samples=False, _routing_rows=[[0], [1, 2, 3], [4]])
     targets = BaseModel._build_routing_targets(stub, routed, indices=None, cp_forward=False)
 
-    assert [tuple(target.shape) for target in targets] == [(1, S, K), (3, S, K), (1, S, K)]
+    assert [tuple(target.shape) for target in targets] == [(S, K), (3, S, K), (S, K)]
     assert targets[1][:, :, 0].tolist() == [[10, 11], [20, 21], [30, 31]]
 
 
@@ -206,8 +206,8 @@ def test_build_routing_targets_cp_delegates_to_sharder():
     assert calls == {"seq_dim": 3, "fill": -1}  # -1 fill keeps CP pad tokens on live routing
     assert len(targets) == L
     for layer in range(L):
-        assert targets[layer].shape == (1, 2, K)  # this rank's local tokens
-        assert targets[layer][0, :, 0].tolist() == [10 * layer + 0, 10 * layer + 3]  # head[0] + tail[3]
+        assert targets[layer].shape == (2, K)  # this rank's local tokens
+        assert targets[layer][:, 0].tolist() == [10 * layer + 0, 10 * layer + 3]  # head[0] + tail[3]
 
 
 def test_build_routing_targets_preserves_minus_one_sentinel():
@@ -225,8 +225,8 @@ def test_build_routing_targets_preserves_minus_one_sentinel():
     targets = BaseModel._build_routing_targets(stub, routed, indices=None, cp_forward=False)
 
     for layer in range(L):
-        assert (targets[layer][0, 0] == -1).all()  # prompt row stays sentinel -> live routing
-        assert targets[layer][0, 1:, 0].tolist() == [10 * layer + 1, 10 * layer + 2]
+        assert (targets[layer][0] == -1).all()  # prompt row stays sentinel -> live routing
+        assert targets[layer][1:, 0].tolist() == [10 * layer + 1, 10 * layer + 2]
 
 
 def test_build_routing_targets_pads_hybridep_suffix_with_valid_masked_expert():
@@ -241,9 +241,9 @@ def test_build_routing_targets_pads_hybridep_suffix_with_valid_masked_expert():
     )
 
     for layer in range(L):
-        assert targets[layer].shape == (1, 4, K)
-        assert targets[layer][0, :2, 0].tolist() == [10 * layer, 10 * layer + 1]
-        assert (targets[layer][0, 2:] == 0).all()
+        assert targets[layer].shape == (4, K)
+        assert targets[layer][:2, 0].tolist() == [10 * layer, 10 * layer + 1]
+        assert (targets[layer][2:] == 0).all()
 
 
 def test_make_experience_batch_mixed_none_routed_experts():
