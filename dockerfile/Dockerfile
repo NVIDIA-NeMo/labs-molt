@@ -21,7 +21,7 @@
 #   toolkit + cuDNN 9, Ubuntu 24.04) plus Ubuntu's python 3.12 and torch 2.14.0+cu130 from
 #   download.pytorch.org, which ships x86_64 and aarch64 wheels. (pytorch/pytorch:2.14.0-cuda13.0-
 #   cudnn9-devel carries the same torch but publishes no arm64 manifest.)
-#   torch 2.14.0+cu130 matches the vLLM release's hard torch==2.14.0 pin — NO torch swap. The whole
+#   torch 2.14.0+cu130 matches the vLLM commit's hard torch==2.14.0 pin — NO torch swap. The whole
 #   source stack (TE / flash-attn / mamba / DeepEP) is compiled against this torch, so the torch
 #   version and vLLM must stay in lockstep.
 #
@@ -90,10 +90,11 @@ RUN ln -snf /usr/share/zoneinfo/Etc/UTC /etc/localtime && echo Etc/UTC > /etc/ti
 
 # --- torch trio (cu130 torch, both architectures) --------------------------------
 # Debian's pip/setuptools/wheel carry no RECORD and cannot be upgraded in place, so current ones are
-# layered over them. The trio is pinned to exactly what the vLLM release below requires, all three from
-# the cu130 index (its +cu130 builds outrank PyPI's).
+# layered over them. The trio is pinned to exactly what the vLLM commit below requires: torch from the
+# cu130 index (its +cu130 build outranks PyPI's), torchvision 0.29.2 and torchaudio 2.11.1 from PyPI,
+# the only place they are published (one wheel per architecture for every python).
 RUN python -m pip install --ignore-installed pip setuptools wheel && \
-    python -m pip install torch==2.14.0 torchvision==0.29.0 torchaudio==2.11.0 --extra-index-url https://download.pytorch.org/whl/cu130
+    python -m pip install torch==2.14.0 torchvision==0.29.2 torchaudio==2.11.1 --extra-index-url https://download.pytorch.org/whl/cu130
 
 # --- pip tooling + source-build deps + dion -------------------------------------
 # --no-build-isolation builds use the system python, so their build + runtime deps must
@@ -110,12 +111,12 @@ RUN python -c "from importlib.metadata import version; print(*(f'{p}=={version(p
     (python -m pip uninstall -y xgboost pynvml opencv-python-headless || true) && \
     python -m pip install -c /opt/torch-pin.txt "dion @ git+https://github.com/microsoft/dion.git"
 
-# --- (a) Transformer Engine v2.20.2 (source; AutoModel main's TE_COMMIT and build flags) ----
+# --- (a) Transformer Engine v2.21.0 (source; AutoModel main's TE_COMMIT and build flags) ----
 # --no-deps is REQUIRED (else pip hits ResolutionImpossible on torch). CPATH exposes torch's bundled
 # cudnn / nccl / mathdx headers; nvidia/cu13/include stays out: its CUDA runtime headers shadow the
 # toolkit's and nvcc 13.0's sm_103a host stubs then fail ("__cudaLaunch passed 2 arguments").
 # TE 2.19 dropped its cudnn-frontend submodule: setup.py needs the nvidia-cudnn-frontend wheel (header-only).
-ARG TE_COMMIT=v2.20.2
+ARG TE_COMMIT=v2.21.0
 RUN python -m pip install nvidia-mathdx==25.1.1 nvidia-cudnn-frontend==1.31.0 && \
     git clone https://github.com/NVIDIA/TransformerEngine.git /opt/TransformerEngine && \
     cd /opt/TransformerEngine && git fetch origin "${TE_COMMIT}" && git checkout FETCH_HEAD && \
@@ -183,9 +184,10 @@ RUN apt-get update && apt-get install -y --allow-change-held-packages rdma-core 
     rm -rf /var/lib/apt/lists/* /opt/deepep.patch && cd / && rm -rf /opt/DeepEP
 # RDMA_CORE_HOME=/opt/rdma-core/build symlinks to the system (apt) rdma-core at runtime.
 
-# --- (e) vLLM release VLLM_VERSION (cu130) ---------------------------------------
-# The release wheel from PyPI, for both architectures; it is the cu130 build (vLLM's cu130 index,
-# https://wheels.vllm.ai/<version>/cu130, lists the same file).
+# --- (e) vLLM main at VLLM_COMMIT (cu130) ----------------------------------------
+# A main-branch commit, installed from vLLM's per-commit wheel index, https://wheels.vllm.ai/<full commit
+# hash>, which serves both architectures; VLLM_VERSION is that wheel's version. The exact version pin is
+# what lets pip take a pre-release; --pre would open every dependency to pre-releases too.
 # Pin the base cu130 torch trio via a constraints file so pip can never swap it; let pip
 # pull vLLM's cu13 kernel deps (flashinfer-cu13, nvidia-cutlass-dsl, etc.).
 # vllm[audio] (not bare vllm): the official Nemotron-Omni GA model carries a Parakeet
@@ -194,8 +196,9 @@ RUN apt-get update && apt-get install -y --allow-change-held-packages rdma-core 
 # vision-only RL and the encoder is frozen — but the weights must load. Torch-pinned so the
 # [audio] extra (librosa/soundfile; torchaudio already in base) can't swap the torch trio.
 # Baking it here removes the per-run, per-node rl_omni3 MOLT_INSTALL_AUDIO install.
-ARG VLLM_VERSION=0.34.0
-RUN python -m pip install -c /opt/torch-pin.txt "vllm[audio]==${VLLM_VERSION}"
+ARG VLLM_COMMIT=c32251b5d192f0f72f9ca8c5595d1d43f1dd37b8
+ARG VLLM_VERSION=0.34.0rc1.dev1129+gc32251b5d
+RUN python -m pip install -c /opt/torch-pin.txt --extra-index-url "https://wheels.vllm.ai/${VLLM_COMMIT}" "vllm[audio]==${VLLM_VERSION}"
 
 # --- VLM modeling-code runtime deps + molt requirements + fla -----------
 # setup.py resolves requirements.txt plus the AutoModel source selected by MOLT_AUTOMODEL (upstream,
@@ -205,6 +208,9 @@ RUN python -m pip install -c /opt/torch-pin.txt "vllm[audio]==${VLLM_VERSION}"
 # swapping torch/the source-built stack. (--no-deps here would skip multiprocess -> SFT crash.)
 # AutoModel is baked in, so the image is self-contained (Docker Hub); the runtime PYTHONPATH
 # sibling-checkout override (above) takes precedence over this baked copy.
+# fla 0.5.2 is AutoModel's pin (>=0.5.2,<0.6; its context-parallel launches target 0.5.x). torch 2.14 ships Triton 3.8,
+# which accepts fla's autotune keys as they are; under Triton 3.9 AutoModel patches one of them
+# (docker/common/fla-autotune-keys.patch) -- carry that patch here when the torch pin brings Triton 3.9.
 # transformers is deliberately NOT pinned anywhere in this repo: AutoModel's exact pin wins here
 # (vLLM only sets a floor), so its validated transformers version travels with the AutoModel bump.
 ARG INSTALL_TEST_DEPS=0
@@ -217,7 +223,7 @@ RUN if [ "$INSTALL_TEST_DEPS" = "1" ]; then python -m pip install coverage pytes
         > /tmp/req.txt && cd / && \
     python -m pip install -c /opt/torch-pin.txt -r /tmp/req.txt && \
     python -m pip install "ray[default]==2.59.0" && \
-    python -m pip install --no-cache-dir --no-deps "flash-linear-attention==0.4.2" "fla-core==0.4.2" && \
+    python -m pip install --no-cache-dir --no-deps "flash-linear-attention==0.5.2" "fla-core==0.5.2" && \
     python -c "import importlib.util as u; assert u.find_spec('fla.ops.cp') and u.find_spec('fla.modules.convolution') and u.find_spec('fla.ops.gated_delta_rule'), 'fla CP ops missing'" && \
     rm -rf /tmp/molt /tmp/req.txt
 
@@ -231,10 +237,10 @@ RUN python -m pip install --no-cache-dir "tilelang==0.1.12" "tile-kernels==1.0.0
 # is container-local, so every job would recompile the DSA kernels from scratch.
 ENV TILELANG_CACHE_DIR=/root/.cache/tilelang
 
-# vLLM pins nvidia-cutlass-dsl 4.8.0 and quack-kernels 0.6.5; AutoModel's nemo-automodel metadata still asks for
-# quack 0.6.4 (cutlass 4.6.2), which the molt step above installed last. A 4.6.2 DSL under vLLM's CuTe router
-# GEMM fails MLIR verification at engine warmup on Hopper/Blackwell ("nvvm.mbarrier.arrive op operand count"), so
-# the runtime wins: re-pin both to vLLM's versions (quack 0.6.5 accepts cutlass >= 4.7). -c keeps the torch trio.
+# vLLM pins nvidia-cutlass-dsl 4.8.0 and quack-kernels 0.6.5, and the AutoModel pin now asks for the same pair, so
+# this step changes nothing today. It stays because the failure it guards is GPU-only: when AutoModel's metadata
+# asked for quack 0.6.4 (cutlass 4.6.2), that DSL under vLLM's CuTe router GEMM failed MLIR verification at engine
+# warmup on Hopper/Blackwell ("nvvm.mbarrier.arrive op operand count"). The runtime wins. -c keeps the torch trio.
 RUN { cat /opt/torch-pin.txt; echo 'nvidia-cutlass-dsl==4.8.0'; } > /tmp/pin.txt && \
     python -m pip install -c /tmp/pin.txt "nvidia-cutlass-dsl[cu13]==4.8.0" "quack-kernels==0.6.5" && rm -f /tmp/pin.txt
 
