@@ -741,9 +741,9 @@ class PolicyTrainer:
             # (vllm_kl then grew with training as the actor drifted from the stale engine).
             # Skip TE `_extra_state` (fp8 amax bookkeeping — a uint8 tensor in recent
             # TE, a BytesIO in older) and any other non-tensor. It is never a real
-            # weight and vLLM has no param for it; the HF adapter drops it via
-            # `exclude_key_regex` anyway (NeMo-RL relies on that same regex). Skip it
-            # here so a tensor-valued `_extra_state` can't trip the expert guard below.
+            # weight and vLLM has no param for it. Skipping it here, not through the
+            # adapter's `exclude_key_regex`, keeps the adapter call below free of options:
+            # some adapters (Inkling 2, Mistral Large 4) reject the ones they do not know.
             if not torch.is_tensor(tensor) or name.endswith("_extra_state"):
                 continue
 
@@ -780,9 +780,7 @@ class PolicyTrainer:
             if adapter is None:
                 hf_pairs = [(name, weight)]
             elif getattr(adapter, "convert_single_tensor_to_hf", None) is not None:
-                hf_pairs = adapter.convert_single_tensor_to_hf(
-                    name, weight, exclude_key_regex=r".*_extra_state.*", quantization=False
-                )
+                hf_pairs = adapter.convert_single_tensor_to_hf(name, weight)
             elif getattr(adapter, "to_hf", None) is not None:
                 hf_pairs = list(adapter.to_hf({name: weight}, exclude_key_regex=r".*_extra_state.*").items())
             else:
