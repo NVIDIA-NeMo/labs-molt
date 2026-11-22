@@ -32,6 +32,8 @@ selection ([arXiv:2510.11370](https://arxiv.org/abs/2510.11370)).
   router logits are recomputed from the live weights, so the router keeps learning.
 - **It is aligned by absolute token position.** A position the engine returns no routing for keeps
   its natural selection.
+- **A looped model replays every pass.** Inkling 2 runs its core layers once per pass, and each
+  pass replays the selection the engine made in that pass.
 - **It cannot be combined with `--train.partial_rollout_enable`**. Every weight sync preempts the
   requests still in flight, and vLLM frees the routing it captured for a preempted request.
 - **It needs AutoModel's `RouterReplay`**, in `nemo_automodel.components.moe.router_replay`.

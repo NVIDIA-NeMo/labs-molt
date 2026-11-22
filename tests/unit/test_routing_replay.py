@@ -153,15 +153,30 @@ def test_build_routing_targets_selects_sparse_hybrid_global_layer_ids():
             for t in range(S):
                 routed[b, layer, 0, t] = 100 * b + 10 * layer + t
 
-    stub = SimpleNamespace(packing_samples=False, _num_routing_gates=len(global_ids), _moe_layer_global_ids=global_ids)
+    stub = SimpleNamespace(packing_samples=False, _routing_rows=[[gid] for gid in global_ids])
     targets = BaseModel._build_routing_targets(stub, routed, indices=None, cp_forward=False)
 
     assert len(targets) == len(global_ids)
     for i, gid in enumerate(global_ids):
-        assert targets[i].shape == (B * S, K)
+        assert targets[i].shape == (1, B * S, K)  # one visit per layer
         # gate i replays its global-layer gid row (not row i); token order row-major B*S
         expected = [100 * (tok // S) + 10 * gid + (tok % S) for tok in range(B * S)]
-        assert targets[i][:, 0].tolist() == expected
+        assert targets[i][0, :, 0].tolist() == expected
+
+
+def test_build_routing_targets_gives_a_looped_layer_one_row_per_visit():
+    # A looped model runs layer 1 in three passes; vLLM keeps one routing row per visit.
+    B, S = 1, 2
+    routed = torch.zeros(B, 5, K, S, dtype=torch.int16)
+    for row in range(5):
+        for t in range(S):
+            routed[0, row, 0, t] = 10 * row + t
+
+    stub = SimpleNamespace(packing_samples=False, _routing_rows=[[0], [1, 2, 3], [4]])
+    targets = BaseModel._build_routing_targets(stub, routed, indices=None, cp_forward=False)
+
+    assert [tuple(target.shape) for target in targets] == [(1, S, K), (3, S, K), (1, S, K)]
+    assert targets[1][:, :, 0].tolist() == [[10, 11], [20, 21], [30, 31]]  # pass by pass
 
 
 def test_build_routing_targets_cp_delegates_to_sharder():
@@ -183,8 +198,7 @@ def test_build_routing_targets_cp_delegates_to_sharder():
 
     stub = SimpleNamespace(
         packing_samples=False,
-        _num_routing_gates=L,
-        _moe_layer_global_ids=list(range(L)),
+        _routing_rows=[[layer] for layer in range(L)],
         _cp_sharder=SimpleNamespace(shard_token_tensor=_shard),
     )
     targets = BaseModel._build_routing_targets(stub, routed, indices=None, cp_forward=True)
@@ -192,8 +206,8 @@ def test_build_routing_targets_cp_delegates_to_sharder():
     assert calls == {"seq_dim": 3, "fill": -1}  # -1 fill keeps CP pad tokens on live routing
     assert len(targets) == L
     for layer in range(L):
-        assert targets[layer].shape == (2, K)  # this rank's local tokens
-        assert targets[layer][:, 0].tolist() == [10 * layer + 0, 10 * layer + 3]  # head[0] + tail[3]
+        assert targets[layer].shape == (1, 2, K)  # this rank's local tokens
+        assert targets[layer][0, :, 0].tolist() == [10 * layer + 0, 10 * layer + 3]  # head[0] + tail[3]
 
 
 def test_build_routing_targets_preserves_minus_one_sentinel():
@@ -207,12 +221,12 @@ def test_build_routing_targets_preserves_minus_one_sentinel():
         for t in range(1, S):
             routed[0, layer, 0, t] = 10 * layer + t
 
-    stub = SimpleNamespace(packing_samples=False, _num_routing_gates=L, _moe_layer_global_ids=list(range(L)))
+    stub = SimpleNamespace(packing_samples=False, _routing_rows=[[layer] for layer in range(L)])
     targets = BaseModel._build_routing_targets(stub, routed, indices=None, cp_forward=False)
 
     for layer in range(L):
-        assert (targets[layer][0] == -1).all()  # prompt row stays sentinel -> live routing
-        assert targets[layer][1:, 0].tolist() == [10 * layer + 1, 10 * layer + 2]
+        assert (targets[layer][0, 0] == -1).all()  # prompt row stays sentinel -> live routing
+        assert targets[layer][0, 1:, 0].tolist() == [10 * layer + 1, 10 * layer + 2]
 
 
 def test_build_routing_targets_pads_hybridep_suffix_with_valid_masked_expert():
@@ -220,16 +234,16 @@ def test_build_routing_targets_pads_hybridep_suffix_with_valid_masked_expert():
     for layer in range(L):
         routed[0, layer, 0] = torch.tensor([10 * layer, 10 * layer + 1, 10 * layer + 2])
 
-    stub = SimpleNamespace(packing_samples=True, _num_routing_gates=L, _moe_layer_global_ids=list(range(L)))
+    stub = SimpleNamespace(packing_samples=True, _routing_rows=[[layer] for layer in range(L)])
     # Only tokens 0 and 1 are real on this rank; HybridEP equalizes it to four.
     targets = BaseModel._build_routing_targets(
         stub, routed, indices=torch.tensor([0, 1]), cp_forward=False, pad_to_tokens=4
     )
 
     for layer in range(L):
-        assert targets[layer].shape == (4, K)
-        assert targets[layer][:2, 0].tolist() == [10 * layer, 10 * layer + 1]
-        assert (targets[layer][2:] == 0).all()
+        assert targets[layer].shape == (1, 4, K)
+        assert targets[layer][0, :2, 0].tolist() == [10 * layer, 10 * layer + 1]
+        assert (targets[layer][0, 2:] == 0).all()
 
 
 def test_make_experience_batch_mixed_none_routed_experts():

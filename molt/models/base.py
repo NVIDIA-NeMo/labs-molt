@@ -487,32 +487,52 @@ class BaseModel(nn.Module):
             # from the module path); uniform-MoE models parse to 0..N-1 (no-op reorder).
             import re
 
-            from nemo_automodel.components.moe.router_replay import RouterReplay
+            from nemo_automodel.components.moe.router_replay import RouterReplay, RouterReplayMode
 
-            # _build_routing_targets marks positions with no captured routing with a -1
-            # sentinel ("keep the live selection"). Stock RouterReplay returns the target
-            # verbatim, so -1 reaches the expert gather (torch.gather forbids negative
-            # indices) -> device-side assert. Keep the live selection at the sentinels;
-            # outside REPLAY super() returns live indices (>=0), so the where is a no-op.
-            # No-ops once AutoModel upstreams the same where-guard.
-            class _SentinelRouterReplay(RouterReplay):
+            # The target of a gate is (visits, tokens, topk): one selection per visit of its
+            # layer. -1 marks a position with no captured routing and keeps the live selection
+            # (torch.gather forbids negative indices).
+            class _VisitRouterReplay(RouterReplay):
+                def set_target(self, indices: torch.Tensor) -> None:
+                    super().set_target(indices)
+                    self.visits: dict[tuple, int] = {}
+
                 def apply(self, indices: torch.Tensor) -> torch.Tensor:
-                    result = super().apply(indices)
-                    return torch.where(result >= 0, result, indices)
+                    if self.mode != RouterReplayMode.REPLAY:
+                        return super().apply(indices)
+                    # The forward visits the layer in order. Activation checkpointing runs every
+                    # visit again during backward, in any order and with the same operations, so
+                    # a visit is recognised by a key of the live selection it reproduces.
+                    key = (int(indices.sum()), tuple(indices.flatten()[:64].tolist()))
+                    visit = self.visits.setdefault(key, len(self.visits))
+                    target = self.target_indices[visit].to(indices.device)
+                    return torch.where(target >= 0, target, indices)
+
+            # A looped model (Inkling 2) runs its core layers once per pass. vLLM keeps one
+            # routing row per layer visit in execution order: the layers before the core, every
+            # pass of the core, the layers after it.
+            config = getattr(self.model.config, "text_config", self.model.config)
+            loop = getattr(config, "loop_config", None)
+            core = config.loop_core_layers if loop else range(0)
+            passes = loop["num_passes"] if loop else 1
 
             RouterReplay.clear_registry()
-            gate_layer_ids: list[int] = []
+            self._routing_rows: list[list[int]] = []
             for name, module in self.model.named_modules():
                 if hasattr(module, "router_replay"):  # an AutoModel MoE gate
-                    module.router_replay = _SentinelRouterReplay()
+                    module.router_replay = _VisitRouterReplay()
                     m = re.search(r"layers\.(\d+)\b", name)
-                    gate_layer_ids.append(int(m.group(1)) if m else len(gate_layer_ids))
-            if not gate_layer_ids:
+                    layer = int(m.group(1)) if m else len(self._routing_rows)
+                    if layer in core:
+                        rows = [layer + p * len(core) for p in range(passes)]
+                    else:
+                        rows = [layer + (passes - 1) * len(core) * (layer >= core.stop)]
+                    self._routing_rows.append(rows)
+            if not self._routing_rows:
                 raise RuntimeError("routing_replay is on but the model has no MoE router gates.")
-            self._num_routing_gates = len(gate_layer_ids)
-            self._moe_layer_global_ids = gate_layer_ids
             print(
-                f"[R3] Routing replay enabled on {len(gate_layer_ids)} MoE gates at global layer ids {gate_layer_ids}."
+                f"[R3] Routing replay enabled on {len(self._routing_rows)} MoE gates "
+                f"at rollout routing rows {self._routing_rows}."
             )
         if self.packing_samples:
             print("[Packing] Using AutoModel THD/TE packed path.")
@@ -573,16 +593,15 @@ class BaseModel(nn.Module):
         """Shard the R3 routing ids to this rank's forward token order (RouterReplay).
 
         ``routed_experts`` is ``(B, vllm_layers, topk, S)`` (rollout top-k expert ids per
-        token, seq last). Returns one ``(num_tokens, topk)`` tensor per MoE gate, reordered
-        to what the gate sees on this rank (CP-local under cp>1, pad-removed under packing,
-        else plain ``B*S``). Positions with no captured routing carry a -1 sentinel that
-        ``RouterReplay`` keeps at the live selection.
+        token, seq last). Returns one ``(visits, num_tokens, topk)`` tensor per MoE gate,
+        reordered to what the gate sees on this rank (CP-local under cp>1, pad-removed under
+        packing, else plain ``B*S``). Positions with no captured routing carry a -1 sentinel
+        that ``RouterReplay`` keeps at the live selection.
 
         vLLM indexes its layer dim by GLOBAL decoder-layer id, so we pick each gate's own
-        global-id row (``_moe_layer_global_ids``); uniform-MoE ids are 0..N-1 (plain order).
+        rows (``_routing_rows``, one per visit of the layer); uniform-MoE models have the
+        single row 0..N-1 per gate (plain order).
         """
-        n_gates = self._num_routing_gates
-        global_ids = self._moe_layer_global_ids
         routing = routed_experts  # (B, vllm_layers, topk, S), seq last
         # The -1 fill keeps CP pad tokens out of expert 0, so RouterReplay leaves them at
         # the live selection.
@@ -602,12 +621,13 @@ class BaseModel(nn.Module):
                     # Match the EP-equalized pack. Expert 0, not the -1 sentinel: Gate
                     # gathers routing weights before padding_mask drops these rows.
                     per_token = F.pad(per_token, (0, 0, 0, 0, 0, pad_to_tokens - per_token.shape[0]))
-        if per_token.shape[1] <= max(global_ids):
+        last_row = max(max(rows) for rows in self._routing_rows)
+        if per_token.shape[1] <= last_row:
             raise ValueError(
-                f"rollout routing has {per_token.shape[1]} layers but a MoE gate maps to global "
-                f"layer {max(global_ids)} (have {n_gates} gates at ids {global_ids})."
+                f"rollout routing has {per_token.shape[1]} layer rows but a MoE gate replays row "
+                f"{last_row} (have {len(self._routing_rows)} gates at rows {self._routing_rows})."
             )
-        return [per_token[:, gid, :].contiguous() for gid in global_ids]
+        return [per_token[:, rows, :].transpose(0, 1).contiguous() for rows in self._routing_rows]
 
     def _forward_backbone(
         self,
