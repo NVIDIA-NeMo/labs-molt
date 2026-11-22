@@ -66,6 +66,10 @@ def get_tokenizer(pretrain, model, padding_side="left", use_fast=True):
         # AutoProcessor wraps tokenizer + image_processor; downstream code
         # detects VLM via hasattr(tokenizer, "image_processor").
         tokenizer = AutoProcessor.from_pretrained(pretrain, trust_remote_code=True)
+        # A processor class transformers does not know (Inkling 2) comes back as the bare tokenizer:
+        # there is no image path then, and the text branch below sets the tokenizer up.
+        is_vlm = hasattr(tokenizer, "tokenizer")
+    if is_vlm:
         # AutoProcessor doesn't delegate tokenizer attributes, so set them on
         # the inner tokenizer and mirror the essentials back.
         inner = tokenizer.tokenizer
