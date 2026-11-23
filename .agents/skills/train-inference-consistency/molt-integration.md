@@ -48,10 +48,10 @@ equal: [contracts.md](contracts.md); how to build the trainer side: [training-si
   the cold-loaded checkpoint. It says nothing about later bytes: prove those by hashing the same tensor on
   both sides after `load_weights`, or by the logprob comparison itself.
 - The sync runs inside vLLM's reload lifecycle (`start_weight_update` / `finish_weight_update`) in the mode
-  `VLLM_RELOAD_MODE` selects. molt leaves it at vLLM's default, `auto`: direct reload (weights written in
-  place, post-load processing re-run at the finish, an update that misses a weight fails) and layerwise
-  reload where vLLM refuses direct (online quantization, offloading), with a log line saying why.
-  `VLLM_RELOAD_MODE=layerwise` keeps the checkpoint value of a weight the trainer does not send.
+  `--vllm.reload_mode` selects (it sets `VLLM_RELOAD_MODE` in the engine actor). `layerwise`, the default:
+  a weight that is not sent keeps its checkpoint value. `auto`: direct reload (weights written in place,
+  post-load processing re-run at the finish, a sync that misses a weight fails) and layerwise where vLLM
+  refuses direct (online quantization, offloading), with a log line saying why.
 - Under `--actor.lora_dim > 0` the refit merges `W + scale·B·A` in fp32 while the training forward runs the
   unmerged `W·x + scale·B(A·x)` — one rounding apart by construction, so LoRA is off the bitwise contract.
 

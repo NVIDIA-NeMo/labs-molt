@@ -61,6 +61,11 @@ The check reports a false difference when vLLM pads MoE weights beyond the check
 hidden size, MXFP4): the padding is not rewritten after the zeroing. See the limitations in vLLM's
 [weight checker](https://docs.vllm.ai/en/latest/training/weight_checker/).
 
+`--vllm.reload_mode` selects how vLLM applies a sync. The default, `layerwise`, leaves a weight the
+trainer does not send (a module it never builds) at its checkpoint value. `auto` reloads directly,
+which is faster and fails any sync that does not carry every weight the engine loaded
+(`direct reload: the update did not load N parameters`).
+
 ## Metrics to watch
 
 | Metric | Tells you |

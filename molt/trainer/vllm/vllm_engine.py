@@ -109,7 +109,7 @@ class RolloutRayActor:
             bundle_indices=bundle_indices,
             worker_num_gpus=kwargs.pop("worker_num_gpus", _vllm_worker_num_gpus(backend, num_gpus)),
         )
-        self._configure_vllm_env(kwargs.pop("full_determinism", False))
+        self._configure_vllm_env(kwargs.pop("full_determinism", False), kwargs.pop("reload_mode", "layerwise"))
         # This engine's first weight-transfer rank, counted from the first vLLM worker of all engines.
         self._transfer_rank_offset = kwargs.pop("transfer_rank_offset", 0)
 
@@ -204,9 +204,10 @@ class RolloutRayActor:
             os.environ["VLLM_RAY_BUNDLE_INDICES"] = ",".join(map(str, bundle_indices))
             print(f"creating LLM with bundle_indices={bundle_indices}")
 
-    def _configure_vllm_env(self, full_determinism: bool):
+    def _configure_vllm_env(self, full_determinism: bool, reload_mode: str):
         _assert_supported_vllm()
         os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+        os.environ["VLLM_RELOAD_MODE"] = reload_mode  # --vllm.reload_mode
 
         if full_determinism:
             # https://github.com/vllm-project/vllm/blob/effc5d24fae10b29996256eb7a88668ff7941aed/examples/offline_inference/reproduciblity.py#L11
@@ -317,6 +318,7 @@ def create_vllm_engines(
     pipeline_parallel_size: int = 1,
     data_parallel_size: int = 1,
     max_logprobs: int = 0,
+    reload_mode: str = "layerwise",
 ):
     """Spin up a set of vLLM Ray actors on a dedicated placement group.
 
@@ -432,6 +434,7 @@ def create_vllm_engines(
             "dtype": dtype,
             "trust_remote_code": True,
             "full_determinism": full_determinism,
+            "reload_mode": reload_mode,
             "gpu_memory_utilization": gpu_memory_utilization,
             "bundle_indices": bundle_indices,
             "num_gpus": num_gpus,
