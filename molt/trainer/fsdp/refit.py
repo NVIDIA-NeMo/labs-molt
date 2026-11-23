@@ -129,7 +129,12 @@ class ActorWeights(WeightSource):
                 weight = weight + scale * delta.to(weight.dtype)
             # AutoModel's adapter owns the checkpoint naming and may return a grouped weight as several
             # tensors. No options: some adapters (Inkling 2, Mistral Large 4) reject those they do not know.
-            named = [(name, weight)] if adapter is None else adapter.convert_single_tensor_to_hf(name, weight)
+            if adapter is None:
+                named = [(name, weight)]
+            elif hasattr(adapter, "convert_single_tensor_to_hf"):
+                named = adapter.convert_single_tensor_to_hf(name, weight)
+            else:  # an adapter with the whole-dict API only (KimiVL)
+                named = adapter.to_hf({name: weight}).items()
             for hf_name, hf_weight in named:
                 # A tied lm_head reaches vLLM through embed_tokens.
                 if hf_weight.is_floating_point() and not _skip_tied_lm_head(config, hf_name):

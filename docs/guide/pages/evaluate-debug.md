@@ -57,6 +57,10 @@ worker with the loaded checkpoint. The run stops if any tensor was not written o
 when rollout and trainer log-probs drift apart for no clear reason, or for a new model. It is
 skipped on a resumed run, where the actor no longer holds the checkpoint the engines loaded.
 
+The check reports a false difference when vLLM pads MoE weights beyond the checkpoint shape (DeepEP
+hidden size, MXFP4): the padding is not rewritten after the zeroing. See the limitations in vLLM's
+[weight checker](https://docs.vllm.ai/en/latest/training/weight_checker/).
+
 ## Metrics to watch
 
 | Metric | Tells you |

@@ -181,6 +181,8 @@ class PolicyTrainer:
             if now.get(key) != was[key]
         ]
         total = sum(map(len, loaded))
+        if not total:
+            raise RuntimeError("[check_weight_update] vLLM returned no weight checksums, so nothing was verified")
         if wrong:
             # The engines now hold these weights zeroed or altered: do not train on them.
             raise RuntimeError(

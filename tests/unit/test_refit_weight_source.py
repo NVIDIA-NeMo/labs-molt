@@ -78,3 +78,14 @@ def test_state_dict_adapter_names_the_tensors_and_takes_no_options():
         ("model.experts.weight.a", (1, 4)),
         ("model.experts.weight.b", (1, 4)),
     ]
+
+
+def test_adapter_with_the_whole_dict_api_only_names_the_tensors_through_to_hf():
+    class Adapter:  # KimiVL's adapter has to_hf / from_hf and nothing per tensor
+        def to_hf(self, state_dict):
+            return {f"language_model.{name}": tensor for name, tensor in state_dict.items()}
+
+    model = nn.Module()
+    model.proj = nn.Linear(4, 2, bias=False)
+    model.state_dict_adapter = Adapter()
+    assert [m.name for m in ActorWeights(model, ep_size=1).metadata] == ["language_model.proj.weight"]
