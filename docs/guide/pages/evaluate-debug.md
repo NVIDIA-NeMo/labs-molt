@@ -51,8 +51,11 @@ generating.
 
 ## Check weight sync
 
-`--train.check_weight_update_equal` warns, after each broadcast, which parameters vLLM did not
-refresh. Use it when rollout and trainer log-probs drift apart for no clear reason.
+`--train.check_weight_update_equal` proves the weight sync before the first update: it zeroes the
+vLLM weights, syncs them from the actor, and compares the SHA-256 of every parameter on every vLLM
+worker with the loaded checkpoint. The run stops if any tensor was not written or differs. Use it
+when rollout and trainer log-probs drift apart for no clear reason, or for a new model. It is
+skipped on a resumed run, where the actor no longer holds the checkpoint the engines loaded.
 
 ## Metrics to watch
 

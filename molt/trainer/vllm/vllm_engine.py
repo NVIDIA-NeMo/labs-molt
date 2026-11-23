@@ -125,7 +125,7 @@ class RolloutRayActor:
         """Mount vLLM's OpenAI API server on THIS engine and return its URL.
 
         The router (vllm-router) fronts these per-engine servers for generation; we keep
-        ``self.llm`` in the actor so weight sync (``collective_rpc`` over the NCCL group)
+        ``self.llm`` in the actor so weight sync (the methods below, over the NCCL group)
         is untouched and bypasses the router. Uvicorn runs on the actor's OWN event loop
         (shared with the AsyncLLM engine — no extra process), same pattern as the chat
         server. Client sets the token-in/out flags per request (``prompt=[ids]``,
@@ -205,6 +205,11 @@ class RolloutRayActor:
     def _configure_vllm_env(self, full_determinism: bool):
         _assert_supported_vllm()
         os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
+        # Layerwise reload, as molt has always used: a weight the trainer does not hold (a tower or head
+        # it never builds) keeps its checkpoint value. vLLM's default with weight updates is direct
+        # reload, which is faster but fails an update that does not carry every weight; set
+        # VLLM_RELOAD_MODE=auto or direct to use it.
+        os.environ.setdefault("VLLM_RELOAD_MODE", "layerwise")
 
         if full_determinism:
             # https://github.com/vllm-project/vllm/blob/effc5d24fae10b29996256eb7a88668ff7941aed/examples/offline_inference/reproduciblity.py#L11
@@ -215,41 +220,29 @@ class RolloutRayActor:
 
             os.environ["RAY_ADDRESS"] = global_worker.gcs_client.address
 
-    async def init_process_group(self, master_address, master_port, rank_offset, world_size, group_name, backend):
-        return await self.llm.collective_rpc(
-            "init_process_group",
-            args=(master_address, master_port, rank_offset, world_size, group_name, backend),
-        )
+    # vLLM's weight-update control plane (vLLM docs: training/weight_updates), with AsyncLLM's own
+    # signatures: the trainer's transfer engine drives these four through a RayVLLMWeightSyncClient.
+    async def init_weight_transfer_engine(self, request):
+        await self.llm.init_weight_transfer_engine(request)
 
-    async def update_weights_packed(self, metas):
-        """Receive a single packed broadcast carrying many weights.
+    async def start_weight_update(self):
+        # The reload rewrites the weights in place, so a step during the update would be a bug.
+        assert await self.llm.is_paused(), "start_weight_update needs pause_generation first"
+        await self.llm.start_weight_update()
 
-        ``metas`` is a list of ``(name, dtype, shape)``. Producer (rank 0 in the
-        trainer) cats matching tensors into one buffer in the same order.
-        """
-        return await self.llm.collective_rpc(
-            "update_weights_packed",
-            args=(metas,),
-        )
+    async def update_weights(self, request):
+        await self.llm.update_weights(request)
 
-    async def begin_weight_update(self):
-        # The reload tears the model down layer by layer, so a step during the refit would be a bug.
-        assert await self.llm.is_paused(), "begin_weight_update needs pause_generation first"
-        await self.llm.collective_rpc("begin_weight_update")
+    async def finish_weight_update(self):
+        await self.llm.finish_weight_update()
 
-    async def end_weight_update(self):
-        await self.llm.collective_rpc("end_weight_update")
+    # vLLM's weight checker, for --train.check_weight_update_equal.
+    async def weight_checksums(self) -> dict:
+        """SHA-256 of every parameter on every worker of this engine, keyed by worker and name."""
+        return {key: digest for worker in await self.llm.compute_weight_checksums() for key, digest in worker.items()}
 
-    async def reset_weight_update_check(self):
-        await self.llm.collective_rpc("reset_weight_update_check")
-
-    async def weight_update_missing(self):
-        # A param only has to be assigned on the worker that holds its shard, so intersect.
-        # None from any worker means the names are not comparable there — say so for all.
-        results = await self.llm.collective_rpc("weight_update_missing")
-        if any(names is None for names in results):
-            return None
-        return sorted(set.intersection(*(set(names) for names in results)))
+    async def zero_weights(self):
+        await self.llm.collective_rpc("reset_weights")
 
     async def pause_generation(self):
         await self.llm.pause_generation(mode="keep")
@@ -427,7 +420,7 @@ def create_vllm_engines(
         actor_kwargs = {
             "model": pretrain,
             "enforce_eager": enforce_eager,
-            "worker_extension_cls": "molt.trainer.vllm.vllm_worker_wrap.WorkerWrap",
+            "weight_transfer_config": {"backend": "nccl"},
             "tensor_parallel_size": tensor_parallel_size,
             "pipeline_parallel_size": pipeline_parallel_size,
             "seed": seed + i,

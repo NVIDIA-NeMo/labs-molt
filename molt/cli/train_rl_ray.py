@@ -944,7 +944,7 @@ if __name__ == "__main__":
         "with --train.partial_rollout_enable (preemption drops routing).",
     )
     # Debug / repro: dump a rollout batch and replay it train-only (skip generation) to
-    # iterate on the training+refit path in isolation; check_weight_update_equal checks every broadcast.
+    # iterate on the training+refit path in isolation; check_weight_update_equal proves the weight sync.
     parser.add_argument(
         "--train.rollout_dump_dir",
         type=str,
@@ -961,7 +961,8 @@ if __name__ == "__main__":
         "--train.check_weight_update_equal",
         action="store_true",
         default=False,
-        help="After each vLLM weight broadcast, warn which params vLLM did NOT refresh (stale rollout weights).",
+        help="Before the first update, zero the vLLM weights, sync them from the actor and verify every parameter "
+        "on every worker bit for bit (SHA-256) against the loaded checkpoint; fail on any difference.",
     )
 
     # Eval

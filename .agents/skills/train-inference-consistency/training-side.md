@@ -93,7 +93,7 @@ residual and norm positions, position encoding, visibility range, router, specia
   name, axis transforms, sharing (tied embeddings); fused QKV, gate/up order, expert numbering, extra
   norm/bias, non-persistent buffers, derived state; fused parameters overwritten whole; every missing or
   extra item with a written reason. In molt the refit broadcast is that mapping;
-  `--train.check_weight_update_equal` lists unassigned names ([refit](molt-integration.md#refit)).
+  `--train.check_weight_update_equal` proves the sync before the first update ([refit](molt-integration.md#refit)).
 - Stateful modules (conv, SSM scan, recurrence) must consume `cu_seqlens`; a correct attention mask proves
   nothing about them. The engine starts its chunk grid at each sequence's position 0, so the packed forward
   restarts it at every `cu_seqlens[i]`, not at the row offset, and decode must reproduce the chunked

@@ -183,7 +183,7 @@
 | `--train.routing_replay` | `False` | R3: capture the rollout router's per-token expert selection (vLLM) and replay it in the training forward (AutoModel RouterReplay) so MoE training/rollout routing match. MoE models only; turns on --vllm.enable_prefix_caching (the capture requires it); incompatible with --train.partial_rollout_enable (preemption drops routing). |
 | `--train.rollout_dump_dir` |  | Save each rollout batch to \<dir\>/rollout_step{N}.pt for later train-only replay. |
 | `--train.rollout_replay_dir` |  | Load \<dir\>/rollout_step{N}.pt instead of generating (train-only replay). |
-| `--train.check_weight_update_equal` | `False` | After each vLLM weight broadcast, warn which params vLLM did NOT refresh (stale rollout weights). |
+| `--train.check_weight_update_equal` | `False` | Before the first update, zero the vLLM weights, sync them from the actor and verify every parameter on every worker bit for bit (SHA-256) against the loaded checkpoint; fail on any difference. |
 
 ## `--vllm.*`
 
