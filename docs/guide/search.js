@@ -17,7 +17,7 @@
 
 // Search for the docs: a palette over every section and every flag row of the pages in pages.js.
 // MiniSearch ranks the matches in the browser, so there is no server and no build step. The palette
-// also hands the question, with the best-matching pages, to an AI assistant.
+// also hands the question to an AI assistant, which reads the repository.
 (function () {
   'use strict';
   var d = document, el = window.Molt.el;
@@ -28,6 +28,7 @@
   var STOP = new RegExp('^(a|an|and|are|as|be|can|do|does|for|how|i|in|is|it|my|of|on|or|should|the|to|' +
     'what|when|where|which|why|with)$');
   var EXAMPLES = ['ep_size', 'partial rollout', 'ChatAgent', 'how do I evaluate a checkpoint'];
+  var REPO = 'NVIDIA-NeMo/labs-molt';
   var ASSISTANTS = [
     ['Ask ChatGPT', 'https://chatgpt.com/?hints=search&q='],
     ['Ask Claude', 'https://claude.ai/new?q=']
@@ -184,7 +185,7 @@
   }
 
   function show() {
-    var q = input.value.trim(), hits = q && index ? search(q) : [], urls = [];
+    var q = input.value.trim(), hits = q && index ? search(q) : [];
     list.textContent = '';
     if (!index) {
       list.appendChild(el('p', 'search-note', status));
@@ -197,23 +198,20 @@
       list.appendChild(el('h4', null, 'In the docs'));
     }
     hits.forEach(function (h) {
-      var e = entries[h.id], url = new URL('pages/' + e.page + '.md', location.href).href;
-      if (urls.length < 3 && urls.indexOf(url) < 0) urls.push(url);
+      var e = entries[h.id];
       hit('?p=' + e.page + (e.at && '&at=' + encodeURIComponent(e.at)), e.kind, e.title, e.crumb,
         snippet(e.text, h.terms), h.terms);
     });
 
-    // An assistant cannot run this site's script, so it gets the question, the pages that matched
-    // as raw Markdown links, and pages.js as the list of all pages.
-    var molt = 'Molt, a framework for agentic reinforcement learning';
-    var prompt = (q ? 'Answer this question about ' + molt + ': ' + q : 'I have questions about ' + molt + '.') +
-      '\n\nRead its documentation first.' + (urls.length ? ' The most relevant pages:\n' + urls.join('\n') : '') +
-      '\nEvery page is listed in ' + new URL('pages.js', location.href).href + ' as [name, title, summary], and ' +
-      'is the Markdown file ' + new URL('pages/', location.href).href + '<name>.md';
-    var attached = urls.length ? 'with the matching pages attached' : 'with the page list attached';
+    // An assistant cannot run this site's script, so it reads the repository, which holds these pages.
+    var prompt = (q ? 'Answer this question about Molt: ' + q : 'I have questions about Molt.') +
+      '\n\nMolt is a framework for agentic reinforcement learning. Read its repository first: ' +
+      'https://github.com/' + REPO + ' (the documentation is in docs/guide/pages).';
     list.appendChild(el('h4', null, 'Ask an assistant'));
-    ASSISTANTS.forEach(function (a) { hit(a[1] + encodeURIComponent(prompt), 'ask', a[0], attached); });
-    hit('https://deepwiki.com/NVIDIA-NeMo/labs-molt', 'ask', 'Ask DeepWiki', 'answers from the source code');
+    ASSISTANTS.forEach(function (a) {
+      hit(a[1] + encodeURIComponent(prompt), 'ask', a[0], 'opens with a link to the repository');
+    });
+    hit('https://deepwiki.com/' + REPO, 'ask', 'Ask DeepWiki', 'answers from the source code');
     select(0);
     list.scrollTop = 0;
   }

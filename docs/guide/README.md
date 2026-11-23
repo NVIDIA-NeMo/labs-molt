@@ -44,9 +44,9 @@ flag. [MiniSearch](https://github.com/lucaong/minisearch), loaded from jsDelivr,
 matches. A result links to `guide/?p=<name>&at=<text>`, and the page scrolls to the heading or
 the table row with that text.
 
-The palette also offers to ask an AI assistant, which cannot run the site's script. That link
-carries the question and the URLs of the best-matching pages as Markdown files, and points to
-`pages.js` as the list of all pages.
+The palette also offers to ask an AI assistant. That link carries the question and the address
+of the repository, because an assistant cannot run the site's script but can read the Markdown
+pages on GitHub.
 
 ## Preview
 
