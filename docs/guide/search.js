@@ -18,9 +18,23 @@
 // Search for the docs: a palette over every section and every flag row of the pages in pages.js.
 // MiniSearch ranks the matches in the browser, so there is no server and no build step. The palette
 // also hands the question to an AI assistant, which reads the repository.
+// A page gets the palette by loading site.js, pages.js, and this file, and by having a [data-search] button.
 (function () {
   'use strict';
   var d = document, el = window.Molt.el;
+  var GUIDE = new URL('.', d.currentScript.src).href;  // this file sits in the guide folder
+  d.body.insertAdjacentHTML('beforeend',
+    '<dialog class="search" id="search" aria-label="Search the docs">' +
+    '<label class="search-box">' +
+    '<svg viewBox="0 0 16 16" aria-hidden="true"><use href="#search-icon"/></svg>' +
+    '<input type="search" placeholder="Search the docs, or ask a question" autocomplete="off"' +
+    ' spellcheck="false" aria-label="Search the docs" aria-controls="search-results">' +
+    '<button class="search-close" type="button" aria-label="Close search"><kbd>esc</kbd></button>' +
+    '</label>' +
+    '<div class="search-list" id="search-results" role="listbox" aria-label="Results"></div>' +
+    '<p class="search-foot"><span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>↵</kbd> open</span>' +
+    '<span><kbd>esc</kbd> close</span></p>' +
+    '</dialog>');
   var dialog = d.getElementById('search'), input = dialog.querySelector('input');
   var list = d.getElementById('search-results');
   var MINISEARCH = 'https://cdn.jsdelivr.net/npm/minisearch@7.1.2/dist/umd/index.js';
@@ -108,7 +122,9 @@
       group.pages.forEach(function (page) { pages.push([page, group.section]); });
     });
     ready = Promise.all([lib].concat(pages.map(function (p) {
-      return fetch('pages/' + p[0][0] + '.md').then(function (r) { return r.ok ? r.text() : Promise.reject(); });
+      return fetch(GUIDE + 'pages/' + p[0][0] + '.md').then(function (r) {
+        return r.ok ? r.text() : Promise.reject();
+      });
     }))).then(function (got) {
       pages.forEach(function (p, i) { parse(got[i + 1], p[0], p[1]); });
       index = new window.MiniSearch({
@@ -199,8 +215,8 @@
     }
     hits.forEach(function (h) {
       var e = entries[h.id];
-      hit('?p=' + e.page + (e.at && '&at=' + encodeURIComponent(e.at)), e.kind, e.title, e.crumb,
-        snippet(e.text, h.terms), h.terms);
+      var href = GUIDE + '?p=' + e.page + (e.at && '&at=' + encodeURIComponent(e.at));
+      hit(href, e.kind, e.title, e.crumb, snippet(e.text, h.terms), h.terms);
     });
 
     // An assistant cannot run this site's script, so it reads the repository, which holds these pages.
