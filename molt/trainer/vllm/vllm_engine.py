@@ -110,6 +110,8 @@ class RolloutRayActor:
             worker_num_gpus=kwargs.pop("worker_num_gpus", _vllm_worker_num_gpus(backend, num_gpus)),
         )
         self._configure_vllm_env(kwargs.pop("full_determinism", False))
+        # This engine's first weight-transfer rank, counted from the first vLLM worker of all engines.
+        self._transfer_rank_offset = kwargs.pop("transfer_rank_offset", 0)
 
         self.kwargs = kwargs
 
@@ -205,11 +207,6 @@ class RolloutRayActor:
     def _configure_vllm_env(self, full_determinism: bool):
         _assert_supported_vllm()
         os.environ["VLLM_ALLOW_INSECURE_SERIALIZATION"] = "1"
-        # Layerwise reload, as molt has always used: a weight the trainer does not hold (a tower or head
-        # it never builds) keeps its checkpoint value. vLLM's default with weight updates is direct
-        # reload, which is faster but fails an update that does not carry every weight; set
-        # VLLM_RELOAD_MODE=auto or direct to use it.
-        os.environ.setdefault("VLLM_RELOAD_MODE", "layerwise")
 
         if full_determinism:
             # https://github.com/vllm-project/vllm/blob/effc5d24fae10b29996256eb7a88668ff7941aed/examples/offline_inference/reproduciblity.py#L11
@@ -223,6 +220,9 @@ class RolloutRayActor:
     # vLLM's weight-update control plane (vLLM docs: training/weight_updates), with AsyncLLM's own
     # signatures: the trainer's transfer engine drives these four through a RayVLLMWeightSyncClient.
     async def init_weight_transfer_engine(self, request):
+        # molt's engines are separate vLLM instances, each numbering its workers from zero: this
+        # one's workers take the transfer ranks after those of the engines before it.
+        request.init_info["rank_offset"] += self._transfer_rank_offset
         await self.llm.init_weight_transfer_engine(request)
 
     async def start_weight_update(self):
@@ -421,6 +421,7 @@ def create_vllm_engines(
             "model": pretrain,
             "enforce_eager": enforce_eager,
             "weight_transfer_config": {"backend": "nccl"},
+            "transfer_rank_offset": i * engine_world,
             "tensor_parallel_size": tensor_parallel_size,
             "pipeline_parallel_size": pipeline_parallel_size,
             "seed": seed + i,

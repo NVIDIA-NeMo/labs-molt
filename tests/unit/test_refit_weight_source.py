@@ -15,10 +15,9 @@
 
 """What a weight sync hands to vLLM's weight-transfer engine.
 
-`_ActorWeights` is the trainer's `WeightSource`: vLLM sizes its receive buffers from `metadata` and
+`ActorWeights` is the trainer's `WeightSource`: vLLM sizes its receive buffers from `metadata` and
 reads the bytes from `iter_full`, so the two must list the same tensors in the same order, and each
-tensor must carry the checkpoint name vLLM loads it under. `_EnginesClient` gives each of molt's
-independent engines its own block of transfer ranks.
+tensor must carry the checkpoint name vLLM loads it under.
 """
 
 from types import SimpleNamespace
@@ -27,8 +26,7 @@ import torch
 import torch.nn as nn
 from nemo_automodel.components._peft.lora import LinearLoRA
 
-from molt.trainer.workers import policy_actor
-from molt.trainer.workers.policy_actor import _ActorWeights, _EnginesClient
+from molt.trainer.fsdp.refit import ActorWeights
 
 
 def _model(tied: bool) -> nn.Module:
@@ -42,7 +40,7 @@ def _model(tied: bool) -> nn.Module:
 
 
 def test_metadata_lists_what_iter_full_yields():
-    source = _ActorWeights(_model(tied=False), ep_size=1)
+    source = ActorWeights(_model(tied=False), ep_size=1)
     sent = list(source.iter_full())
     assert [name for name, _ in sent] == ["embed_tokens.weight", "router.weight", "lm_head.weight"]
     assert [(m.name, m.dtype, m.shape) for m in source.metadata] == [
@@ -52,7 +50,7 @@ def test_metadata_lists_what_iter_full_yields():
 
 
 def test_tied_lm_head_travels_as_embed_tokens():
-    source = _ActorWeights(_model(tied=True), ep_size=1)
+    source = ActorWeights(_model(tied=True), ep_size=1)
     assert [m.name for m in source.metadata] == ["embed_tokens.weight", "router.weight"]
 
 
@@ -61,7 +59,7 @@ def test_lora_adapter_travels_merged_into_its_base_weight():
     model.q_proj = LinearLoRA(nn.Linear(4, 4, bias=False), dim=2, alpha=4)
     nn.init.normal_(model.q_proj.lora_B.weight)  # B starts at zero; make the delta visible
     sd = model.state_dict()
-    sent = dict(_ActorWeights(model, ep_size=1).iter_full())
+    sent = dict(ActorWeights(model, ep_size=1).iter_full())
     assert list(sent) == ["q_proj.weight"]
     delta = 2.0 * sd["q_proj.lora_B.weight"] @ sd["q_proj.lora_A.weight"]
     torch.testing.assert_close(sent["q_proj.weight"], sd["q_proj.weight"] + delta)
@@ -75,20 +73,8 @@ def test_state_dict_adapter_names_the_tensors_and_takes_no_options():
     model = nn.Module()
     model.experts = nn.Linear(4, 2, bias=False)
     model.state_dict_adapter = Adapter()
-    source = _ActorWeights(model, ep_size=1)
+    source = ActorWeights(model, ep_size=1)
     assert [(m.name, m.shape) for m in source.metadata] == [
         ("model.experts.weight.a", (1, 4)),
         ("model.experts.weight.b", (1, 4)),
     ]
-
-
-def test_each_engine_gets_its_own_block_of_transfer_ranks(monkeypatch):
-    offsets = []
-    engine = SimpleNamespace(
-        init_weight_transfer_engine=SimpleNamespace(remote=lambda request: offsets.append(request.init_info))
-    )
-    monkeypatch.setattr(policy_actor.ray, "get", lambda refs: refs)
-    client = _EnginesClient([engine, engine, engine], ranks_per_engine=4)
-    client.init_weight_transfer_engine({"rank_offset": 1, "world_size": 13})
-    assert [info["rank_offset"] for info in offsets] == [1, 5, 9]
-    assert all(info["world_size"] == 13 for info in offsets)

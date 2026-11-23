@@ -23,7 +23,7 @@ and only when tied — never embed_tokens or a nested/auxiliary head (mtp/draft)
 
 from types import SimpleNamespace
 
-from molt.trainer.workers.policy_actor import _skip_tied_lm_head
+from molt.trainer.fsdp.refit import _skip_tied_lm_head
 
 
 def _cfg(tied: bool):

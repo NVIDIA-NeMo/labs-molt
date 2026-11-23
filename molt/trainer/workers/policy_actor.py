@@ -17,34 +17,26 @@
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
 import os
-import socket
 import time
 from contextlib import ExitStack
 from dataclasses import fields
-from functools import cached_property
 from typing import Dict, List, Optional
 
 import ray
 import torch
 import torch.distributed
-from torch.distributed.tensor import DTensor
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from vllm.distributed.weight_transfer import (
-    ParamMeta,
-    RayVLLMWeightSyncClient,
-    WeightSource,
-    WeightTransferTrainerFactory,
-)
-from vllm.distributed.weight_transfer.base import WeightTransferInitRequest
+from vllm.distributed.weight_transfer import RayVLLMWeightSyncClient, WeightTransferTrainerFactory
 from vllm.distributed.weight_transfer.nccl_engine import NCCLTrainerInitInfo
+from vllm.utils.network_utils import get_open_port
 
 from molt.models import Actor, PolicyLoss, agg_loss
 from molt.models.utils import compute_approx_kl, masked_mean, mismatch_metrics, split_moe_aux_loss
 from molt.trainer.algorithm.experience import Experience, get_model_parallel_size
 from molt.trainer.fsdp import FsdpStrategy
-from molt.trainer.fsdp.refit import gather_full_param
+from molt.trainer.fsdp.refit import ActorWeights
 from molt.trainer.vllm.vllm_engine import batch_vllm_engine_call
 from molt.utils import get_tokenizer
 from molt.utils.distributed_util import torch_dist_barrier_and_cuda_sync
@@ -55,145 +47,6 @@ from ..algorithm import NaiveReplayBuffer
 from .actor_group import BaseModelActor
 
 logger = init_logger(__name__)
-
-
-def _skip_tied_lm_head(config, name: str) -> bool:
-    """Whether to skip broadcasting this weight to vLLM as a redundant tied lm_head.
-
-    Tied-embedding models share lm_head with embed_tokens; vLLM receives the shared
-    weight through embed_tokens, so a separate lm_head.weight update is redundant and
-    would form an empty "loaded 0 of N" refit batch. Exact-match only (``lm_head.weight``)
-    so nested/auxiliary heads like ``mtp.lm_head.weight`` are still sent.
-    """
-    return bool(getattr(config, "tie_word_embeddings", False)) and name == "lm_head.weight"
-
-
-def _lora_merge_map(model: torch.nn.Module, sd: dict) -> dict:
-    """Map each LoRA base weight to ``(A key, B key, scale)`` for the vLLM refit merge.
-
-    Keyed by state-dict names: activation checkpointing wraps layers in ``CheckpointWrapper``,
-    which appears in ``named_modules()`` but is stripped from ``state_dict()`` keys, so a
-    module-name map would never match and the adapters would never reach vLLM.
-    """
-    from nemo_automodel.shared.parameter_names import canonical_parameter_fqn
-
-    # scale comes from the patched module itself (LinearLoRA.scale = alpha / dim).
-    scales = {
-        canonical_parameter_fqn(name): float(mod.scale)
-        for name, mod in model.named_modules()
-        if getattr(mod, "lora_A", None) is not None and getattr(mod, "lora_B", None) is not None
-    }
-    merge = {}
-    for name in sd:
-        if not name.endswith(".lora_A.weight"):
-            continue
-        base = name[: -len(".lora_A.weight")]
-        b_name, w_name = f"{base}.lora_B.weight", f"{base}.weight"
-        if base not in scales or b_name not in sd or w_name not in sd:
-            raise RuntimeError(
-                f"Refit: LoRA adapter {name!r} has no matching module or base/B weight; its delta "
-                "would be dropped and vLLM would keep the frozen base. Refusing to diverge silently."
-            )
-        merge[w_name] = (name, b_name, scales[base])
-    return merge
-
-
-class _ActorWeights(WeightSource):
-    """What a weight sync sends through vLLM's weight-transfer engine: every entry of the actor's state
-    dict, gathered to its full tensor and named as in the checkpoint.
-
-    vLLM loads by checkpoint name and ignores names it does not have, so nothing is filtered by
-    ``requires_grad`` here: its names differ from the state dict's (AutoModel / FSDP naming), and such a
-    filter once skipped nearly every trained weight and left the engines on the base checkpoint.
-    LoRA adapters travel merged into their base weight, a tied lm_head travels as embed_tokens, and each
-    tensor keeps its own dtype: vLLM casts to the parameter's dtype on load, so a weight kept in fp32
-    (an MoE router) is not rounded to bf16 on the way.
-    """
-
-    def __init__(self, model: torch.nn.Module, ep_size: int):
-        self.model, self.ep_size = model, ep_size
-
-    @cached_property
-    def metadata(self) -> List[ParamMeta]:
-        # Declared by one pass over the weights themselves, so every rank holds the same list and it cannot
-        # disagree with what iter_full sends (a disagreement hangs the transfer or loads garbage).
-        return [ParamMeta(name, weight.dtype, tuple(weight.shape)) for name, weight in self.iter_full()]
-
-    def iter_full(self):
-        """Every trainer rank iterates this in step: gathering a sharded weight is a collective."""
-        model = self.model
-        sd = model.state_dict()
-        # LoRA: vLLM serves full weights, so the adapter goes merged into its base weight (W + scale·B@A).
-        lora_merge = _lora_merge_map(model, sd)
-        adapter = getattr(model, "state_dict_adapter", None)
-        config = getattr(model, "config", None)
-        for name, tensor in sd.items():
-            if lora_merge and (name.endswith(".lora_A.weight") or name.endswith(".lora_B.weight")):
-                continue  # adapters reach vLLM merged into their base weight
-            # TE `_extra_state` (fp8 amax bookkeeping) and any other non-tensor is never a weight.
-            # Skipping it here, not through the adapter's `exclude_key_regex`, keeps the adapter call
-            # below free of options: some adapters (Inkling 2, Mistral Large 4) reject the ones they
-            # do not know.
-            if not torch.is_tensor(tensor) or name.endswith("_extra_state"):
-                continue
-
-            # EP-sharded experts must be DTensors so `full_tensor()` collects every expert across the
-            # EP mesh. The default torch_mm experts (GroupedExperts + ExpertParallel) are; the TE
-            # GroupedLinear layout (BackendConfig experts="te") keeps only this rank's local experts as
-            # plain tensors, and would silently send just rank 0's slice.
-            if self.ep_size > 1 and "expert" in name and not isinstance(tensor, DTensor):
-                raise RuntimeError(
-                    f"Refit: expert weight {name!r} is not a DTensor under ep_size={self.ep_size}; "
-                    "EP-sharded experts would not be gathered (only rank-0's experts reach "
-                    "vLLM). Build the MoE with BackendConfig experts='torch_mm' (the default)."
-                )
-
-            weight, _ = gather_full_param(tensor)
-            merge = lora_merge.get(name)
-            if merge is not None:
-                # The merged weight differs from the trainer's W·x + scale·B(A·x) by one rounding.
-                a, _ = gather_full_param(sd[merge[0]])
-                b, _ = gather_full_param(sd[merge[1]])
-                weight = weight + merge[2] * (b.float() @ a.float()).to(weight.dtype)
-            if adapter is None:
-                hf_pairs = [(name, weight)]
-            elif getattr(adapter, "convert_single_tensor_to_hf", None) is not None:
-                hf_pairs = adapter.convert_single_tensor_to_hf(name, weight)
-            elif getattr(adapter, "to_hf", None) is not None:
-                hf_pairs = list(adapter.to_hf({name: weight}, exclude_key_regex=r".*_extra_state.*").items())
-            else:
-                raise RuntimeError(
-                    f"{type(model).__name__} uses an AutoModel state_dict_adapter without "
-                    "`convert_single_tensor_to_hf`; vLLM refit cannot safely map this custom "
-                    "weight layout to HuggingFace/vLLM names."
-                )
-            for hf_name, hf_weight in hf_pairs:
-                if not torch.is_tensor(hf_weight) or not hf_weight.is_floating_point():
-                    continue
-                if _skip_tied_lm_head(config, hf_name):
-                    continue  # redundant: vLLM gets the shared weight via embed_tokens
-                yield hf_name, hf_weight
-
-
-class _EnginesClient(RayVLLMWeightSyncClient):
-    """vLLM's Ray client over molt's engines. Each engine is its own vLLM instance and numbers its
-    workers from zero, so engine i is given its own block of transfer ranks."""
-
-    def __init__(self, engines: List, ranks_per_engine: int):
-        super().__init__(engines)
-        self.ranks_per_engine = ranks_per_engine
-
-    def init_weight_transfer_engine(self, init_info: dict) -> None:
-        ray.get(
-            [
-                engine.init_weight_transfer_engine.remote(
-                    WeightTransferInitRequest(
-                        init_info={**init_info, "rank_offset": init_info["rank_offset"] + i * self.ranks_per_engine}
-                    )
-                )
-                for i, engine in enumerate(self.handles)
-            ]
-        )
 
 
 class PolicyTrainer:
@@ -278,73 +131,65 @@ class PolicyTrainer:
         torch_dist_barrier_and_cuda_sync()
 
     def _init_vllm_weight_transfer(self):
-        """Join vLLM's NCCL weight transfer (vLLM docs: training/weight_updates), on every trainer rank.
+        """Join vLLM's NCCL weight transfer (vLLM docs: training/weight_updates); every trainer rank calls this.
 
         Rank 0 forms an NCCL group with every vLLM worker and is the only sender; the other ranks only
-        take part in the gathers. Transfer ranks, e.g. 3 engines with TP=4:
+        take part in the gathers. One transfer rank per vLLM worker GPU, e.g. 3 engines with TP=4:
             [    0,      1, 2, 3, 4,  5, 6, 7, 8,  9, 10, 11, 12]
             |train rank|  engine-0  |  engine-1  |   engine-2   |
-
-        One rank per vLLM worker GPU, so an engine takes
-        `tensor_parallel_size * pipeline_parallel_size * data_parallel_size` consecutive ranks; a
-        TP/PP group spanning nodes still contributes one rank per GPU. Every worker receives the full
-        weights and loads the shards / experts / PP-stage layers it owns.
+        Every worker receives the full weights and loads the shards / experts / PP-stage layers it owns.
         """
-        vllm_args = self.strategy.args.vllm
-        ranks_per_engine = (
-            vllm_args.tensor_parallel_size
-            * getattr(vllm_args, "pipeline_parallel_size", 1)
-            * getattr(vllm_args, "data_parallel_size", 1)
+        vllm_args = self.args.vllm
+        workers_per_engine = (
+            vllm_args.tensor_parallel_size * vllm_args.pipeline_parallel_size * vllm_args.data_parallel_size
         )
-        with socket.socket() as sock:
-            sock.bind(("", 0))
-            master_port = sock.getsockname()[1]
         self._weight_transfer = WeightTransferTrainerFactory.trainer_init(
             init_info=NCCLTrainerInitInfo(
-                master_address=ray._private.services.get_node_ip_address(),
-                master_port=master_port,
-                world_size=1 + len(self.vllm_engines) * ranks_per_engine,
+                master_address=ray.util.get_node_ip_address(),
+                master_port=get_open_port(),
+                world_size=1 + len(self.vllm_engines) * workers_per_engine,
                 rank=torch.distributed.get_rank(),
                 # 512 MiB chunks, not vLLM's 1 GiB: the engines run at a high gpu_memory_utilization
                 # and hold a receive buffer per chunk.
                 packed_buffer_size_bytes=512 * 1024**2,
             ),
-            client=_EnginesClient(self.vllm_engines, ranks_per_engine),
-            source=_ActorWeights(self.actor.model, getattr(self.strategy.args.fsdp, "ep_size", 1) or 1),
+            client=RayVLLMWeightSyncClient(self.vllm_engines),
+            source=ActorWeights(self.actor.model, self.strategy.ep_size),
         )
 
     def verify_weight_sync(self):
-        """--train.check_weight_update_equal: prove the sync path before the first update.
+        """--train.check_weight_update_equal: prove the sync before the first update.
 
-        The actor still holds the checkpoint the engines loaded, so a sync must reproduce the engines'
-        weights bit for bit. Zero them, sync, and compare vLLM's SHA-256 of every parameter on every
-        worker with the digests taken before (vLLM docs: training/weight_updates/weight_checker).
-        Every trainer rank calls this (the sync is a collective); the engine calls run on rank 0 only.
+        The actor still holds the checkpoint the engines loaded, so a sync must reproduce their weights
+        bit for bit: zero the engines' weights, sync, and compare vLLM's SHA-256 of every parameter on
+        every worker with the digests taken before (vLLM docs: training/weight_updates/weight_checker).
+        Every trainer rank calls this, as the sync is a collective; the engine calls run on rank 0.
         """
-        batch_vllm_engine_call(self.vllm_engines, "pause_generation")
-        before = batch_vllm_engine_call(self.vllm_engines, "weight_checksums")
-        batch_vllm_engine_call(self.vllm_engines, "zero_weights")
-        zeroed = batch_vllm_engine_call(self.vllm_engines, "weight_checksums")
+        engines = self.vllm_engines
+        batch_vllm_engine_call(engines, "pause_generation")
+        loaded = batch_vllm_engine_call(engines, "weight_checksums")
+        batch_vllm_engine_call(engines, "zero_weights")
         self.broadcast_to_vllm()
-        after = batch_vllm_engine_call(self.vllm_engines, "weight_checksums")
-        batch_vllm_engine_call(self.vllm_engines, "resume_generation")
-        if after is None:  # not rank 0
+        synced = batch_vllm_engine_call(engines, "weight_checksums")
+        batch_vllm_engine_call(engines, "resume_generation")
+        if synced is None:  # not rank 0
             return
-        unwritten, different = set(), set()
-        for was, zero, now in zip(before, zeroed, after):
-            for key in was.keys() | now.keys():
-                if now.get(key) != was.get(key):
-                    (unwritten if now.get(key) == zero.get(key) else different).add(key)
-        if unwritten or different:
-            # The engines are left with these weights wrong, so do not train on them.
+        wrong = [
+            f"engine {i} {key}"
+            for i, (was, now) in enumerate(zip(loaded, synced))
+            for key in was
+            if now.get(key) != was[key]
+        ]
+        total = sum(map(len, loaded))
+        if wrong:
+            # The engines now hold these weights zeroed or altered: do not train on them.
             raise RuntimeError(
-                f"[check_weight_update] a weight sync did not reproduce the checkpoint in vLLM: "
-                f"{len(unwritten)} tensors were never written {sorted(unwritten)[:10]}, "
-                f"{len(different)} were written with other values {sorted(different)[:10]}"
+                f"[check_weight_update] {len(wrong)} of {total} vLLM weight tensors differ from the "
+                f"checkpoint after a weight sync (zero = never written): {wrong[:10]}"
             )
         logger.info(
-            f"[check_weight_update] a weight sync reproduced all {sum(map(len, after))} vLLM weight "
-            f"tensors bit for bit ({len(after)} engines)"
+            f"[check_weight_update] a weight sync reproduced all {total} vLLM weight tensors bit for bit "
+            f"({len(engines)} engines)"
         )
 
     def _record_status(self, status, status_list, pbar):

@@ -36,8 +36,9 @@ equal: [contracts.md](contracts.md); how to build the trainer side: [training-si
 
 ### Refit
 
-- Place: `molt/trainer/workers/policy_actor.py` (`_ActorWeights`, the trainer's `WeightSource`) drives vLLM's
-  weight-transfer engine (`weight_transfer_config` in `molt/trainer/vllm/vllm_engine.py`).
+- Place: `molt/trainer/fsdp/refit.py` (`ActorWeights`, the trainer's `WeightSource`) feeds vLLM's
+  weight-transfer engine; `molt/trainer/workers/policy_actor.py` drives it, `molt/trainer/vllm/vllm_engine.py`
+  is the engine side (`weight_transfer_config`).
 - The broadcast sends the fp32 master; vLLM rounds it to bf16 on `load_weights` with the same
   round-to-nearest cast FSDP2's `param_dtype` applies in the training forward. For parameters vLLM loads
   with a plain `copy_` the engine bytes therefore equal the training-forward bytes; derived parameters
@@ -46,10 +47,11 @@ equal: [contracts.md](contracts.md); how to build the trainer side: [training-si
   weights, syncs the untrained actor, and compares vLLM's SHA-256 of every parameter on every worker with
   the cold-loaded checkpoint. It says nothing about later bytes: prove those by hashing the same tensor on
   both sides after `load_weights`, or by the logprob comparison itself.
-- The sync runs inside vLLM's reload lifecycle (`start_weight_update` / `finish_weight_update`), layerwise
-  unless `VLLM_RELOAD_MODE` says otherwise: `load_weights` copies in place, so graph-captured addresses
-  stay valid, and the finish re-runs vLLM's post-load weight processing (kernel layouts such as the
-  FlashInfer MoE block layout) once the whole update has landed, never on half-updated weights.
+- The sync runs inside vLLM's reload lifecycle (`start_weight_update` / `finish_weight_update`) in the mode
+  `VLLM_RELOAD_MODE` selects. molt leaves it at vLLM's default, `auto`: direct reload (weights written in
+  place, post-load processing re-run at the finish, an update that misses a weight fails) and layerwise
+  reload where vLLM refuses direct (online quantization, offloading), with a log line saying why.
+  `VLLM_RELOAD_MODE=layerwise` keeps the checkpoint value of a weight the trainer does not send.
 - Under `--actor.lora_dim > 0` the refit merges `W + scale·B·A` in fp32 while the training forward runs the
   unmerged `W·x + scale·B(A·x)` — one rounding apart by construction, so LoRA is off the bitwise contract.
 
