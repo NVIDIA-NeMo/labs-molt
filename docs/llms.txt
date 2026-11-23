@@ -1,0 +1,41 @@
+# Molt
+
+> Molt is a Hugging Face-native, minimal, and scalable framework for agentic reinforcement learning:
+> Ray for placement and queues, vLLM for rollout, NeMo AutoModel and FSDP2 for training.
+
+Each link below is one page of the documentation, as a Markdown file.
+The source code is at https://github.com/NVIDIA-NeMo/labs-molt.
+
+## Start here
+
+- [Installation](https://nvidia-nemo.github.io/labs-molt/guide/pages/installation.md): The container, a local install, and the optional AutoModel-Slim backend.
+- [Quick start](https://nvidia-nemo.github.io/labs-molt/guide/pages/quick-start.md): A first RL run, a first SFT run, and the switches to reach for next.
+- [Recipes](https://nvidia-nemo.github.io/labs-molt/guide/pages/recipes.md): The launch scripts that ship with the repository.
+
+## Build agents
+
+- [Agent contract](https://nvidia-nemo.github.io/labs-molt/guide/pages/agents.md): Env or ChatAgent, the Result fields, retries, and context compaction.
+
+## Train
+
+- [Algorithms](https://nvidia-nemo.github.io/labs-molt/guide/pages/algorithms.md): Estimators, KL, the PPO critic, distillation, and adding your own.
+- [Asynchronous training](https://nvidia-nemo.github.io/labs-molt/guide/pages/async-training.md): The async switches, partial rollout, and the mismatch metrics.
+- [IS correction](https://nvidia-nemo.github.io/labs-molt/guide/pages/is-correction.md): Importance sampling for stale rollout log-probs, score centering, and the REINFORCE Zero recipe.
+- [Evaluate and debug](https://nvidia-nemo.github.io/labs-molt/guide/pages/evaluate-debug.md): Scoring a checkpoint, replaying a rollout batch, and metrics to watch.
+
+## Scale
+
+- [Scaling](https://nvidia-nemo.github.io/labs-molt/guide/pages/scaling.md): TP, EP, and CP for the trainer and for the rollout engines.
+- [MoE routing](https://nvidia-nemo.github.io/labs-molt/guide/pages/moe-routing.md): Router precision, routing replay, and router freeze.
+- [MTP rollout](https://nvidia-nemo.github.io/labs-molt/guide/pages/mtp-rollout.md): Faster generation with speculative decoding.
+- [LoRA](https://nvidia-nemo.github.io/labs-molt/guide/pages/lora.md): Flags, target matching, learning rates, and the RL limits.
+
+## Reference
+
+- [RL flags](https://nvidia-nemo.github.io/labs-molt/guide/pages/cli-rl.md): Every flag of molt.cli.train_rl_ray, generated from its parser.
+- [SFT flags](https://nvidia-nemo.github.io/labs-molt/guide/pages/cli-sft.md): Every flag of molt.cli.train_sft, generated from its parser.
+- [molt.agents API](https://nvidia-nemo.github.io/labs-molt/guide/pages/api-agents.md): The exported classes with their fields, methods, and docstrings.
+
+## Project
+
+- [Development](https://nvidia-nemo.github.io/labs-molt/guide/pages/development.md): Checking a change, regenerating the reference, and contributing.

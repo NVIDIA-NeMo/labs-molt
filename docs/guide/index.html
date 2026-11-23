@@ -44,6 +44,12 @@ limitations under the License.
         <li><a href="../#quickstart">Quick Start</a></li>
       </ul>
     </nav>
+    <button class="nav-search" type="button" data-search aria-label="Search the docs">
+      <svg viewBox="0 0 16 16" aria-hidden="true">
+        <g id="search-icon"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3.5 3.5"/></g>
+      </svg>
+      <span>Search</span><kbd>⌘K</kbd>
+    </button>
     <a class="nav-cta" href="https://github.com/NVIDIA-NeMo/labs-molt">GitHub</a>
   </div>
 </header>
@@ -54,6 +60,20 @@ limitations under the License.
     <noscript><p>The docs need JavaScript. The same content is in the <a href="https://github.com/NVIDIA-NeMo/labs-molt#readme">README</a>.</p></noscript>
   </main>
 </div>
+
+<!-- The search palette. search.js fills the list and explains how matches are found. -->
+<dialog class="search" id="search" aria-label="Search the docs">
+  <label class="search-box">
+    <svg viewBox="0 0 16 16" aria-hidden="true"><use href="#search-icon"/></svg>
+    <input type="search" placeholder="Search the docs, or ask a question" autocomplete="off" spellcheck="false"
+           aria-label="Search the docs" aria-controls="search-results">
+    <button class="search-close" type="button" aria-label="Close search"><kbd>esc</kbd></button>
+  </label>
+  <div class="search-list" id="search-results" role="listbox" aria-label="Results"></div>
+  <p class="search-foot">
+    <span><kbd>↑</kbd><kbd>↓</kbd> move</span><span><kbd>↵</kbd> open</span><span><kbd>esc</kbd> close</span>
+  </p>
+</dialog>
 
 <footer class="footer">
   <div class="footer-inner">
@@ -72,7 +92,8 @@ limitations under the License.
 (function () {
   var d = document, M = window.Molt, el = M.el;
   var nav = d.getElementById('guide-nav'), root = d.getElementById('guide-root');
-  var slug = new URLSearchParams(location.search).get('p');
+  var params = new URLSearchParams(location.search), slug = params.get('p');
+  function key(text) { return text.toLowerCase().replace(/[^a-z0-9]+/g, '-'); }
   function pageLink(page, cls) { var a = el('a', cls, page[1]); a.href = '?p=' + page[0]; return a; }
 
   // The sidebar lists every page. It starts open on wide screens, where it sits beside the text.
@@ -95,6 +116,11 @@ limitations under the License.
     root.appendChild(el('p', 'kicker', 'Molt'));
     root.appendChild(el('h1', 'docs-title', 'Documentation'));
     root.appendChild(el('p', 'sub', 'Guides, deep dives, and reference. The reference pages are generated from the source code.'));
+    var field = root.appendChild(el('button', 'search-field'));
+    field.type = 'button';
+    field.setAttribute('data-search', '');
+    field.innerHTML = '<svg viewBox="0 0 16 16" aria-hidden="true"><use href="#search-icon"/></svg>' +
+      '<span>Search the docs, or ask a question</span><kbd>⌘K</kbd>';
     window.MOLT_DOCS.forEach(function (group) {
       var grid = el('div', 'lib');
       group.pages.forEach(function (page) {
@@ -130,13 +156,23 @@ limitations under the License.
       var sections = prose.querySelectorAll('h2'), toc = el('p', 'toc');
       [].forEach.call(sections, function (h) {
         var a = el('a', null, h.textContent);
-        h.id = h.textContent.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+        h.id = key(h.textContent);
         a.href = '#' + h.id;
         toc.appendChild(a);
       });
       if (sections.length > 2) prose.insertBefore(toc, prose.querySelector('h1').nextSibling);
       var target = d.getElementById(location.hash.slice(1));
       if (target) target.scrollIntoView();
+
+      // A search result names the heading or the table row to land on: ?p=<name>&at=<its text>.
+      var landing = params.get('at');
+      [].some.call(landing ? prose.querySelectorAll('h2, h3, td:first-child') : [], function (node) {
+        if (key(node.textContent) !== key(landing)) return false;
+        node = node.closest('tr') || node;
+        node.classList.add('found');
+        node.scrollIntoView({ block: node.tagName === 'TR' ? 'center' : 'start' });
+        return true;
+      });
 
       pager.appendChild(at > 0 ? pageLink(pages[at - 1], 'more back') : el('span'));
       if (at < pages.length - 1) pager.appendChild(pageLink(pages[at + 1], 'more'));
@@ -149,5 +185,6 @@ limitations under the License.
     });
 })();
 </script>
+<script src="search.js"></script>
 </body>
 </html>

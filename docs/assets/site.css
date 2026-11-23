@@ -465,8 +465,53 @@ h2 { margin-top: 6px; font-size: clamp(28px, 4.2vw, 46px); line-height: 1.08; le
 .toc a { padding: 4px 11px; border-radius: 980px; background: var(--mist); color: var(--ink-2); text-decoration: none; }
 .toc a:hover { color: var(--ink); }
 .docs .prose blockquote { padding: 0; border: 0; font-size: 13px; }
-.docs .prose h2 { scroll-margin-top: calc(var(--nav-h) + 16px); }
+.docs .prose h2, .docs .prose h3 { scroll-margin-top: calc(var(--nav-h) + 16px); }
 .pager { display: flex; justify-content: space-between; gap: 16px; margin-top: 48px; padding-top: 24px; border-top: 1px solid var(--line); }
+
+/* ---------- Docs search: the buttons that open it, the palette, and the place a result lands ---------- */
+kbd { padding: 1px 5px; border-radius: 5px; background: rgba(120, 120, 128, .16); font: 500 11px/1.5 var(--font); letter-spacing: 0; }
+.nav-search, .search-field { display: inline-flex; align-items: center; gap: 8px; border: 0; font: inherit; cursor: pointer; transition: background .2s, color .2s; }
+.nav-search svg, .search-field svg, .search svg { flex: none; width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+.nav-search { height: 28px; padding: 0 8px 0 10px; border-radius: 980px; background: rgba(255, 255, 255, .1); font-size: 12px; letter-spacing: -.01em; color: rgba(245, 245, 247, .8); }
+.nav-search:hover { background: rgba(255, 255, 255, .18); color: #fff; }
+.search-field { width: min(100%, 520px); margin-top: 22px; padding: 12px 14px 12px 16px; border-radius: 14px; background: var(--mist); font-size: 16px; letter-spacing: -.01em; text-align: left; color: var(--ink-2); }
+.search-field:hover { background: #ececf0; color: var(--ink); }
+.search-field span { flex: 1; }
+
+.search { width: min(640px, calc(100% - 32px)); max-height: min(620px, 76vh); margin: 11vh auto 0; padding: 0; overflow: hidden; border: 0; border-radius: 18px; background: var(--paper); color: var(--ink); box-shadow: 0 0 0 1px rgba(0, 0, 0, .08), 0 32px 80px rgba(0, 0, 0, .32); }
+.search[open] { display: flex; flex-direction: column; animation: search-in .18s var(--ease); }
+.search::backdrop { background: rgba(0, 0, 0, .42); -webkit-backdrop-filter: blur(6px); backdrop-filter: blur(6px); }
+@keyframes search-in { from { opacity: 0; transform: translateY(-8px) scale(.985); } }
+.search-box { display: flex; align-items: center; gap: 12px; padding: 0 12px 0 18px; border-bottom: 1px solid var(--line); color: var(--ink-2); }
+.search-box svg { width: 18px; height: 18px; }
+.search-box input { flex: 1; min-width: 0; height: 56px; border: 0; outline: 0; background: none; font: inherit; font-size: 17px; letter-spacing: -.01em; color: var(--ink); }
+.search-box input::-webkit-search-cancel-button { display: none; }
+.search-close { padding: 6px; border: 0; background: none; color: inherit; cursor: pointer; }
+.search-list { flex: 1; overflow-y: auto; overscroll-behavior: contain; padding: 2px 8px 8px; }
+.search-list h4 { margin: 12px 10px 4px; font-size: 11px; line-height: 1.33; letter-spacing: .04em; text-transform: uppercase; color: var(--ink-3); }
+.search-note { margin: 14px 10px 4px; font-size: 14px; line-height: 2; letter-spacing: -.01em; color: var(--ink-2); }
+.search-note button { margin-right: 6px; padding: 3px 11px; border: 0; border-radius: 980px; background: var(--mist); font: inherit; font-size: 13px; color: var(--ink); cursor: pointer; }
+.search-note button:hover { background: #e6e6eb; }
+.hit { display: grid; grid-template-columns: 30px minmax(0, 1fr); column-gap: 12px; align-items: center; padding: 8px 10px; border-radius: 12px; color: inherit; text-decoration: none; }
+.hit[aria-selected="true"] { background: var(--mist); }
+.hit-icon { grid-row: span 2; display: grid; place-items: center; width: 30px; height: 30px; border-radius: 8px; background: var(--mist); color: var(--ink-2); transition: background .15s; }
+.hit[aria-selected="true"] .hit-icon { background: var(--green); color: #000; }
+.hit-head { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.hit-head b { flex: none; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; line-height: 1.4; font-weight: 600; letter-spacing: -.01em; }
+.hit-head b.mono { font-family: var(--mono); font-size: 13px; letter-spacing: 0; }
+.hit-head small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; letter-spacing: 0; color: var(--ink-3); }
+.hit p { grid-column: 2; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; font-size: 13px; line-height: 1.45; letter-spacing: -.005em; color: var(--ink-2); }
+.hit mark, .prose tr.found td { background: rgba(118, 185, 0, .24); color: inherit; }
+.hit mark { border-radius: 3px; }
+.prose h2.found, .prose h3.found { width: fit-content; background: linear-gradient(transparent 62%, rgba(118, 185, 0, .34) 0); }
+.search-foot { display: flex; gap: 16px; padding: 9px 18px; border-top: 1px solid var(--line); font-size: 12px; line-height: 1.5; letter-spacing: 0; color: var(--ink-3); }
+.search-foot kbd { margin-right: 4px; }
+@media (prefers-reduced-motion: reduce) { .search[open] { animation: none; } }
+/* Below the wide layout the nav has no room for the label, so the button is the icon alone. */
+@media (max-width: 899px) {
+  .nav-search { width: 28px; padding: 0; justify-content: center; }
+  .nav-search span, .nav-search kbd { display: none; }
+}
 
 /* ---------- Wide: two-column hero, horizontal loop ---------- */
 @media (min-width: 900px) {
@@ -507,6 +552,8 @@ h2 { margin-top: 6px; font-size: clamp(28px, 4.2vw, 46px); line-height: 1.08; le
 @media (max-width: 599px) {
   :root { --gutter: 16px; }
   .nav-links li:not(.keep) { display: none; }
+  .search-foot { display: none; }
+  .search { max-height: calc(100% - 24px); margin-top: 12px; }
   .row { grid-template-columns: 1fr auto; gap: 4px 14px; }
   .row time { grid-column: 1 / -1; font-size: 12px; }
   .bento, .trio { grid-template-columns: 1fr; }
