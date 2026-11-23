@@ -13,9 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Write the reference pages of the docs site from the source code, and its index for AI assistants.
+"""Write the reference pages of the docs site from the source code.
 
-    python docs/guide/build_reference.py          # rewrite pages/cli-rl.md, cli-sft.md, api-agents.md, ../llms.txt
+    python docs/guide/build_reference.py          # rewrite pages/cli-rl.md, cli-sft.md, api-agents.md
     python docs/guide/build_reference.py --check  # fail if they are stale or a page names an unknown flag
 
 Needs only the standard library: the CLI parsers are built without importing the trainers.
@@ -32,7 +32,7 @@ PAGES = Path(__file__).parent / "pages"
 NOTE = "> Generated from `{}` by `docs/guide/build_reference.py`. Edit the source, then rerun the script.\n"
 sys.path.insert(0, str(REPO))  # the parser blocks import molt.cli.common_args
 
-pages = {}  # output file -> its text
+pages = {}  # page name -> markdown
 flags = set()  # every option string either CLI accepts
 
 # ---- CLI flags: run each entry point's ``__main__`` block up to ``parse_args`` and read the parser.
@@ -62,7 +62,7 @@ for page, module in [("cli-rl", "molt.cli.train_rl_ray"), ("cli-sft", "molt.cli.
     lines = [f"# `python -m {module}`", "", NOTE.format(src)]
     for heading, rows in groups.items():
         lines += [f"## {heading}", "", "| Flag | Default | Description |", "|---|---|---|", *rows, ""]
-    pages[PAGES / f"{page}.md"] = "\n".join(lines)
+    pages[page] = "\n".join(lines)
 
 # ---- Python API: the classes molt.agents exports, with their fields, methods, and docstrings.
 init = ast.parse((REPO / "molt/agents/__init__.py").read_text())
@@ -97,38 +97,18 @@ for src in ["molt/agents/base.py", "molt/agents/chat_agent.py"]:
             lines += [f"### `{cls.name}.{fn.name}`", "", "```python", signature, "```", ""]
             if ast.get_docstring(fn):
                 lines += ["```text", ast.get_docstring(fn), "```", ""]
-pages[PAGES / "api-agents.md"] = "\n".join(lines)
-
-# ---- llms.txt: the pages of pages.js as Markdown links, for an assistant that cannot run the site's script.
-SITE = "https://nvidia-nemo.github.io/labs-molt/"
-lines = [
-    "# Molt",
-    "",
-    "> Molt is a Hugging Face-native, minimal, and scalable framework for agentic reinforcement learning:",
-    "> Ray for placement and queues, vLLM for rollout, NeMo AutoModel and FSDP2 for training.",
-    "",
-    "Each link below is one page of the documentation, as a Markdown file.",
-    "The source code is at https://github.com/NVIDIA-NeMo/labs-molt.",
-    "",
-]
-listing = (PAGES.parent / "pages.js").read_text()
-for section, listed in re.findall(r'section: "(.+?)", pages: \[(.+?)\] \}', listing, re.S):
-    lines += [f"## {section}", ""]
-    for name, title, about in re.findall(r'\["(.+?)", "(.+?)", "(.+?)"\]', listed):
-        lines.append(f"- [{title}]({SITE}guide/pages/{name}.md): {about}")
-    lines.append("")
-pages[REPO / "docs/llms.txt"] = "\n".join(lines)
+pages["api-agents"] = "\n".join(lines)
 
 # ---- Write, or check: generated pages are current and every flag a page names exists.
 if "--check" not in sys.argv:
-    for path, text in pages.items():
-        path.write_text(text)
+    for name, text in pages.items():
+        (PAGES / f"{name}.md").write_text(text)
     sys.exit(0)
 
 # The guide names this flag as not yet on main: its kernels are being upstreamed.
 flags.add("--train.batch_invariant")
-stale = [path.name for path, text in pages.items() if not path.exists() or path.read_text() != text]
-problems = [f"{name} is stale: rerun this script" for name in stale]
+stale = [name for name, text in pages.items() if (PAGES / f"{name}.md").read_text() != text]
+problems = [f"{name}.md is stale: rerun this script" for name in stale]
 for path in sorted(PAGES.glob("*.md")):
     # A trailing * is a wildcard such as --actor.lora_*, not a flag.
     named = set(re.findall(r"--[a-z_]+(?:\.[a-z_0-9]+)+(?![\w*])", path.read_text()))

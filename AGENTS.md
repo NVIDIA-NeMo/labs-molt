@@ -36,8 +36,8 @@ Feature docs are the Markdown pages in `docs/guide/pages/`. Read the page for th
 changing, and update it in the same change when the behavior it describes moves.
 Do not read the rest of `docs/`. The site shell (HTML, CSS, JS, blog) has nothing to do with code
 work, and `cli-rl.md`, `cli-sft.md`, and `api-agents.md` are generated from the source and only
-repeat it. `.ignore` keeps both out of ripgrep searches. After changing a CLI flag,
-`molt.agents`, or the page list in `docs/guide/pages.js`, run `python docs/guide/build_reference.py`.
+repeat it. `.ignore` keeps both out of ripgrep searches. After changing a CLI flag or
+`molt.agents`, run `python docs/guide/build_reference.py`.
 
 ## Workflow
 

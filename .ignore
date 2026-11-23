@@ -6,7 +6,6 @@ docs/blog/
 docs/guide/index.html
 docs/guide/pages.js
 docs/guide/search.js
-docs/llms.txt
 docs/guide/pages/cli-rl.md
 docs/guide/pages/cli-sft.md
 docs/guide/pages/api-agents.md

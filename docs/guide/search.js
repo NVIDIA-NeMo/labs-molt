@@ -203,12 +203,14 @@
         snippet(e.text, h.terms), h.terms);
     });
 
-    // The assistant gets the question and, as raw Markdown links, the pages that matched it.
+    // An assistant cannot run this site's script, so it gets the question, the pages that matched
+    // as raw Markdown links, and pages.js as the list of all pages.
     var molt = 'Molt, a framework for agentic reinforcement learning';
     var prompt = (q ? 'Answer this question about ' + molt + ': ' + q : 'I have questions about ' + molt + '.') +
       '\n\nRead its documentation first.' + (urls.length ? ' The most relevant pages:\n' + urls.join('\n') : '') +
-      '\nIndex of every page: ' + new URL('../llms.txt', location.href).href;
-    var attached = urls.length ? 'with the matching pages attached' : 'with the docs index attached';
+      '\nEvery page is listed in ' + new URL('pages.js', location.href).href + ' as [name, title, summary], and ' +
+      'is the Markdown file ' + new URL('pages/', location.href).href + '<name>.md';
+    var attached = urls.length ? 'with the matching pages attached' : 'with the page list attached';
     list.appendChild(el('h4', null, 'Ask an assistant'));
     ASSISTANTS.forEach(function (a) { hit(a[1] + encodeURIComponent(prompt), 'ask', a[0], attached); });
     hit('https://deepwiki.com/NVIDIA-NeMo/labs-molt', 'ask', 'Ask DeepWiki', 'answers from the source code');
