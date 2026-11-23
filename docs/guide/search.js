@@ -38,6 +38,7 @@
     row: 'M5.5 4 2 8l3.5 4M10.5 4 14 8l-3.5 4',
     ask: 'M8 1.5 9.6 6.4 14.5 8 9.6 9.6 8 14.5 6.4 9.6 1.5 8 6.4 6.4z'
   };
+  var RULE = /^\|[\s:|-]+$/;  // the line under a table's header row
   var entries = [], index, ready, status, active = 0;
 
   // Words, plus the parts of CamelCase names, so "runner" finds StepEnvRunner.
@@ -56,36 +57,39 @@
     }).join('').trim();
   }
 
-  // One entry per page and per section, and one per table row whose first cell is code: a flag,
-  // a field, a metric. `at` is the heading or the first cell the result lands on.
+  // Index one page: an entry for the page, one per section, and one per table row whose first cell
+  // is code, such as a flag, a field, or a metric. `at` is the text of the heading or the first cell,
+  // which is where the result lands.
   function parse(md, page, group) {
     var fence = false, h2 = '', heads = [], lines = md.split('\n');
-    function add(title, crumb, at) {
-      var entry = { id: entries.length, page: page[0], title: title, crumb: crumb, at: at, text: '' };
+    function add(kind, title, crumb, at) {
+      var entry = { id: entries.length, kind: kind, page: page[0], title: title, crumb: crumb, at: at, text: '' };
       entries.push(entry);
       return entry;
     }
-    var section = add(page[1], group, '');
+    var section = add('page', page[1], group, '');
     section.text = page[2];
     lines.forEach(function (line, i) {
       if (/^```/.test(line)) { fence = !fence; return; }
-      var h = !fence && line.match(/^(#{1,3}) +(.*)/);
-      var cells = !fence && line[0] === '|' && line.replace(/\\\|/g, '¦').split('|').slice(1, -1).map(plain);
-      if (h && h[1].length > 1) {
+      var h = !fence && line.match(/^(#{2,3}) +(.*)/);
+      // A table line, split into cells. "\|" is a literal pipe inside a cell.
+      var cells = !fence && line[0] === '|' && line.replace(/\\\|/g, '\0').split('|').slice(1, -1);
+      if (cells) cells = cells.map(function (cell) { return plain(cell.replace(/\0/g, '|')); });
+      if (h) {
         var title = plain(h[2]);
-        section = add(title, h[1].length === 2 ? page[1] : page[1] + ' › ' + h2, title);
-        if (h[1].length === 2) h2 = title;
-      } else if (cells && /^\|[\s:|-]+$/.test(lines[i + 1])) {
-        heads = cells;  // the header row: it names the columns, and is not content
-      } else if (cells && line.replace(/^\|\s*/, '')[0] === '`') {
-        var row = add(cells[0], section.at ? page[1] + ' › ' + section.title : page[1], cells[0]);
-        row.row = true;
-        row.text = cells.slice(1).map(function (cell, j) {
+        section = add('section', title, h[1] === '##' ? page[1] : page[1] + ' › ' + h2, title);
+        if (h[1] === '##') h2 = title;
+      } else if (cells && RULE.test(lines[i + 1])) {
+        heads = cells;  // the header row names the columns; it is not content
+      } else if (cells && /^\|\s*`/.test(line)) {
+        var crumb = section.kind === 'page' ? page[1] : page[1] + ' › ' + section.title;
+        add('row', cells[0], crumb, cells[0]).text = cells.slice(1).map(function (cell, j) {
           return cell && heads[j + 1] === 'Default' ? 'default ' + cell : cell;
         }).filter(Boolean).join(' · ');
-      } else if (!h && !/^\|[\s:|-]+$/.test(line) && line.trim()) {
-        var text = cells ? cells.filter(Boolean).join(' · ') + '.' : fence ? line.trim() : plain(line);
-        section.text += ' ' + text;
+      } else if (cells && !RULE.test(line)) {
+        section.text += ' ' + cells.filter(Boolean).join(' · ') + '.';
+      } else if (!cells && line.trim() && (fence || !/^# /.test(line))) {  // "# Title" is the page entry itself
+        section.text += ' ' + (fence ? line.trim() : plain(line));
       }
     });
   }
@@ -126,14 +130,14 @@
     var words = tokenize(q).map(function (w) { return w.toLowerCase(); });
     var terms = words.filter(function (w) { return !STOP.test(w); });
     if (!terms.length) terms = words;
+    // A query that looks like a flag or a name favours the rows; a question favours pages and sections.
     var code = /--|[_.]\w|[a-z][A-Z]|\(\)/.test(q), seen = {};
+    var weight = { page: 2, section: 1.3, row: code ? 1.5 : 0.7 };
     var hits = index.search(terms.join(' '));
     hits.forEach(function (h) {
       var e = entries[h.id];
-      // A query that looks like a flag or a name favours the rows; a question favours pages and sections.
-      h.score *= e.row ? (code ? 1.5 : 0.7) : e.at ? 1.3 : 2;
       // Matching only some of the words counts for less; a title that contains the whole query, for more.
-      h.score *= h.queryTerms.length / terms.length;
+      h.score *= weight[e.kind] * h.queryTerms.length / terms.length;
       if (e.title.toLowerCase().indexOf(q.toLowerCase()) >= 0) h.score *= 2;
     });
     hits.sort(function (a, b) { return b.score - a.score; });
@@ -145,8 +149,7 @@
 
   // About 170 characters of `text`, starting just before its first matched word.
   function snippet(text, terms) {
-    var word = new RegExp('(^|[^\\p{L}\\p{N}])(' + terms.join('|') + ')(?![\\p{L}\\p{N}])', 'iu');
-    var m = terms.length && word.exec(text);
+    var m = new RegExp('(^|[^\\p{L}\\p{N}])(' + terms.join('|') + ')(?![\\p{L}\\p{N}])', 'iu').exec(text);
     var from = Math.max(0, (m ? m.index : 0) - 50), cut = text.slice(from, from + 170).trim();
     if (from) cut = '…' + cut.replace(/^\S*\s/, '');
     return from + 170 < text.length ? cut.replace(/\s\S*$/, '') + '…' : cut;
@@ -196,8 +199,8 @@
     hits.forEach(function (h) {
       var e = entries[h.id], url = new URL('pages/' + e.page + '.md', location.href).href;
       if (urls.length < 3 && urls.indexOf(url) < 0) urls.push(url);
-      hit('?p=' + e.page + (e.at ? '&at=' + encodeURIComponent(e.at) : ''),
-        e.row ? 'row' : e.at ? 'section' : 'page', e.title, e.crumb, snippet(e.text, h.terms), h.terms);
+      hit('?p=' + e.page + (e.at && '&at=' + encodeURIComponent(e.at)), e.kind, e.title, e.crumb,
+        snippet(e.text, h.terms), h.terms);
     });
 
     // The assistant gets the question and, as raw Markdown links, the pages that matched it.
@@ -233,7 +236,7 @@
       select((active + step + hits.length) % hits.length);
       hits[active].scrollIntoView({ block: 'nearest' });
     }
-    if (e.key === 'Enter') hits[active].click();
+    if (e.key === 'Enter' && !e.isComposing) hits[active].click();  // Enter also confirms an input method
   });
   list.addEventListener('mousemove', function (e) {
     var a = e.target.closest('.hit');
