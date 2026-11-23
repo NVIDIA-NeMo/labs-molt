@@ -15,7 +15,7 @@ window.MOLT_DOCS = [
   { section: "Train", pages: [
     ["algorithms", "Algorithms", "Estimators, KL, the PPO critic, distillation, and adding your own."],
     ["async-training", "Asynchronous training", "The async switches, partial rollout, and the mismatch metrics."],
-    ["is-correction", "IS correction", "Correcting stale rollout log-probs, score centering, and the REINFORCE Zero recipe."],
+    ["is-correction", "IS correction", "Importance sampling for stale rollout log-probs, score centering, and the REINFORCE Zero recipe."],
     ["evaluate-debug", "Evaluate and debug", "Scoring a checkpoint, replaying a rollout batch, and metrics to watch."]
   ] },
   { section: "Scale", pages: [

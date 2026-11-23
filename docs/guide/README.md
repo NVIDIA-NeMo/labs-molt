@@ -14,6 +14,8 @@ in the browser, so there is no build step.
 2. Add `[name, title, summary]` to a section in `pages.js`. The order there is the reading
    order of the sidebar and of the previous and next links.
 
+Search needs no step: it reads the pages listed in `pages.js`.
+
 Link to another page by file name, such as `[Recipes](recipes.md)`, so the link also works
 on GitHub. Link to files in the repository by their full GitHub URL.
 
@@ -33,6 +35,18 @@ python docs/guide/build_reference.py --check
 The first command rewrites the three pages from the argument parsers and from
 `molt/agents`. The second fails if they are stale, or if any page names a flag that
 neither CLI defines. Run it after changing a flag.
+
+## Search
+
+`search.js` runs in the browser. On the first search it fetches every page in `pages.js` and
+indexes one entry per page, per section, and per table row whose first cell is code, such as a
+flag. [MiniSearch](https://github.com/lucaong/minisearch), loaded from jsDelivr, ranks the
+matches. A result links to `guide/?p=<name>&at=<text>`, and the page scrolls to the heading or
+the table row with that text.
+
+The palette also offers to ask an AI assistant. That link carries the question and the address
+of the repository, because an assistant cannot run the site's script but can read the Markdown
+pages on GitHub.
 
 ## Preview
 
