@@ -13,35 +13,129 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""vLLM weight refit for the FSDP2/AutoModel backend.
+"""The trainer's half of a vLLM weight sync: which tensors go to the engines, and under which names.
 
-Owns *how* to materialize each pushed parameter (``gather_full_param``): under
-FSDP2, params are ``DTensor`` instances whose ``.full_tensor()`` gathers the
-unsharded tensor across both FSDP shard and TP shard dims in one call.
-
-The sender (``trainer/workers/policy_actor.py``) pushes every ``state_dict``
-entry — vLLM's ``load_weights`` matches by name and ignores what it doesn't have,
-so the "which weights to accept" decision lives on the vLLM side.
+``ActorWeights`` is the ``WeightSource`` molt hands to vLLM's weight-transfer engine (vLLM docs:
+training/weight_updates). It walks the actor's state dict, gathers each FSDP2/TP/EP-sharded entry to
+its full tensor and names it as in the checkpoint. vLLM's ``load_weights`` matches by name and ignores
+what it does not have, so which weights to accept is decided on the vLLM side.
 """
 
-from typing import Optional, Tuple
+from functools import cached_property
+from typing import Iterator, List, Tuple
 
 import torch
 from torch.distributed.tensor import DTensor
+from vllm.distributed.weight_transfer import ParamMeta, WeightSource
 
 
-def gather_full_param(param: torch.Tensor, dtype: Optional[torch.dtype] = None) -> Tuple[torch.Tensor, torch.Size]:
-    """Materialize the full unsharded tensor for an FSDP2/TP-sharded parameter.
+def gather_full_param(param: torch.Tensor) -> torch.Tensor:
+    """The full tensor of an FSDP2/TP/EP-sharded parameter, gathered across every mesh dim in one call.
 
-    Returns ``(full_tensor, full_shape)`` where ``full_tensor`` is on the local
-    device with all mesh dims gathered. For non-DTensor params (e.g., the value
-    head we don't shard, or buffers), returns ``(param.data, param.shape)``.
-
-    Caller invokes this on each rank; ``full_tensor`` is replicated. Memory cost
-    is the size of the full tensor on every participating rank — acceptable for
-    weight refit (one-shot per training step).
+    A collective: every rank calls it in the same order and ends up holding the full tensor. A tensor
+    that is not sharded is returned as is.
     """
-    full = param.full_tensor() if isinstance(param, DTensor) else param.data
-    if dtype is not None and full.is_floating_point():
-        full = full.to(dtype=dtype)
-    return full, full.shape
+    return param.full_tensor() if isinstance(param, DTensor) else param
+
+
+def _skip_tied_lm_head(config, name: str) -> bool:
+    """Whether to skip broadcasting this weight to vLLM as a redundant tied lm_head.
+
+    Tied-embedding models share lm_head with embed_tokens; vLLM receives the shared
+    weight through embed_tokens, so a separate lm_head.weight update is redundant and
+    would form an empty "loaded 0 of N" refit batch. Exact-match only (``lm_head.weight``)
+    so nested/auxiliary heads like ``mtp.lm_head.weight`` are still sent.
+    """
+    return bool(getattr(config, "tie_word_embeddings", False)) and name == "lm_head.weight"
+
+
+def _lora_merge_map(model: torch.nn.Module, sd: dict) -> dict:
+    """Map each LoRA base weight to ``(A key, B key, scale)`` for the vLLM refit merge.
+
+    Keyed by state-dict names: activation checkpointing wraps layers in ``CheckpointWrapper``,
+    which appears in ``named_modules()`` but is stripped from ``state_dict()`` keys, so a
+    module-name map would never match and the adapters would never reach vLLM.
+    """
+    from nemo_automodel.shared.parameter_names import canonical_parameter_fqn
+
+    # scale comes from the patched module itself (LinearLoRA.scale = alpha / dim).
+    scales = {
+        canonical_parameter_fqn(name): float(mod.scale)
+        for name, mod in model.named_modules()
+        if getattr(mod, "lora_A", None) is not None and getattr(mod, "lora_B", None) is not None
+    }
+    merge = {}
+    for name in sd:
+        if not name.endswith(".lora_A.weight"):
+            continue
+        base = name[: -len(".lora_A.weight")]
+        b_name, w_name = f"{base}.lora_B.weight", f"{base}.weight"
+        if base not in scales or b_name not in sd or w_name not in sd:
+            raise RuntimeError(
+                f"Refit: LoRA adapter {name!r} has no matching module or base/B weight; its delta "
+                "would be dropped and vLLM would keep the frozen base. Refusing to diverge silently."
+            )
+        merge[w_name] = (name, b_name, scales[base])
+    return merge
+
+
+# State-dict entries that are not weights of their own: TE's fp8 bookkeeping, and LoRA adapters,
+# which reach vLLM merged into their base weight.
+_NOT_WEIGHTS = ("_extra_state", ".lora_A.weight", ".lora_B.weight")
+
+
+class ActorWeights(WeightSource):
+    """The actor's weights as a weight sync sends them: full tensors under checkpoint names.
+
+    Every state-dict entry is sent. A ``requires_grad`` filter is deliberately absent: its names differ
+    from the state dict's (AutoModel / FSDP naming), and such a filter once skipped nearly every trained
+    weight and left the engines on the base checkpoint. Every tensor travels in its own dtype: vLLM
+    casts on load, so a weight kept in fp32 (an MoE router) is not rounded to bf16 on the way.
+    """
+
+    def __init__(self, model: torch.nn.Module, ep_size: int = 1):
+        self.model = model
+        self.ep_size = ep_size
+
+    @cached_property
+    def metadata(self) -> List[ParamMeta]:
+        # Read off one pass over the weights, so it cannot disagree with what iter_full sends: vLLM
+        # sizes its receive buffers from this list, and a disagreement hangs the transfer.
+        return [ParamMeta(name, weight.dtype, tuple(weight.shape)) for name, weight in self.iter_full()]
+
+    def iter_full(self) -> Iterator[Tuple[str, torch.Tensor]]:
+        """Yield ``(checkpoint name, full tensor)``. Gathering a sharded weight is a collective, so every
+        trainer rank iterates this in step."""
+        state = self.model.state_dict()
+        lora = _lora_merge_map(self.model, state)
+        adapter = getattr(self.model, "state_dict_adapter", None)
+        config = getattr(self.model, "config", None)
+        for name, tensor in state.items():
+            if not torch.is_tensor(tensor) or name.endswith(_NOT_WEIGHTS):
+                continue
+            # An expert that is not a DTensor holds this rank's experts only (BackendConfig
+            # experts="te"): gathering it would silently send rank 0's slice.
+            if self.ep_size > 1 and "expert" in name and not isinstance(tensor, DTensor):
+                raise RuntimeError(
+                    f"Refit: expert weight {name!r} is not a DTensor under ep_size={self.ep_size}; only "
+                    "rank 0's experts would reach vLLM. Build the MoE with BackendConfig "
+                    "experts='torch_mm' (the default)."
+                )
+            weight = gather_full_param(tensor)
+            if name in lora:
+                a_name, b_name, scale = lora[name]
+                # W + scale·B@A: one rounding away from the trainer's W·x + scale·B(A·x).
+                delta = gather_full_param(state[b_name]).float() @ gather_full_param(state[a_name]).float()
+                weight = weight + scale * delta.to(weight.dtype)
+            # AutoModel's adapter owns the checkpoint naming and may return a grouped weight as several
+            # tensors. No options: some adapters (Inkling 2, Mistral Large 4) reject those they do not know.
+            if adapter is None:
+                named = [(name, weight)]
+            elif hasattr(adapter, "convert_single_tensor_to_hf"):
+                named = adapter.convert_single_tensor_to_hf(name, weight)
+            else:  # an adapter with the whole-dict API only (KimiVL)
+                named = adapter.to_hf({name: weight}).items()
+            for hf_name, hf_weight in named:
+                # A tied lm_head reaches vLLM through embed_tokens.
+                if hf_weight.is_floating_point() and not _skip_tied_lm_head(config, hf_name):
+                    yield hf_name, hf_weight

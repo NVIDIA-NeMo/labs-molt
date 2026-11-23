@@ -36,18 +36,22 @@ equal: [contracts.md](contracts.md); how to build the trainer side: [training-si
 
 ### Refit
 
-- Place: `molt/trainer/workers/policy_actor.py` broadcast, `molt/trainer/vllm/vllm_worker_wrap.py`.
+- Place: `molt/trainer/fsdp/refit.py` (`ActorWeights`, the trainer's `WeightSource`) feeds vLLM's
+  weight-transfer engine; `molt/trainer/workers/policy_actor.py` drives it, `molt/trainer/vllm/vllm_engine.py`
+  is the engine side (`weight_transfer_config`).
 - The broadcast sends the fp32 master; vLLM rounds it to bf16 on `load_weights` with the same
   round-to-nearest cast FSDP2's `param_dtype` applies in the training forward. For parameters vLLM loads
   with a plain `copy_` the engine bytes therefore equal the training-forward bytes; derived parameters
   (Mamba `A = -exp(A_log)`, calibration scales) are not a cast — hash them.
-- `--train.check_weight_update_equal` lists vLLM parameters the broadcast never assigned (stale weights); it
-  does not compare bytes. Prove refit bytes by hashing the same tensor on both sides after `load_weights`,
-  or by the logprob comparison itself.
-- The broadcast runs inside vLLM's layerwise-reload bracket (`WorkerWrap.begin_weight_update` /
-  `end_weight_update`): `load_weights` copies in place, so graph-captured addresses stay valid, and the
-  bracket re-runs vLLM's post-load weight processing (kernel layouts such as the FlashInfer MoE block
-  layout) once the whole update has landed, never on half-updated weights.
+- `--train.check_weight_update_equal` proves the sync path before the first update: it zeroes the engine
+  weights, syncs the untrained actor, and compares vLLM's SHA-256 of every parameter on every worker with
+  the cold-loaded checkpoint. It says nothing about later bytes: prove those by hashing the same tensor on
+  both sides after `load_weights`, or by the logprob comparison itself.
+- The sync runs inside vLLM's reload lifecycle (`start_weight_update` / `finish_weight_update`) in the mode
+  `--vllm.reload_mode` selects (it sets `VLLM_RELOAD_MODE` in the engine actor). `layerwise`, the default:
+  a weight that is not sent keeps its checkpoint value. `auto`: direct reload (weights written in place,
+  post-load processing re-run at the finish, a sync that misses a weight fails) and layerwise where vLLM
+  refuses direct (online quantization, offloading), with a log line saying why.
 - Under `--actor.lora_dim > 0` the refit merges `W + scale·B·A` in fp32 while the training forward runs the
   unmerged `W·x + scale·B(A·x)` — one rounding apart by construction, so LoRA is off the bitwise contract.
 
@@ -130,13 +134,12 @@ equal: [contracts.md](contracts.md); how to build the trainer side: [training-si
   `AsyncEngineArgs` and exports `VLLM_ALLOW_INSECURE_SERIALIZATION=1`, `RAY_ADDRESS` and, under
   `--train.full_determinism_enable`, `VLLM_ENABLE_V1_MULTIPROCESSING=0`; the aligned mode adds
   `VLLM_BATCH_INVARIANT=1` and the workspace/NCCL pins here.
-- `worker_extension_cls="molt.trainer.vllm.vllm_worker_wrap.WorkerWrap"` is imported in every worker before
-  CUDA-graph capture: the place for kernel patches that must be identical to the trainer's, and for switching
-  off a kernel the installed vLLM selects by GPU architecture (the sm_103 router row of the [pinned
-  facts](#facts-bound-to-the-pinned-vllm)). A kernel choice that differs by architecture is a closure field:
-  record the architecture with every result.
-- Standalone engine for C3: export the same env, then `vllm.LLM(model,
-  worker_extension_cls="molt.trainer.vllm.vllm_worker_wrap.WorkerWrap", seed=<--train.seed + i>,
+- molt passes no `worker_extension_cls`. A class passed there in `create_vllm_engines` is imported in every
+  worker before CUDA-graph capture: the place for kernel patches that must be identical to the trainer's,
+  and for switching off a kernel the installed vLLM selects by GPU architecture (the sm_103 router row of
+  the [pinned facts](#facts-bound-to-the-pinned-vllm)). A kernel choice that differs by architecture is a
+  closure field: record the architecture with every result.
+- Standalone engine for C3: export the same env, then `vllm.LLM(model, seed=<--train.seed + i>,
   logprobs_mode="processed_logprobs", **<the recipe's --vllm.* flags>)` and
   `SamplingParams(temperature=<--rollout.temperature>, top_p=1, logprobs=1, min_tokens=1)`; any other env or
   flag set measures another engine.

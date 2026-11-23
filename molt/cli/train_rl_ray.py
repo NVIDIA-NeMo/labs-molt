@@ -119,6 +119,7 @@ def train(args):
             pipeline_parallel_size=getattr(args.vllm, "pipeline_parallel_size", 1),
             data_parallel_size=getattr(args.vllm, "data_parallel_size", 1),
             max_logprobs=args.algo.advantage.score_centering_top_k,
+            reload_mode=args.vllm.reload_mode,
         )
 
     # Rollout gateway: serve each engine's OpenAI API + the real vllm-router in front of them.
@@ -701,6 +702,16 @@ if __name__ == "__main__":
         "--vllm.enable_expert_parallel and the mp executor, and excludes --vllm.pipeline_parallel_size > 1.",
     )
     parser.add_argument("--vllm.sync_backend", type=str, default="nccl", help="trainer -> vLLM weight sync backend")
+    parser.add_argument(
+        "--vllm.reload_mode",
+        type=str,
+        default="layerwise",
+        choices=["layerwise", "auto", "direct"],
+        help="How vLLM reloads weights on a sync (its VLLM_RELOAD_MODE). layerwise: a weight the trainer does not "
+        "send (a module it never builds) keeps its checkpoint value. auto: direct reload where vLLM supports it, "
+        "faster, but every sync must carry every weight the engine loaded, or it fails. direct: as auto, and fail "
+        "instead of falling back to layerwise where direct reload is not supported.",
+    )
     parser.add_argument("--vllm.enforce_eager", action="store_true", default=False, help="Disable CUDA graph in vLLM")
     parser.add_argument(
         "--vllm.router_policy",
@@ -944,7 +955,7 @@ if __name__ == "__main__":
         "with --train.partial_rollout_enable (preemption drops routing).",
     )
     # Debug / repro: dump a rollout batch and replay it train-only (skip generation) to
-    # iterate on the training+refit path in isolation; check_weight_update_equal checks every broadcast.
+    # iterate on the training+refit path in isolation; check_weight_update_equal proves the weight sync.
     parser.add_argument(
         "--train.rollout_dump_dir",
         type=str,
@@ -961,7 +972,8 @@ if __name__ == "__main__":
         "--train.check_weight_update_equal",
         action="store_true",
         default=False,
-        help="After each vLLM weight broadcast, warn which params vLLM did NOT refresh (stale rollout weights).",
+        help="Before the first update, zero the vLLM weights, sync them from the actor and verify every parameter "
+        "on every worker bit for bit (SHA-256) against the loaded checkpoint; fail on any difference.",
     )
 
     # Eval

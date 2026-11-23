@@ -17,7 +17,6 @@
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
 import os
-import socket
 import time
 from contextlib import ExitStack
 from dataclasses import fields
@@ -29,14 +28,18 @@ import torch.distributed
 from torch.optim import Optimizer
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from vllm.distributed.weight_transfer import RayVLLMWeightSyncClient, WeightTransferTrainerFactory
+from vllm.distributed.weight_transfer.nccl_engine import NCCLTrainerInitInfo
+from vllm.utils.network_utils import get_open_port
 
 from molt.models import Actor, PolicyLoss, agg_loss
 from molt.models.utils import compute_approx_kl, masked_mean, mismatch_metrics, split_moe_aux_loss
 from molt.trainer.algorithm.experience import Experience, get_model_parallel_size
 from molt.trainer.fsdp import FsdpStrategy
-from molt.trainer.fsdp.refit import gather_full_param
+from molt.trainer.fsdp.refit import ActorWeights
+from molt.trainer.vllm.vllm_engine import batch_vllm_engine_call
 from molt.utils import get_tokenizer
-from molt.utils.distributed_util import stateless_init_process_group, torch_dist_barrier_and_cuda_sync
+from molt.utils.distributed_util import torch_dist_barrier_and_cuda_sync
 from molt.utils.logging_utils import init_logger
 from molt.utils.vlm_utils import merge_mm_train_inputs
 
@@ -44,47 +47,6 @@ from ..algorithm import NaiveReplayBuffer
 from .actor_group import BaseModelActor
 
 logger = init_logger(__name__)
-
-
-def _skip_tied_lm_head(config, name: str) -> bool:
-    """Whether to skip broadcasting this weight to vLLM as a redundant tied lm_head.
-
-    Tied-embedding models share lm_head with embed_tokens; vLLM receives the shared
-    weight through embed_tokens, so a separate lm_head.weight update is redundant and
-    would form an empty "loaded 0 of N" refit batch. Exact-match only (``lm_head.weight``)
-    so nested/auxiliary heads like ``mtp.lm_head.weight`` are still sent.
-    """
-    return bool(getattr(config, "tie_word_embeddings", False)) and name == "lm_head.weight"
-
-
-def _lora_merge_map(model: torch.nn.Module, sd: dict) -> dict:
-    """Map each LoRA base weight to ``(A key, B key, scale)`` for the vLLM refit merge.
-
-    Keyed by state-dict names: activation checkpointing wraps layers in ``CheckpointWrapper``,
-    which appears in ``named_modules()`` but is stripped from ``state_dict()`` keys, so a
-    module-name map would never match and the adapters would never reach vLLM.
-    """
-    from nemo_automodel.shared.parameter_names import canonical_parameter_fqn
-
-    # scale comes from the patched module itself (LinearLoRA.scale = alpha / dim).
-    scales = {
-        canonical_parameter_fqn(name): float(mod.scale)
-        for name, mod in model.named_modules()
-        if getattr(mod, "lora_A", None) is not None and getattr(mod, "lora_B", None) is not None
-    }
-    merge = {}
-    for name in sd:
-        if not name.endswith(".lora_A.weight"):
-            continue
-        base = name[: -len(".lora_A.weight")]
-        b_name, w_name = f"{base}.lora_B.weight", f"{base}.weight"
-        if base not in scales or b_name not in sd or w_name not in sd:
-            raise RuntimeError(
-                f"Refit: LoRA adapter {name!r} has no matching module or base/B weight; its delta "
-                "would be dropped and vLLM would keep the frozen base. Refusing to diverge silently."
-            )
-        merge[w_name] = (name, b_name, scales[base])
-    return merge
 
 
 class PolicyTrainer:
@@ -151,11 +113,10 @@ class PolicyTrainer:
             dynamic_batch=self.args.train.dynamic_batch_enable,
         )
 
-        # Init torch group for weights sync (NCCL only — async-split topology
-        # has actor and vLLM on different nodes, so CUDA IPC is not applicable).
-        backend = getattr(self.strategy.args.vllm, "sync_backend", "nccl")
-        if self.vllm_engines is not None and torch.distributed.get_rank() == 0:
-            self._init_vllm_sync_group(backend)
+        # Weight sync to vLLM (NCCL only — async-split topology has actor and vLLM on
+        # different nodes, so CUDA IPC is not applicable).
+        if self.vllm_engines is not None:
+            self._init_vllm_weight_transfer()
 
         # AutoModel's MFU calculator (owns the per-arch FLOP model + device-peak
         # table); None if AutoModel/arch unsupported -> we then report memory only.
@@ -169,51 +130,69 @@ class PolicyTrainer:
 
         torch_dist_barrier_and_cuda_sync()
 
-    def _init_vllm_sync_group(self, backend: str):
-        """Create a torch process group between trainer rank 0 and all vLLM engine ranks.
+    def _init_vllm_weight_transfer(self):
+        """Join vLLM's NCCL weight transfer (vLLM docs: training/weight_updates); every trainer rank calls this.
 
-        Layout example (3 engines, TP=4):
+        Rank 0 forms an NCCL group with every vLLM worker and is the only sender; the other ranks only
+        take part in the gathers. One transfer rank per vLLM worker GPU, e.g. 3 engines with TP=4:
             [    0,      1, 2, 3, 4,  5, 6, 7, 8,  9, 10, 11, 12]
             |train rank|  engine-0  |  engine-1  |   engine-2   |
-
-        One rank per vLLM worker GPU, so an engine occupies
-        `tensor_parallel_size * pipeline_parallel_size * data_parallel_size` consecutive ranks; a
-        TP/PP group spanning nodes still contributes one rank per GPU. The packed
-        broadcast reaches every worker; each loads only the shards/experts/PP-stage
-        layers it owns (vLLM's name-based load_weights skips the rest). FSDP2/TP
-        params are materialized before broadcasting.
+        Every worker receives the full weights and loads the shards / experts / PP-stage layers it owns.
         """
-        master_address = ray._private.services.get_node_ip_address()
-        with socket.socket() as sock:
-            sock.bind(("", 0))
-            master_port = sock.getsockname()[1]
-
-        vllm_num_engines = self.strategy.args.vllm.num_engines
-        vllm_tensor_parallel_size = self.strategy.args.vllm.tensor_parallel_size
-        vllm_pipeline_parallel_size = getattr(self.strategy.args.vllm, "pipeline_parallel_size", 1)
-        vllm_data_parallel_size = getattr(self.strategy.args.vllm, "data_parallel_size", 1)
-        # One rank per vLLM worker GPU. DP replicates the full (EP-sharded) model,
-        # so every replica's TP*PP workers take the weight broadcast too.
-        engine_world = vllm_tensor_parallel_size * vllm_pipeline_parallel_size * vllm_data_parallel_size
-        world_size = vllm_num_engines * engine_world + 1
-
-        group_name = "molt"
-        refs = [
-            engine.init_process_group.remote(
-                master_address,
-                master_port,
-                i * engine_world + 1,
-                world_size,
-                group_name,
-                backend=backend,
-            )
-            for i, engine in enumerate(self.vllm_engines)
-        ]
-        self._model_update_group = stateless_init_process_group(
-            master_address, master_port, 0, world_size, torch.cuda.current_device()
+        vllm_args = self.args.vllm
+        workers_per_engine = (
+            vllm_args.tensor_parallel_size * vllm_args.pipeline_parallel_size * vllm_args.data_parallel_size
+        )
+        self._weight_transfer = WeightTransferTrainerFactory.trainer_init(
+            init_info=NCCLTrainerInitInfo(
+                master_address=ray.util.get_node_ip_address(),
+                master_port=get_open_port(),
+                world_size=1 + len(self.vllm_engines) * workers_per_engine,
+                rank=torch.distributed.get_rank(),
+                # 512 MiB chunks, not vLLM's 1 GiB: the engines run at a high gpu_memory_utilization
+                # and hold a receive buffer per chunk.
+                packed_buffer_size_bytes=512 * 1024**2,
+            ),
+            client=RayVLLMWeightSyncClient(self.vllm_engines),
+            source=ActorWeights(self.actor.model, self.strategy.ep_size),
         )
 
-        ray.get(refs)
+    def verify_weight_sync(self):
+        """--train.check_weight_update_equal: prove the sync before the first update.
+
+        The actor still holds the checkpoint the engines loaded, so a sync must reproduce their weights
+        bit for bit: zero the engines' weights, sync, and compare vLLM's SHA-256 of every parameter on
+        every worker with the digests taken before (vLLM docs: training/weight_updates/weight_checker).
+        Every trainer rank calls this, as the sync is a collective; the engine calls run on rank 0.
+        """
+        engines = self.vllm_engines
+        batch_vllm_engine_call(engines, "pause_generation")
+        loaded = batch_vllm_engine_call(engines, "weight_checksums")
+        batch_vllm_engine_call(engines, "zero_weights")
+        self.broadcast_to_vllm()
+        synced = batch_vllm_engine_call(engines, "weight_checksums")
+        batch_vllm_engine_call(engines, "resume_generation")
+        if synced is None:  # not rank 0
+            return
+        wrong = [
+            f"engine {i} {key}"
+            for i, (was, now) in enumerate(zip(loaded, synced))
+            for key in was
+            if now.get(key) != was[key]
+        ]
+        total = sum(map(len, loaded))
+        if not total:
+            raise RuntimeError("[check_weight_update] vLLM returned no weight checksums, so nothing was verified")
+        if wrong:
+            # The engines now hold these weights zeroed or altered: do not train on them.
+            raise RuntimeError(
+                f"[check_weight_update] {len(wrong)} of {total} vLLM weight tensors differ from the "
+                f"checkpoint after a weight sync (zero = never written): {wrong[:10]}"
+            )
+        logger.info(
+            f"[check_weight_update] a weight sync reproduced all {total} vLLM weight tensors bit for bit "
+            f"({len(engines)} engines)"
+        )
 
     def _record_status(self, status, status_list, pbar):
         metrics = status["metrics"]
@@ -673,179 +652,9 @@ class PolicyTrainer:
         }
 
     def broadcast_to_vllm(self):
+        """One weight sync, on every trainer rank: rank 0 sends, the others join the gathers."""
         torch.cuda.empty_cache()
-        # FSDP2/AutoModel: `actor.model` is the FSDP2-wrapped HF model directly
-        # (no DS-engine `.module` indirection); params are DTensors when sharded.
-        model = self.actor.model
-
-        from torch.distributed.tensor import DTensor
-
-        ep_size = getattr(self.strategy.args.fsdp, "ep_size", 1) or 1
-        model_config = getattr(model, "config", None)
-
-        # LoRA: vLLM serves full weights, so refit broadcasts the adapter merged
-        # into its base weight (W + scale·B@A) and skips the adapter entries.
-        sd = model.state_dict()
-        lora_merge = _lora_merge_map(model, sd)
-
-        # Pack many small per-tensor broadcasts into large batched broadcasts.
-        # Inspired by vLLM's `vllm.distributed.weight_transfer.packed_tensor`
-        # — same idea, simplified (no double-buffer streams) since FSDP
-        # `gather_full_param` already serializes on the default stream so
-        # overlap gain is small. Cuts a 30B+ MoE refit from thousands of
-        # RPC+broadcast pairs to ~tens.
-        #
-        # Only trainer rank 0 holds `_model_update_group`; non-rank-0 ranks
-        # still call `gather_full_param` (an FSDP collective) but drop the
-        # gathered tensor immediately — no point staging the batch on every rank.
-        is_rank0 = torch.distributed.get_rank() == 0
-        # --train.check_weight_update_equal: rank 0 arms the check, evaluated after the last flush.
-        check_weight_update = is_rank0 and getattr(self.strategy.args.train, "check_weight_update_equal", False)
-        if check_weight_update:
-            ray.get([engine.reset_weight_update_check.remote() for engine in self.vllm_engines])
-        if is_rank0:
-            # vLLM's post-load weight processing (MoE kernel layouts) is re-run per layer across the flushes.
-            ray.get([engine.begin_weight_update.remote() for engine in self.vllm_engines])
-        # 512 MiB flushes, matching slime's `--update-weight-buffer-size` default
-        # (512 * 1024**2). vLLM runs at high gpu_memory_utilization (~0.9-0.95) with
-        # little free VRAM, and the receiver allocates a contiguous
-        # `torch.empty(sum(sizes))` per flush — the old 1 GiB batch OOMed the engine.
-        packed_threshold_bytes = 512 * 1024**2  # 512 MiB (slime default)
-
-        pending_metas: list[tuple[str, torch.dtype, tuple[int, ...]]] = []
-        pending_tensors: list[torch.Tensor] = []
-        pending_bytes = 0
-
-        def _flush():
-            nonlocal pending_bytes
-            if not pending_metas:
-                return
-            refs = [engine.update_weights_packed.remote(pending_metas) for engine in self.vllm_engines]
-            flat = torch.cat([t.view(torch.uint8).view(-1) for t in pending_tensors], dim=0)
-            self._model_update_group.broadcast(flat, src=0, stream=torch.cuda.current_stream())
-            ray.get(refs)
-            del flat
-            pending_metas.clear()
-            pending_tensors.clear()
-            pending_bytes = 0
-
-        for name, tensor in sd.items():
-            if lora_merge and (name.endswith(".lora_A.weight") or name.endswith(".lora_B.weight")):
-                continue  # adapters reach vLLM merged into their base weight
-            # Refit EVERY state_dict entry (each converted to HF names below). vLLM's
-            # load_weights matches by name and ignores what it doesn't have, so the
-            # "which weights to accept" decision lives on the vLLM side. We deliberately
-            # do NOT pre-filter by a named_parameters requires_grad map: its FQNs differ
-            # from state_dict's (custom-AutoModel / FSDP naming), so that filter silently
-            # skipped ~all trained weights and left vLLM stuck on the base checkpoint
-            # (vllm_kl then grew with training as the actor drifted from the stale engine).
-            # Skip TE `_extra_state` (fp8 amax bookkeeping — a uint8 tensor in recent
-            # TE, a BytesIO in older) and any other non-tensor. It is never a real
-            # weight and vLLM has no param for it; the HF adapter drops it via
-            # `exclude_key_regex` anyway (NeMo-RL relies on that same regex). Skip it
-            # here so a tensor-valued `_extra_state` can't trip the expert guard below.
-            if not torch.is_tensor(tensor) or name.endswith("_extra_state"):
-                continue
-
-            # EP-sharded experts must be DTensors so `gather_full_param`'s
-            # `full_tensor()` collects every expert across the EP mesh. The
-            # default torch_mm experts (GroupedExperts + ExpertParallel) are
-            # DTensors, so this holds; but the TE GroupedLinear layout
-            # (BackendConfig experts="te") keeps only this rank's local experts
-            # as plain tensors, which would silently broadcast just rank-0's
-            # slice. The train and rollout engines must share this DTensor
-            # invariant — enforce it loudly rather than let their policies diverge.
-            if ep_size > 1 and "expert" in name and not isinstance(tensor, DTensor):
-                raise RuntimeError(
-                    f"Refit: expert weight {name!r} is not a DTensor under ep_size={ep_size}; "
-                    "EP-sharded experts would not be gathered (only rank-0's experts reach "
-                    "vLLM). Build the MoE with BackendConfig experts='torch_mm' (the default)."
-                )
-
-            # Collective; every rank participates.
-            weight, _ = gather_full_param(tensor)
-            merge = lora_merge.get(name)
-            if merge is not None:
-                # Collectives too: every rank gathers A and B in the same order, rank 0 merges.
-                # The merged bf16 weight differs from the trainer's W·x + scale·B(A·x) by one rounding.
-                a, _ = gather_full_param(sd[merge[0]])
-                b, _ = gather_full_param(sd[merge[1]])
-                if is_rank0:
-                    weight = weight + merge[2] * (b.float() @ a.float()).to(weight.dtype)
-                del a, b
-            if not is_rank0:
-                del weight
-                continue
-            adapter = getattr(model, "state_dict_adapter", None)
-            if adapter is None:
-                hf_pairs = [(name, weight)]
-            elif getattr(adapter, "convert_single_tensor_to_hf", None) is not None:
-                hf_pairs = adapter.convert_single_tensor_to_hf(
-                    name, weight, exclude_key_regex=r".*_extra_state.*", quantization=False
-                )
-            elif getattr(adapter, "to_hf", None) is not None:
-                hf_pairs = list(adapter.to_hf({name: weight}, exclude_key_regex=r".*_extra_state.*").items())
-            else:
-                raise RuntimeError(
-                    f"{type(model).__name__} uses an AutoModel state_dict_adapter without "
-                    "`convert_single_tensor_to_hf`; vLLM refit cannot safely map this custom "
-                    "weight layout to HuggingFace/vLLM names."
-                )
-            for hf_name, hf_weight in hf_pairs:
-                if not torch.is_tensor(hf_weight) or not hf_weight.is_floating_point():
-                    continue
-                if _skip_tied_lm_head(model_config, hf_name):
-                    continue  # redundant: vLLM gets the shared weight via embed_tokens
-                # Dtype-faithful refit: keep each param in its native/compute dtype
-                # instead of force-casting everything to a single `param_dtype`. vLLM's
-                # `load_weights` casts each tensor to *that param's own* target dtype via
-                # `param.data.copy_()`, so an fp32-kept weight (e.g. a fp32 MoE
-                # router/gate) round-trips as fp32 rather than being silently
-                # bf16-downcast (which previously corrupted routing). For bf16-target
-                # params the final vLLM value is identical to the old forced-bf16 path
-                # (the cast just happens on the receiver); the only cost is ~2x transfer
-                # bytes for fp32 masters — negligible next to the broadcast lock-wait.
-                hf_weight = hf_weight.to(
-                    device=torch.device("cuda", torch.cuda.current_device()),
-                    non_blocking=True,
-                ).contiguous()
-                nbytes = hf_weight.numel() * hf_weight.element_size()
-                # slime's `_chunk_by_size`: flush the accumulated batch BEFORE adding a
-                # weight that would take it to/over the buffer size, so each broadcast
-                # buffer stays bounded (an oversized lone tensor forms its own batch). The
-                # old post-append check let a big tensor land on an already-near-threshold
-                # batch, ballooning the receiver's contiguous buffer and OOM-ing vLLM. The
-                # trailing `_flush()` after the loop sends the final partial batch.
-                if pending_bytes and pending_bytes + nbytes >= packed_threshold_bytes:
-                    _flush()
-                pending_metas.append((hf_name, hf_weight.dtype, tuple(hf_weight.shape)))
-                pending_tensors.append(hf_weight)
-                pending_bytes += nbytes
-            del weight
-
-        if is_rank0:
-            _flush()
-            # Before the coverage check: until here a tied lm_head still shows as its own (meta) parameter.
-            ray.get([engine.end_weight_update.remote() for engine in self.vllm_engines])
-
-        if check_weight_update:
-            # Which of the engine's weights did this broadcast never land on? The engines are
-            # replicas, so one answers for all.
-            unaddressed = ray.get(self.vllm_engines[0].weight_update_missing.remote())
-            if unaddressed is None:
-                logger.warning(
-                    "[check_weight_update] cannot verify: vLLM reports assigned weights under names "
-                    "that do not match its own parameters"
-                )
-            elif unaddressed:
-                # Anything listed here kept its old value and makes the rollout stale.
-                logger.warning(
-                    f"[check_weight_update] {len(unaddressed)} vLLM weights the broadcast never "
-                    f"landed on: {unaddressed[:10]}"
-                )
-            else:
-                logger.info("[check_weight_update] the broadcast landed on every vLLM weight")
-
+        self._weight_transfer.send_weights()
         torch.cuda.empty_cache()
         torch_dist_barrier_and_cuda_sync()
 
@@ -967,6 +776,14 @@ class PolicyModelActor(BaseModelActor):
             tokenizer=self.tokenizer,
             vllm_engines=self.vllm_engines,
         )
+        if self.vllm_engines is not None and args.train.check_weight_update_equal:
+            if self.checkpoint_states:
+                strategy.print(
+                    "[check_weight_update] skipped: resumed from a checkpoint, so the actor no longer "
+                    "holds the weights the engines loaded"
+                )
+            else:
+                self.trainer.verify_weight_sync()
 
     def fit(self, kl_ctl: float = 0, train: bool = True):
         """Train actor model with the replay buffer.

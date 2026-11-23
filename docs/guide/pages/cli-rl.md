@@ -183,7 +183,7 @@
 | `--train.routing_replay` | `False` | R3: capture the rollout router's per-token expert selection (vLLM) and replay it in the training forward (AutoModel RouterReplay) so MoE training/rollout routing match. MoE models only; turns on --vllm.enable_prefix_caching (the capture requires it); incompatible with --train.partial_rollout_enable (preemption drops routing). |
 | `--train.rollout_dump_dir` |  | Save each rollout batch to \<dir\>/rollout_step{N}.pt for later train-only replay. |
 | `--train.rollout_replay_dir` |  | Load \<dir\>/rollout_step{N}.pt instead of generating (train-only replay). |
-| `--train.check_weight_update_equal` | `False` | After each vLLM weight broadcast, warn which params vLLM did NOT refresh (stale rollout weights). |
+| `--train.check_weight_update_equal` | `False` | Before the first update, zero the vLLM weights, sync them from the actor and verify every parameter on every worker bit for bit (SHA-256) against the loaded checkpoint; fail on any difference. |
 
 ## `--vllm.*`
 
@@ -194,6 +194,7 @@
 | `--vllm.pipeline_parallel_size` | `1` | pipeline parallel size per vLLM engine. For a giant MoE that overflows a node, set TP to the node GPU count and PP to the node span (TP\*PP GPUs/engine, ray executor): PP hands off between stages point-to-point across nodes instead of a cross-node TP all-reduce every layer. |
 | `--vllm.data_parallel_size` | `1` | data parallel size per vLLM engine (mp DP backend, single node). vLLM has no standalone expert-parallel size: EP = TP \* DP, so raise DP to decouple EP from TP (DeepSeek-V3-style TP8+DP4 attention -\> EP32 experts). An engine spans TP\*DP GPUs; requires --vllm.enable_expert_parallel and the mp executor, and excludes --vllm.pipeline_parallel_size \> 1. |
 | `--vllm.sync_backend` | `"nccl"` | trainer -\> vLLM weight sync backend |
+| `--vllm.reload_mode` | `"layerwise"` | How vLLM reloads weights on a sync (its VLLM_RELOAD_MODE). layerwise: a weight the trainer does not send (a module it never builds) keeps its checkpoint value. auto: direct reload where vLLM supports it, faster, but every sync must carry every weight the engine loaded, or it fails. direct: as auto, and fail instead of falling back to layerwise where direct reload is not supported. |
 | `--vllm.enforce_eager` | `False` | Disable CUDA graph in vLLM |
 | `--vllm.router_policy` | `"cache_aware"` | vllm-router policy (default cache_aware: token-prefix affinity keeps a rollout's turns on one engine and falls back to the shortest queue when engines are imbalanced; consistent_hash \| round_robin \| power_of_two \| random) |
 | `--vllm.router_balance_abs` | `10` | cache_aware keeps a rollout's turns on one engine until (max_in_flight - min_in_flight) exceeds this AND max \> --vllm.router_balance_rel \* min. The router's own 64 is sized for a serving fleet and is unreachable when one batch puts rollout.generate_batch_size requests in flight; vime runs this workload at 10. |

@@ -4,7 +4,7 @@
 # 4 samples per update with 8 prompts in flight (the surplus crosses each weight refit as partial rollouts),
 # 4k context, 10 updates, one batch queued ahead of training. FlashREINFORCE loss (--train.force_on_policy:
 # PPO ratio == 1; sequence-level IS gated by binary KL corrects the off-policy tokens) with the Dr. GRPO advantage.
-# Passes when the driver exits 0, update 10 is logged, every weight refit was verified on the engine, the
+# Passes when the driver exits 0, update 10 is logged, the weight sync was verified bit for bit on the engine, the
 # final HF export is written and summarize_metrics.py raises no alert (its table of every metric's first /
 # last / min / max / change lands in metrics_summary.md, which the workflow posts as the job summary).
 set -xeuo pipefail
@@ -74,6 +74,6 @@ python3 -u -m molt.cli.train_rl_ray \
   "$@" 2>&1 | tee "$WORK/train.log"
 
 grep -q 'Global step 10:' "$WORK/train.log"
-[ "$(grep -c 'the broadcast landed on every vLLM weight' "$WORK/train.log")" -ge 9 ]
+grep -q 'a weight sync reproduced all .* vLLM weight tensors bit for bit' "$WORK/train.log"
 [ -f "$WORK/hf/config.json" ] && ls "$WORK/hf"/*.safetensors
 python3 tests/e2e/summarize_metrics.py "$WORK/train.log" --out "$WORK/metrics_summary.md"

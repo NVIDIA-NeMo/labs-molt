@@ -303,8 +303,8 @@ Premise: one request is bitwise identical on hit, miss and cache off.
 
 ### Lifecycle, memory, metrics
 
-- molt refits under the vLLM lock: `pause_generation(mode="keep")` → `begin_weight_update` → broadcast →
-  `end_weight_update` (post-load processing re-run, [refit](molt-integration.md#refit)) →
+- molt refits under the vLLM lock: `pause_generation(mode="keep")` → `start_weight_update` → broadcast →
+  `finish_weight_update` (post-load processing re-run, [refit](molt-integration.md#refit)) →
   `reset_prefix_cache` (if on) → resume; in-flight must be 0 before pause, the queue empty after resume.
   Requests queued during pause run on the new weights and belong to no version.
 - Sleep levels, if added: 1 drops KV and prefix cache and backs weights on host, 2 leaves GPU weights

@@ -13,10 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import inspect
+import os
 import sys
 from dataclasses import dataclass
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 
 def _install_vllm_test_stub():
@@ -129,3 +131,29 @@ def test_rollout_ray_actor_init_is_synchronous():
     """Ray actor constructors are synchronous; an async __init__ would not be awaited."""
     actor_cls = getattr(vllm_engine.RolloutRayActor, "__ray_actor_class__", vllm_engine.RolloutRayActor)
     assert not inspect.iscoroutinefunction(actor_cls.__init__)
+
+
+def test_engine_takes_the_transfer_ranks_after_the_engines_before_it():
+    """Each engine is its own vLLM instance and numbers its workers from zero; in the shared
+    weight-transfer group engine i's workers follow those of engines 0..i-1."""
+    actor_cls = getattr(vllm_engine.RolloutRayActor, "__ray_actor_class__", vllm_engine.RolloutRayActor)
+    received = []
+
+    class Llm:
+        async def init_weight_transfer_engine(self, request):
+            received.append(request.init_info)
+
+    actor = actor_cls.__new__(actor_cls)
+    actor.llm, actor._transfer_rank_offset = Llm(), 8  # the third engine of TP=4 engines
+    asyncio.run(actor.init_weight_transfer_engine(SimpleNamespace(init_info={"rank_offset": 1, "world_size": 13})))
+    assert received == [{"rank_offset": 9, "world_size": 13}]
+
+
+def test_reload_mode_reaches_vllm_through_its_environment_variable(monkeypatch):
+    """--vllm.reload_mode is vLLM's VLLM_RELOAD_MODE, set in the engine actor's own process."""
+    for name in ("VLLM_RELOAD_MODE", "VLLM_ALLOW_INSECURE_SERIALIZATION", "RAY_ADDRESS"):
+        monkeypatch.setenv(name, "set by the test")  # restored afterwards; RAY_ADDRESS skips the Ray lookup
+    monkeypatch.setattr(vllm_engine, "_assert_supported_vllm", lambda: None)
+    actor_cls = getattr(vllm_engine.RolloutRayActor, "__ray_actor_class__", vllm_engine.RolloutRayActor)
+    actor_cls.__new__(actor_cls)._configure_vllm_env(full_determinism=False, reload_mode="auto")
+    assert os.environ["VLLM_RELOAD_MODE"] == "auto"

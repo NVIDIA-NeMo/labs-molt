@@ -51,8 +51,20 @@ generating.
 
 ## Check weight sync
 
-`--train.check_weight_update_equal` warns, after each broadcast, which parameters vLLM did not
-refresh. Use it when rollout and trainer log-probs drift apart for no clear reason.
+`--train.check_weight_update_equal` proves the weight sync before the first update: it zeroes the
+vLLM weights, syncs them from the actor, and compares the SHA-256 of every parameter on every vLLM
+worker with the loaded checkpoint. The run stops if any tensor was not written or differs. Use it
+when rollout and trainer log-probs drift apart for no clear reason, or for a new model. It is
+skipped on a resumed run, where the actor no longer holds the checkpoint the engines loaded.
+
+The check reports a false difference when vLLM pads MoE weights beyond the checkpoint shape (DeepEP
+hidden size, MXFP4): the padding is not rewritten after the zeroing. See the limitations in vLLM's
+[weight checker](https://docs.vllm.ai/en/latest/training/weight_checker/).
+
+`--vllm.reload_mode` selects how vLLM applies a sync. The default, `layerwise`, leaves a weight the
+trainer does not send (a module it never builds) at its checkpoint value. `auto` reloads directly,
+which is faster and fails any sync that does not carry every weight the engine loaded
+(`direct reload: the update did not load N parameters`).
 
 ## Metrics to watch
 

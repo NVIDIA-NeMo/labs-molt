@@ -28,7 +28,7 @@ import torch.nn as nn
 from nemo_automodel.components._peft.lora import LinearLoRA
 from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import checkpoint_wrapper
 
-from molt.trainer.workers.policy_actor import _lora_merge_map
+from molt.trainer.fsdp.refit import _lora_merge_map
 
 
 def _toy_model() -> nn.Module:
