@@ -47,6 +47,12 @@ limitations under the License.
         <li><a href="#quickstart">Quick Start</a></li>
       </ul>
     </nav>
+    <button class="nav-search" type="button" data-search aria-label="Search the docs">
+      <svg viewBox="0 0 16 16" aria-hidden="true">
+        <g id="search-icon"><circle cx="7" cy="7" r="4.5"/><path d="m10.5 10.5 3.5 3.5"/></g>
+      </svg>
+      <span>Search</span><kbd>⌘K</kbd>
+    </button>
     <a class="nav-cta" href="https://github.com/NVIDIA-NeMo/labs-molt">GitHub</a>
   </div>
 </header>
@@ -67,7 +73,7 @@ limitations under the License.
         </div>
       </div>
 
-      <div class="demo" id="demo">
+      <div class="demo">
         <div class="player">
           <a class="player-poster" href="https://www.youtube.com/watch?v=3DqXGFIce0o"
              data-video="3DqXGFIce0o"
@@ -83,7 +89,7 @@ limitations under the License.
 
   <!-- ============ NEWS & BLOG ============
        Rows come from blog/posts.js (newest first). See blog/README.md to add a post. -->
-  <section class="section mist" id="blog">
+  <section class="section mist">
     <div class="news-head">
       <div>
         <p class="kicker">News &amp; Blog</p>
@@ -502,5 +508,7 @@ class AgentRunner(ChatAgentRunner):
   });
 })();
 </script>
+<script src="guide/pages.js"></script>
+<script src="guide/search.js"></script>
 </body>
 </html>

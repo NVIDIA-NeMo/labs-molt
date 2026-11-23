@@ -38,9 +38,10 @@ neither CLI defines. Run it after changing a flag.
 
 ## Search
 
-`search.js` runs in the browser. On the first search it fetches every page in `pages.js` and
-indexes one entry per page, per section, and per table row whose first cell is code, such as a
-flag. [MiniSearch](https://github.com/lucaong/minisearch), loaded from jsDelivr, ranks the
+`search.js` runs in the browser, on the homepage and the blog as well as here: a page gets the
+palette by loading `pages.js` and `search.js` and having a `data-search` button. On the first
+search it fetches every page in `pages.js` and indexes one entry per page, per section, and per
+table row whose first cell is code, such as a flag. [MiniSearch](https://github.com/lucaong/minisearch), loaded from jsDelivr, ranks the
 matches. A result links to `guide/?p=<name>&at=<text>`, and the page scrolls to the heading or
 the table row with that text.
 
