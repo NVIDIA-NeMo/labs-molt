@@ -15,9 +15,11 @@
 
 import asyncio
 import copy
+import hashlib
 import os
 import statistics
 import time
+from pathlib import Path
 from typing import Dict, Tuple
 
 import ray
@@ -32,7 +34,7 @@ from molt.trainer.algorithm.experience import balance_experiences
 from molt.trainer.algorithm.kl_controller import AdaptiveKLController, FixedKLController
 from molt.trainer.fsdp import FsdpStrategy
 from molt.trainer.rollout.experience_maker import RemoteExperienceMaker, rollout_and_group_ids
-from molt.trainer.rollout.samples_generator import SamplesGenerator
+from molt.trainer.rollout.samples_generator import SamplesGenerator, WarmRolloutWriter, load_warm_rollout
 from molt.trainer.vllm.vllm_engine import batch_vllm_engine_call
 from molt.trainer.workers.actor_group import RayActorGroup
 from molt.utils.distributed_sampler import DistributedSampler
@@ -664,6 +666,31 @@ class GenerateSamplesActor:
         self.prompts_dataloader.load_state_dict(state_dict)
         self.samples_generator.load_state_dict(rollout_generator_state_dict)
 
+    def _build_rollout_recipe(self) -> dict:
+        data = vars(self.args.data).copy()
+        recipe = {
+            "model": self.args.actor.model_name_or_path,
+            "agent": self.args.train.agent_path,
+            "seed": self.args.train.seed,
+            "data": data,
+            "rollout": {
+                k: v
+                for k, v in vars(self.args.rollout).items()
+                if k not in {"num_runners", "vllm_generate_batch_size"}
+            },
+            "vllm": {k: v for k, v in vars(self.args.vllm).items() if k not in {"num_engines", "router_policy"}},
+            "reward": vars(self.args.reward),
+            "filter": (self.args.algo.dynamic_filtering_enable, self.args.algo.dynamic_filtering_range),
+            "sampling": self.generate_kwargs,
+        }
+        # Launchers can stage identical inputs in distinct run directories.
+        for section, key in ((data, "prompt_dataset"), (recipe, "agent")):
+            path = section.get(key)
+            if path and Path(path).is_file():
+                with open(path, "rb") as stream:
+                    section[key] = hashlib.file_digest(stream, "sha256").hexdigest()
+        return recipe
+
     def fit(self, episode: int, total_consumed_prompts: int) -> None:
         eval_steps = self.args.eval.steps
         # eval_at_start must fire only on a genuinely FRESH run. The
@@ -673,6 +700,14 @@ class GenerateSamplesActor:
         # consumed-prompt counter is 0 only on a fresh start (>0 once a checkpoint
         # is loaded), so it's the reliable fresh-run signal.
         fresh_start = total_consumed_prompts == 0
+        ckpt_args = getattr(self.args, "ckpt", None)
+        warm_enabled = (
+            bool(getattr(ckpt_args, "warm_resume_rollouts", False))
+            and bool(getattr(ckpt_args, "path", None))
+            and not self.args.train.rollout_replay_dir
+        )
+        warm_recipe = self._build_rollout_recipe() if warm_enabled else None
+        warm_restore_attempted = fresh_start
         # On resume, _next_eval_step was re-init to eval_steps (< the restored
         # global_step), so the catch-up `global_step >= _next_eval_step` would fire
         # one off-cadence eval at the resumed step every resubmit. Sync the threshold
@@ -744,6 +779,76 @@ class GenerateSamplesActor:
                     self.rollout_queue.put(("eval", global_step, eval_metrics), block=True)
                     continue
 
+                batch_start_consumed = total_consumed_prompts
+                warm_writer = None
+                if warm_enabled and not warm_restore_attempted:
+                    warm_restore_attempted = True
+                    warm_hit = load_warm_rollout(
+                        ckpt_args.path,
+                        episode=ep,
+                        consumed_prompts=batch_start_consumed,
+                        recipe=warm_recipe,
+                    )
+                    if warm_hit is not None:
+                        if warm_hit["complete"]:
+                            samples = warm_hit["samples"]
+                            client_states = warm_hit["client_states"]
+                            next_cursor = client_states["total_consumed_prompts"]
+                            next_ep = client_states.get("episode", ep)
+                            if hasattr(self.samples_generator, "seed_resumed_samples"):
+                                self.samples_generator.seed_resumed_samples(None)
+                            else:
+                                self.samples_generator._resumed_samples = None
+                            dl_state = client_states.get("data_loader_state_dict") or {}
+                            if next_ep > ep:
+                                # StatefulDataLoader.load_state_dict({}) returns early without clearing
+                                # next_iter_state; drop any pre-loaded cursor so the next episode starts at 0.
+                                self.prompts_dataloader.load_state_dict({})
+                                if hasattr(self.prompts_dataloader, "next_iter_state"):
+                                    self.prompts_dataloader.next_iter_state = None
+                            elif dl_state:
+                                self.prompts_dataloader.load_state_dict(dl_state)
+                            if next_cursor > total_consumed_prompts:
+                                pbar.update(next_cursor - total_consumed_prompts)
+                            total_consumed_prompts = next_cursor
+                            for sample in samples:
+                                sample.offload()
+                            logger.info(
+                                f"[warm_resume] loaded complete batch ({len(samples)} samples, "
+                                f"cursor {batch_start_consumed} -> {total_consumed_prompts}) from {warm_hit['dir']}"
+                            )
+                            self.rollout_queue.put(
+                                (samples, client_states, warm_hit["metrics"], 0.0, vllm_idle_wait),
+                                block=True,
+                            )
+                            if next_ep > ep:
+                                break
+                            continue
+                        dispatched = int(warm_hit.get("prompts_dispatched", 0))
+                        dl_state = warm_hit.get("data_loader_state_dict") or {}
+                        if dl_state:
+                            self.prompts_dataloader.load_state_dict(dl_state)
+                        if dispatched > 0:
+                            pbar.update(dispatched)
+                            total_consumed_prompts += dispatched
+                        if hasattr(self.samples_generator, "seed_resumed_samples"):
+                            self.samples_generator.seed_resumed_samples(warm_hit["samples"])
+                        else:
+                            self.samples_generator._resumed_samples = list(warm_hit["samples"])
+                        warm_writer = WarmRolloutWriter(
+                            ckpt_args.path,
+                            source_episode=ep,
+                            source_consumed_prompts=batch_start_consumed,
+                            recipe=warm_recipe,
+                            existing_dir=warm_hit["dir"],
+                            existing_group_files=warm_hit["group_files"],
+                            prior_dispatched=dispatched,
+                        )
+                        logger.info(
+                            f"[warm_resume] restored partial batch ({warm_hit['group_count']}/"
+                            f"{self.args.rollout.batch_size} groups, +{dispatched} prompts) from {warm_hit['dir']}"
+                        )
+
                 if self.args.train.rollout_replay_dir:
                     # Debug: replay dumped rollout batches (train-only) to iterate on the
                     # training/refit path without regenerating. When the dumps run out, report
@@ -758,6 +863,15 @@ class GenerateSamplesActor:
                         else f"[rollout_replay] loaded {len(rollout_samples)} samples from {replay_path}"
                     )
                 else:
+                    if warm_enabled and warm_writer is None:
+                        warm_writer = WarmRolloutWriter(
+                            ckpt_args.path,
+                            source_episode=ep,
+                            source_consumed_prompts=batch_start_consumed,
+                            recipe=warm_recipe,
+                        )
+                    if warm_writer is not None:
+                        self.samples_generator._warm_writer = warm_writer
                     if not self._partial_rollout:
                         ray.get(self.vllm_lock.acquire.remote())
                     try:
@@ -768,6 +882,8 @@ class GenerateSamplesActor:
                         generation_time = time.time() - t0
                         total_consumed_prompts += prompts_consumed
                     finally:
+                        if warm_writer is not None:
+                            self.samples_generator._warm_writer = None
                         if not self._partial_rollout:
                             ray.get(self.vllm_lock.release.remote())
                     if self.args.train.rollout_dump_dir and rollout_samples:
@@ -789,6 +905,12 @@ class GenerateSamplesActor:
                         "data_loader_state_dict": {} if drained else self.prompts_dataloader.state_dict(),
                         "rollout_generator_state_dict": self.samples_generator.state_dict(),
                     }
+                    if warm_writer is not None:
+                        warm_writer.finalize(
+                            client_states=client_states,
+                            metrics=rollout_metrics,
+                            fallback_samples=rollout_samples,
+                        )
                     self.rollout_queue.put(
                         (rollout_samples, client_states, rollout_metrics, generation_time, vllm_idle_wait),
                         block=True,

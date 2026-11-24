@@ -18,7 +18,10 @@
 
 import copy
 import os
+import shutil
+import tempfile
 from collections import defaultdict
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 from uuid import uuid4
 
@@ -96,6 +99,219 @@ def _sample_group_key(sample) -> int | str:
     return sample_group_ids[0] if sample_group_ids else id(sample)
 
 
+_WARM_FORMAT = "warm_rollout_v2"
+_WARM_PREFIX = "step_ep"
+
+
+def _atomic_torch_save(obj, path: Path) -> None:
+    """Write a torch object atomically via tmp file + fsync + replace."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = None
+    try:
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp", delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+            torch.save(obj, tmp)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        os.replace(tmp_path, path)
+        tmp_path = None
+    finally:
+        if tmp_path is not None and tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+
+
+def _warm_root_candidates(ckpt_path: str) -> List[Path]:
+    """Return warm-rollout root directories in priority order (sibling of ckpt_path, then inside ckpt_path)."""
+    p = Path(ckpt_path.rstrip("/"))
+    return [p.parent / "rollout_warm", p / "rollout_warm"]
+
+
+def _warm_batch_dirname(episode: int, consumed_prompts: int) -> str:
+    return f"{_WARM_PREFIX}{episode}_cursor{consumed_prompts}"
+
+
+class WarmRolloutWriter:
+    """Persist finished rollout groups incrementally and finalize atomically on batch completion.
+
+    Each accepted prompt group is materialized once onto CPU (shallow copy + reload so lazy
+    Experience handles stay intact for the live training step) and saved atomically as
+    ``group_XXXX.pt``. ``manifest.pt`` is updated atomically after every group (``complete=False``)
+    and flipped to ``complete=True`` when the full batch is ready. Best-effort: any I/O error
+    marks the writer broken and degrades silently so training is never disrupted.
+    """
+
+    def __init__(
+        self,
+        ckpt_path: str,
+        *,
+        source_episode: int,
+        source_consumed_prompts: int,
+        recipe: Dict,
+        existing_dir: Optional[Path] = None,
+        existing_group_files: Optional[List[str]] = None,
+        prior_dispatched: int = 0,
+        keep_batches: int = 3,
+    ) -> None:
+        self.root = _warm_root_candidates(ckpt_path)[0]
+        self.dir = existing_dir or (self.root / _warm_batch_dirname(source_episode, source_consumed_prompts))
+        self.source_episode = source_episode
+        self.source_consumed_prompts = source_consumed_prompts
+        self.recipe = recipe
+        self.group_files: List[str] = list(existing_group_files or [])
+        self.prior_dispatched = prior_dispatched
+        self._broken = False
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+            if not existing_group_files and self.dir.exists():
+                shutil.rmtree(self.dir, ignore_errors=True)
+            self.dir.mkdir(parents=True, exist_ok=True)
+            self._prune(keep_batches)
+        except Exception as e:
+            logger.warning(f"[warm_resume] init skipped ({e})")
+            self._broken = True
+
+    def _prune(self, keep_batches: int) -> None:
+        peers = [
+            e
+            for e in os.scandir(self.root)
+            if e.is_dir() and e.name.startswith(_WARM_PREFIX) and Path(e.path).resolve() != self.dir.resolve()
+        ]
+        keep_others = max(keep_batches - 1, 0)
+        for stale in sorted(peers, key=lambda e: e.stat().st_mtime)[: max(len(peers) - keep_others, 0)]:
+            shutil.rmtree(stale.path, ignore_errors=True)
+
+    def append_group(
+        self,
+        group_samples: List[Experience],
+        *,
+        prompts_dispatched: int,
+        data_loader_state_dict: Dict,
+        drained: bool,
+    ) -> None:
+        if self._broken or not group_samples:
+            return
+        try:
+            local = [copy.copy(s).reload() for s in group_samples]
+            fname = f"group_{len(self.group_files):04d}.pt"
+            _atomic_torch_save(local, self.dir / fname)
+            self.group_files.append(fname)
+            manifest = {
+                "format": _WARM_FORMAT,
+                "complete": False,
+                "recipe": self.recipe,
+                "source_episode": self.source_episode,
+                "source_consumed_prompts": self.source_consumed_prompts,
+                "prompts_dispatched": self.prior_dispatched + prompts_dispatched,
+                "data_loader_state_dict": data_loader_state_dict,
+                "drained": bool(drained),
+                "group_files": list(self.group_files),
+                "group_count": len(self.group_files),
+            }
+            _atomic_torch_save(manifest, self.dir / "manifest.pt")
+        except Exception as e:
+            logger.warning(f"[warm_resume] group save skipped ({e})")
+            self._broken = True
+
+    def finalize(
+        self,
+        *,
+        client_states: Dict,
+        metrics: Dict,
+        fallback_samples: Optional[List[Experience]] = None,
+    ) -> Optional[Path]:
+        if self._broken:
+            return None
+        try:
+            if not self.group_files and fallback_samples:
+                local = [copy.copy(s).reload() for s in fallback_samples]
+                fname = "group_0000.pt"
+                _atomic_torch_save(local, self.dir / fname)
+                self.group_files.append(fname)
+            if not self.group_files:
+                return None
+            manifest = {
+                "format": _WARM_FORMAT,
+                "complete": True,
+                "recipe": self.recipe,
+                "source_episode": self.source_episode,
+                "source_consumed_prompts": self.source_consumed_prompts,
+                "client_states": client_states,
+                "metrics": metrics,
+                "group_files": list(self.group_files),
+                "group_count": len(self.group_files),
+            }
+            manifest_path = self.dir / "manifest.pt"
+            _atomic_torch_save(manifest, manifest_path)
+            return manifest_path
+        except Exception as e:
+            logger.warning(f"[warm_resume] finalize skipped ({e})")
+            self._broken = True
+            return None
+
+
+def load_warm_rollout(
+    ckpt_path: str,
+    *,
+    episode: int,
+    consumed_prompts: int,
+    recipe: Dict,
+) -> Optional[Dict]:
+    """Load and validate a persisted complete or partial warm-resume rollout batch."""
+    dirname = _warm_batch_dirname(episode, consumed_prompts)
+    manifest_path = None
+    for root in _warm_root_candidates(ckpt_path):
+        candidate = root / dirname / "manifest.pt"
+        if candidate.is_file():
+            manifest_path = candidate
+            break
+    if manifest_path is None:
+        return None
+    batch_dir = manifest_path.parent
+    try:
+        manifest = torch.load(manifest_path, map_location="cpu", weights_only=False)
+        if not isinstance(manifest, dict) or manifest.get("format") != _WARM_FORMAT:
+            logger.warning(f"[warm_resume] ignoring {manifest_path}: unrecognized format")
+            return None
+        if manifest.get("source_episode") != episode or manifest.get("source_consumed_prompts") != consumed_prompts:
+            logger.warning(f"[warm_resume] ignoring {manifest_path}: cursor mismatch")
+            return None
+        if manifest.get("recipe") != recipe:
+            logger.warning(f"[warm_resume] ignoring {manifest_path}: recipe differs from current run")
+            return None
+        group_files = list(manifest.get("group_files") or [])
+        if not group_files:
+            return None
+        complete = bool(manifest.get("complete"))
+        if complete:
+            cs = manifest.get("client_states") or {}
+            next_ep = cs.get("episode", episode)
+            next_cursor = cs.get("total_consumed_prompts", consumed_prompts)
+            if not (next_ep > episode or next_cursor > consumed_prompts):
+                logger.warning(f"[warm_resume] ignoring {manifest_path}: complete batch does not advance cursor")
+                return None
+        elif manifest.get("drained"):
+            logger.info(f"[warm_resume] skipping drained partial batch at {manifest_path}")
+            return None
+
+        samples: List[Experience] = []
+        for fname in group_files:
+            gpath = batch_dir / fname
+            if not gpath.is_file():
+                logger.warning(f"[warm_resume] ignoring {manifest_path}: missing group file {fname}")
+                return None
+            chunk = torch.load(gpath, map_location="cpu", weights_only=False)
+            samples.extend(chunk)
+        if not samples:
+            return None
+        return {**manifest, "dir": batch_dir, "samples": samples}
+    except Exception as e:
+        logger.warning(f"[warm_resume] load skipped for {manifest_path} ({e})")
+        return None
+
+
 class SamplesGenerator:
     """Stream prompts through a persistent pool of rollout workers."""
 
@@ -146,8 +362,11 @@ class SamplesGenerator:
             os.makedirs(d, exist_ok=True)
             self._warm_seq = getattr(self, "_warm_seq", 0) + 1
             path = os.path.join(d, f"{self._BUFFER}.{os.getpid()}.{self._warm_seq}")  # pid+seq: unique per step
-            torch.save(local, path)
-            for stale in sorted(os.scandir(d), key=lambda e: e.stat().st_mtime)[:-3]:  # keep newest 3; bound disk
+            _atomic_torch_save(local, Path(path))
+            for stale in sorted(
+                (e for e in os.scandir(d) if e.is_file() and e.name.startswith(self._BUFFER)),
+                key=lambda e: e.stat().st_mtime,
+            )[:-3]:  # keep newest 3; bound disk
                 os.remove(stale.path)
             return {"buffer_file": path}
         except Exception as e:  # bookkeeping must never break the checkpoint
@@ -164,6 +383,10 @@ class SamplesGenerator:
             logger.info(f"warm-resume: restored {len(self._resumed_samples)} rollout groups")
         except Exception as e:
             logger.warning(f"warm-resume: load skipped ({e})")
+
+    def seed_resumed_samples(self, samples: Optional[List[Experience]]) -> None:
+        """Seed (or clear) completed groups restored from a warm-resume batch."""
+        self._resumed_samples = list(samples) if samples else None
 
     @torch.no_grad()
     def generate_eval_samples(self, **generate_kwargs) -> List[Experience]:
@@ -286,6 +509,16 @@ class SamplesGenerator:
                     self._finished_samples.extend(group_samples)
                     groups_accepted += 1
                     progress.update(1)
+                    warm_writer = getattr(self, "_warm_writer", None)
+                    if warm_writer is not None:
+                        warm_writer.append_group(
+                            group_samples,
+                            prompts_dispatched=prompts_dispatched,
+                            data_loader_state_dict=(
+                                {} if self.prompts_drained else self.prompts_dataloader.state_dict()
+                            ),
+                            drained=self.prompts_drained,
+                        )
         progress.close()
 
         # Observability: per-reason drop counts + (when filtering) the pass rate.
