@@ -92,3 +92,34 @@ def test_critic_backward_gets_the_window_microbatch_count(monkeypatch):
 
     assert strategy.backward_kwargs[-1]["num_microbatches"] == 3
     assert strategy.accumulated_gradient != 3  # the fallback would have scaled the aux gradient wrong
+
+
+def test_critic_value_train_disables_shuffle_for_mixed_media(monkeypatch):
+    trainer, strategy = _make_trainer(monkeypatch)
+    strategy.args.fsdp = SimpleNamespace(cp_size=1, tp_size=1)
+    strategy.global_token_count = lambda x: x
+    strategy.all_reduce = lambda d, op="sum": d
+    strategy.compute_perf_metrics = lambda *a, **kw: {}
+    trainer.replay_buffer.sample_batch_size = 1
+    trainer.replay_buffer.cpu_offload = False
+    trainer.dataloader_pin_memory = False
+    vision = ("image_grid_thw", "pixel_values")
+    for idx in range(6):
+        exp = _experience(batch=1, steps=3)
+        exp.sequences = torch.full((1, 4), idx, dtype=torch.long)
+        exp.mm_train_inputs = (
+            [{"pixel_values": torch.ones(1), "image_grid_thw": torch.ones(1)}] if idx >= 3 else [None]
+        )
+        trainer.replay_buffer.append(exp)
+
+    seen = []
+    trainer.training_step = lambda exp, *a, **kw: (
+        seen.append((int(exp.sequences[0, 0]), exp.media_keys)),
+        (0.0, 0.0, 0.0),
+    )[1]
+    monkeypatch.setattr(critic_actor.torch.cuda, "current_device", lambda: torch.device("cpu"))
+    monkeypatch.setattr(critic_actor.torch.cuda, "reset_peak_memory_stats", lambda *a: None)
+
+    torch.manual_seed(0)
+    trainer.value_train()
+    assert seen == [(i, vision if i >= 3 else ()) for i in range(6)]

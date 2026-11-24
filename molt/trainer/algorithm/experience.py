@@ -121,6 +121,7 @@ class Experience:
     labels: list[str] = field(default_factory=list)
     images: list = field(default_factory=list)  # per-sample image paths/URLs for VLM (None entries for text-only)
     mm_train_inputs: list = field(default_factory=list)  # per-sample processor outputs (pixel_values dicts) for VLM
+    _offloaded_media_keys: tuple[str, ...] = field(default=(), init=False, repr=False)
     info: dict = field(default_factory=dict)  # per-sample metrics for logging
     # GRPO grouping identity. `group_ids` (= prompt id) is shared by all N rollouts of one
     # prompt — the trainer averages their rewards to form the baseline. `rollout_ids` is
@@ -151,6 +152,21 @@ class Experience:
         "images",
     )
 
+    @property
+    def media_keys(self) -> tuple[str, ...]:
+        if self.heavy_ref is not None:
+            return self._offloaded_media_keys
+        return tuple(
+            sorted(
+                {
+                    key
+                    for item in self.mm_train_inputs or []
+                    for inputs in (item if isinstance(item, list) else [item])
+                    for key in inputs or ()
+                }
+            )
+        )
+
     def offload(self) -> "Experience":
         """Move this sample's heavy fields into the object store (on the producing runner) and keep
         only a ref, so the controller ships a handle, not images. Returns self. Undo with `reload()`.
@@ -158,6 +174,7 @@ class Experience:
         now-nulled fields and overwrites the ref."""
         if self.heavy_ref is not None:
             return self
+        self._offloaded_media_keys = self.media_keys
         heavy = {name: getattr(self, name) for name in self.HEAVY_FIELDS}
         self.heavy_ref = ray.put(heavy)
         for name in self.HEAVY_FIELDS:
@@ -298,16 +315,11 @@ def remove_padding_in_sequences(items: List[Experience]) -> List[Experience]:
 
 
 def balance_experiences(experiences, args):
-    """Assign the rollout equally across DP ranks by total sequence length, returning the samples
-    reordered into contiguous per-rank blocks. ``async_run_method_batch``'s even slice then hands
-    each rank its block, and each rank restores its own heavy tensors via ``Experience.reload()``.
+    """Return equal DP blocks with the same media inputs at each position.
 
-    Every DP rank must receive the SAME number of samples — unequal counts give different
-    ``num_steps`` per rank -> mismatched collective shapes at the world all-reduces -> NCCL hang — so
-    the trailing remainder is dropped. Within a rank the block is sorted by length descending so the
-    k-th micro-batch is size-matched across ranks (else a straggler trips the 600s NCCL watchdog).
-    Metadata only — the heavy tensors stay in shared memory, so a full image batch never reaches the
-    controller.
+    FSDP's parameter collectives must agree even when a VLM batch mixes
+    vision and text-only samples. Balance lengths within each set of media
+    keys, using only metadata while heavy tensors are offloaded.
     """
     actor_world_size = args.actor.num_nodes * args.actor.num_gpus_per_node
     effective_num = actor_world_size // get_model_parallel_size(args)
@@ -319,27 +331,36 @@ def balance_experiences(experiences, args):
             "Increase rollout.batch_size/n_samples_per_prompt or drop the final partial batch."
         )
 
-    lengths = []
-    for exp in experiences:
+    lengths, by_media = [], {}
+    for i, exp in enumerate(experiences):
         length = exp.total_length
         lengths.append(int(length.item() if isinstance(length, torch.Tensor) else length))
+        by_media.setdefault(exp.media_keys, []).append(i)
 
-    # Drop the trailing partial batch so the count divides evenly across the DP ranks.
-    remainder = len(experiences) % effective_num
-    keep = len(experiences) - remainder
-    if remainder:
-        logger.warning(
-            f"[balance_experiences] dropping {remainder} trailing sample(s) so "
-            f"{len(experiences)} divides evenly across {effective_num} DP ranks."
+    # Put text first so deferred gradient sync includes the vision tower on the
+    # last microbatch of a mixed update (including DP=1 with CP>1).
+    blocks = [[] for _ in range(effective_num)]
+    block_totals = [0] * effective_num
+    for media in sorted(by_media):
+        indices = by_media[media]
+        keep = len(indices) // effective_num * effective_num
+        if not keep:
+            continue
+        partitions = get_seqlen_balanced_partitions(
+            [lengths[i] for i in indices[:keep]], effective_num, equal_size=True
         )
-    partitions = get_seqlen_balanced_partitions(lengths[:keep], effective_num, equal_size=True)
-
-    # Concatenate the per-rank blocks into one flat list. Within each rank, place the longest
-    # samples first so the k-th micro-batch is size-matched across ranks (a straggler otherwise
-    # makes short ranks wait long enough to trip the NCCL watchdog). async_run_method_batch's even
-    # slice then hands each rank its contiguous block.
-    balanced = []
-    for partition in partitions:
-        longest_first = sorted(partition, key=lambda i: lengths[i], reverse=True)
-        balanced.extend(experiences[i] for i in longest_first)
-    return balanced
+        partitions_desc = sorted(partitions, key=lambda part: sum(lengths[indices[i]] for i in part), reverse=True)
+        block_order = sorted(range(effective_num), key=block_totals.__getitem__)
+        for block_idx, partition in zip(block_order, partitions_desc, strict=True):
+            longest_first = sorted((indices[i] for i in partition), key=lengths.__getitem__, reverse=True)
+            blocks[block_idx].extend(experiences[i] for i in longest_first)
+            block_totals[block_idx] += sum(lengths[i] for i in longest_first)
+    if not blocks[0]:
+        raise ValueError(f"Cannot give each of {effective_num} DP ranks a sample with the same media inputs.")
+    dropped = len(experiences) - effective_num * len(blocks[0])
+    if dropped:
+        logger.warning(
+            f"[balance_experiences] dropping {dropped} trailing sample(s) to align media and counts "
+            f"across {effective_num} DP ranks."
+        )
+    return list(itertools.chain.from_iterable(blocks))

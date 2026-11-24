@@ -72,6 +72,182 @@ def test_balance_experiences_equal_count_and_length_sorted():
         assert block_lengths == sorted(block_lengths, reverse=True)
 
 
+def _vision_inputs():
+    return [{"pixel_values": torch.ones(1), "image_grid_thw": torch.ones(1)}]
+
+
+@pytest.mark.parametrize("extra_text", [False, True])
+def test_balance_experiences_aligns_media_across_context_parallel_groups(monkeypatch, extra_text):
+    samples = [_len_sample(n, i) for i, n in enumerate((170, 160, 154, 150, 66, 50))]
+    for sample in (samples[0], samples[2], samples[3], samples[5]):
+        sample.mm_train_inputs = _vision_inputs()
+    monkeypatch.setattr(experience_mod.ray, "put", lambda _: object())
+    samples[2].offload()
+    assert samples[2].mm_train_inputs is None
+    if extra_text:
+        samples.append(_len_sample(20, 6))
+
+    balanced = balance_experiences(samples, _args(cp=8, actor_gpus=16))
+    assert {id(s) for s in balanced} == {id(s) for s in samples[:6]}
+    signatures = [s.media_keys for s in balanced]
+    vision = ("image_grid_thw", "pixel_values")
+    assert signatures[:3] == signatures[3:] == [(), vision, vision]
+
+
+def test_balance_experiences_orders_text_before_vision_for_single_dp_rank():
+    # Even with effective_num == 1 (e.g. DP=1, CP=8), FSDP2 still shards across dp_cp with deferred
+    # gradient sync: keep all samples and order text before vision so vision syncs on the last step.
+    samples = [_len_sample(n, i) for i, n in enumerate((170, 80, 120))]
+    samples[0].mm_train_inputs = _vision_inputs()
+    samples[2].mm_train_inputs = _vision_inputs()
+
+    balanced = balance_experiences(samples, _args(cp=8, actor_gpus=8))
+    vision = ("image_grid_thw", "pixel_values")
+    assert len(balanced) == 3
+    assert [s.media_keys for s in balanced] == [(), vision, vision]
+
+
+def test_balance_experiences_raises_when_no_media_group_fills_dp_ranks():
+    samples = [_len_sample(n, i) for i, n in enumerate((100, 90, 80, 70))]
+    samples[0].mm_train_inputs = _vision_inputs()
+    samples[1].mm_train_inputs = _vision_inputs()
+
+    with pytest.raises(ValueError, match="same media inputs"):
+        balance_experiences(samples, _args(actor_gpus=4))
+
+
+def test_balance_experiences_balances_total_length_across_media_groups():
+    samples = [_len_sample(n, i) for i, n in enumerate((100, 10, 500, 100))]
+    samples[2].mm_train_inputs = _vision_inputs()
+    samples[3].mm_train_inputs = _vision_inputs()
+
+    balanced = balance_experiences(samples, _args(actor_gpus=2))
+    vision = ("image_grid_thw", "pixel_values")
+    assert [s.media_keys for s in balanced] == [(), vision, (), vision]
+    rank_totals = sorted(sum(int(s.total_length.item()) for s in balanced[r * 2 : (r + 1) * 2]) for r in range(2))
+    # Pairing heaviest vision with lightest text gives (200, 510) rather than (110, 600).
+    assert rank_totals == [200, 510]
+
+
+def test_dynamic_batch_aligns_mixed_media_across_dp_ranks(monkeypatch):
+    from molt.trainer.algorithm.replay_buffer import NaiveReplayBuffer
+
+    def _item(length, idx, with_vision):
+        return Experience(
+            sequences=torch.ones(1, length, dtype=torch.long) * idx,
+            attention_mask=torch.ones(1, length, dtype=torch.long),
+            action_mask=torch.ones(1, length - 1, dtype=torch.bool),
+            total_length=torch.tensor([length]),
+            mm_train_inputs=_vision_inputs() if with_vision else [None],
+            rollout_ids=[f"r{idx}"],
+        )
+
+    # Without media grouping, KK on rank 0 pairs [T(80), T(20)] and [V(80), V(20)] (1 text MB + 1 vision MB),
+    # while rank 1 pairs [T(70), V(30)] and [V(65), T(35)] (2 vision MBs) -> FSDP2 deadlock on MB 0.
+    rank_items = [
+        [_item(80, 0, False), _item(20, 1, False), _item(80, 2, True), _item(20, 3, True)],
+        [_item(70, 4, False), _item(35, 5, False), _item(65, 6, True), _item(30, 7, True)],
+    ]
+    args = SimpleNamespace(
+        fsdp=SimpleNamespace(cp_size=1, tp_size=1),
+        train=SimpleNamespace(force_on_policy=True, max_tokens_per_gpu=100, batch_size=8),
+    )
+    monkeypatch.setattr("molt.trainer.algorithm.replay_buffer.dist.get_world_size", lambda: 2)
+    monkeypatch.setattr("molt.trainer.algorithm.replay_buffer.torch.cuda.current_device", lambda: torch.device("cpu"))
+
+    # Two-phase capture so both ranks share the real elementwise max all_reduce.
+    captured = []
+
+    def _run_with_all_reduce(rank_idx, max_counts=None):
+        buf = NaiveReplayBuffer(sample_batch_size=1, cpu_offload=False, dynamic_batch=True)
+        for sample in rank_items[rank_idx]:
+            buf.append(sample)
+
+        def _all_reduce(tensor, op="max"):
+            assert op == "max"
+            if max_counts is None:
+                captured.append(tensor.clone())
+                return tensor
+            return max_counts.clone()
+
+        buf.setup_dynamic_batch(SimpleNamespace(args=args, all_reduce=_all_reduce, print=lambda *a: None))
+        return buf
+
+    _run_with_all_reduce(0)
+    _run_with_all_reduce(1)
+    assert len(captured[0]) == len(captured[1])
+    shared_max = torch.maximum(captured[0], captured[1])
+
+    buf0 = _run_with_all_reduce(0, shared_max)
+    buf1 = _run_with_all_reduce(1, shared_max)
+
+    mbs0 = [buf0.collate_fn([buf0[i]]) for i in range(len(buf0))]
+    mbs1 = [buf1.collate_fn([buf1[i]]) for i in range(len(buf1))]
+    vision = ("image_grid_thw", "pixel_values")
+    sig0 = [mb.media_keys for mb in mbs0]
+    sig1 = [mb.media_keys for mb in mbs1]
+
+    assert sig0 == sig1
+    assert sig0[0] == () and sig0[-1] == vision
+    assert buf0.dynamic_optimizer_step == buf1.dynamic_optimizer_step
+    assert buf0.dynamic_optimizer_step[-1] == 1 and sum(buf0.dynamic_optimizer_step) == 1
+    assert sorted(idx for mb in buf0.dynamic_indices for idx in mb) == [0, 1, 2, 3]
+    assert sorted(idx for mb in buf1.dynamic_indices for idx in mb) == [0, 1, 2, 3]
+
+
+def test_policy_train_disables_shuffle_only_for_mixed_media(monkeypatch):
+    from molt.trainer.algorithm.replay_buffer import NaiveReplayBuffer
+    from molt.trainer.workers import policy_actor
+
+    def _sample(idx, with_vision):
+        return Experience(
+            sequences=torch.full((1, 4), idx, dtype=torch.long),
+            attention_mask=torch.ones(1, 4, dtype=torch.long),
+            action_mask=torch.ones(1, 3, dtype=torch.bool),
+            total_length=torch.tensor([4]),
+            mm_train_inputs=_vision_inputs() if with_vision else [None],
+            rollout_ids=[f"r{idx}"],
+        )
+
+    def _run(samples):
+        trainer = policy_actor.PolicyTrainer.__new__(policy_actor.PolicyTrainer)
+        trainer.args = SimpleNamespace(
+            fsdp=SimpleNamespace(cp_size=1, tp_size=1),
+            train=SimpleNamespace(dynamic_batch_enable=False, force_on_policy=True, max_epochs=1),
+        )
+        trainer.strategy = SimpleNamespace(
+            accumulated_gradient=1,
+            is_rank_0=lambda: False,
+            global_token_count=lambda x: x,
+            compute_perf_metrics=lambda *a, **kw: {},
+            print=lambda *a: None,
+        )
+        trainer.actor_loss_fn = SimpleNamespace(loss_agg_mode="token-mean")
+        trainer.replay_buffer = NaiveReplayBuffer(sample_batch_size=1, cpu_offload=False, dynamic_batch=False)
+        for s in samples:
+            trainer.replay_buffer.append(s)
+        trainer.dataloader_pin_memory = False
+        trainer.max_epochs = 1
+        trainer._mfu = None
+        seen = []
+        trainer.training_step = lambda exp, *a, **kw: seen.append((int(exp.sequences[0, 0]), exp.media_keys)) or {}
+        trainer._record_status = lambda *a, **kw: None
+        monkeypatch.setattr(policy_actor.torch.cuda, "current_device", lambda: torch.device("cpu"))
+        monkeypatch.setattr(policy_actor.torch.cuda, "reset_peak_memory_stats", lambda *a: None)
+        torch.manual_seed(0)
+        trainer.policy_train(kl_ctl=0.0)
+        return seen
+
+    vision = ("image_grid_thw", "pixel_values")
+    mixed = [_sample(i, i >= 3) for i in range(6)]
+    assert _run(mixed) == [(i, vision if i >= 3 else ()) for i in range(6)]
+
+    # Homogeneous media still shuffles on cp=1, tp=1.
+    homogeneous = [_sample(i, True) for i in range(6)]
+    seen_ids = [idx for idx, _ in _run(homogeneous)]
+    assert sorted(seen_ids) == list(range(6)) and seen_ids != list(range(6))
+
+
 def _grpo_maker():
     """A real RemoteExperienceMaker: only `strategy.args` and the KL controller are stubbed, so a
     new step on the compute_advantages path does not need another binding here."""

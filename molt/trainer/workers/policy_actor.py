@@ -254,7 +254,13 @@ class PolicyTrainer:
         if self.args.train.dynamic_batch_enable:
             self.replay_buffer.setup_dynamic_batch(self.strategy)
 
-        should_shuffle = get_model_parallel_size(self.args) <= 1 and not self.args.train.dynamic_batch_enable
+        # Keep balance_experiences' media order when mixing text and vision so DP ranks
+        # execute matching FSDP collectives and deferred grad sync sees vision last.
+        should_shuffle = (
+            get_model_parallel_size(self.args) <= 1
+            and not self.args.train.dynamic_batch_enable
+            and not self.replay_buffer.has_mixed_media()
+        )
         dataloader = DataLoader(
             self.replay_buffer,
             batch_size=self.replay_buffer.sample_batch_size,
