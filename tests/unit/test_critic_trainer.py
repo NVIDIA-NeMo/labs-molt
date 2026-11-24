@@ -123,3 +123,36 @@ def test_critic_value_train_disables_shuffle_for_mixed_media(monkeypatch):
     torch.manual_seed(0)
     trainer.value_train()
     assert seen == [(i, vision if i >= 3 else ()) for i in range(6)]
+
+
+def test_critic_value_train_trimmed_batch_and_multi_encoder_deferred_sync(monkeypatch):
+    trainer, strategy = _make_trainer(monkeypatch)
+    strategy.args.fsdp = SimpleNamespace(cp_size=1, tp_size=1)
+    strategy.args.train.force_on_policy = False
+    strategy.accumulated_gradient = 4  # configured window larger than trimmed 3-sample buffer
+    strategy.global_token_count = lambda x: x
+    strategy.all_reduce = lambda d, op="sum": d
+    strategy.compute_perf_metrics = lambda *a, **kw: {}
+    trainer.replay_buffer.sample_batch_size = 1
+    trainer.replay_buffer.cpu_offload = False
+    trainer.dataloader_pin_memory = False
+    trainer._defer_grad_sync = True
+
+    media_seq = [
+        [None],
+        [{"pixel_values": torch.ones(1), "image_grid_thw": torch.ones(1)}],
+        [{"input_features": torch.ones(1)}],
+    ]
+    for idx, mm in enumerate(media_seq):
+        exp = _experience(batch=1, steps=3)
+        exp.sequences = torch.full((1, 4), idx, dtype=torch.long)
+        exp.mm_train_inputs = mm
+        trainer.replay_buffer.append(exp)
+
+    monkeypatch.setattr(critic_actor.torch.cuda, "current_device", lambda: torch.device("cpu"))
+    monkeypatch.setattr(critic_actor.torch.cuda, "reset_peak_memory_stats", lambda *a: None)
+
+    trainer.value_train()
+    # Runs 1 shortened optimizer step (not 0), syncing on both image (idx 1) and audio (idx 2).
+    assert len(strategy.backward_kwargs) == 3
+    assert [kw["sync_gradients"] for kw in strategy.backward_kwargs] == [False, True, True]

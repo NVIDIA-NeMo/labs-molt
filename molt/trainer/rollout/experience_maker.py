@@ -30,7 +30,7 @@ from molt.trainer.algorithm.advantage import (
     AdvantageContext,
     get_advantage_estimator,
 )
-from molt.trainer.algorithm.experience import Experience
+from molt.trainer.algorithm.experience import Experience, balance_experiences
 from molt.utils.logging_utils import init_logger
 
 if TYPE_CHECKING:
@@ -185,9 +185,23 @@ class RemoteExperienceMaker:
         cp/tp rank in a DP group returned the same per-sample results, so keep one copy per group (drop
         the duplicates) and flatten to one result per sample, in ``experiences`` order. Frees the
         forward's cache before the colocated actor trains on the same GPUs."""
-        refs = group.async_run_method_batch(method_name="forward", experience=experiences)
+        ordered = experiences
+        group_dp = getattr(group, "dp_size", None)
+        actor_dp = getattr(self.actor_model_group, "dp_size", None)
+        if group_dp is not None and actor_dp is not None and group_dp != actor_dp:
+            # A non-colocated reference model can have a different DP size than the actor.
+            # Re-pack into group_dp aligned blocks without mutating `experiences` order so
+            # every ref DP rank still executes matching media collectives.
+            ordered = balance_experiences(experiences, self.args, num_dp_ranks=group_dp)
+            if len(ordered) != len(experiences):
+                raise ValueError(
+                    f"Cannot align all {len(experiences)} experiences across {group_dp} DP ranks "
+                    f"for {result_attr} (only {len(ordered)} alignable); ensure balance_experiences "
+                    "aligned media groups to lcm(actor_dp, ref_dp)."
+                )
+        refs = group.async_run_method_batch(method_name="forward", experience=ordered)
         outputs = list(itertools.chain.from_iterable(ray.get(refs)[:: group.duplicate_actors]))
-        for experience, output in zip(experiences, outputs):
+        for experience, output in zip(ordered, outputs, strict=True):
             setattr(experience, result_attr, output)
         ray.get(group.async_run_method(method_name="empty_cache"))
 

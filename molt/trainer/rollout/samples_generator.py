@@ -18,7 +18,7 @@
 
 import copy
 import os
-from collections import defaultdict
+from collections import Counter, defaultdict
 from typing import Dict, List, Optional, Tuple
 from uuid import uuid4
 
@@ -29,7 +29,7 @@ from tqdm import tqdm
 from vllm import SamplingParams
 
 from molt.agents.base import _first_scalar as _to_scalar  # dedupe: same tensor/list/scalar normalizer
-from molt.trainer.algorithm.experience import Experience, get_model_parallel_size
+from molt.trainer.algorithm.experience import Experience, get_dp_divisor
 from molt.utils.logging_utils import init_logger
 
 logger = init_logger(__name__)
@@ -320,15 +320,15 @@ class SamplesGenerator:
         exhausted = self._dataloader_iter is None and not self._finished_samples and not self._inflight_rollouts
         self._round_exhausted = exhausted
         if exhausted and batch_samples:
-            # An epoch tail with fewer samples than DP groups cannot spread across the actor
-            # world (balance_experiences refuses it); drop it like balance drops its remainder.
-            # The fit loop releases the training slot when a round returns no samples.
-            dp_groups = (
-                self.args.actor.num_nodes * self.args.actor.num_gpus_per_node // get_model_parallel_size(self.args)
-            )
-            if len(batch_samples) < dp_groups:
+            # An epoch tail where no single media group reaches the DP alignment divisor
+            # cannot spread evenly across ranks (balance_experiences refuses it); drop it
+            # here so the fit loop releases the training slot cleanly.
+            dp_divisor = get_dp_divisor(self.args)
+            media_counts = Counter(getattr(sample, "media_keys", ()) for sample in batch_samples)
+            if max(media_counts.values()) < dp_divisor:
                 logger.warning(
-                    f"dropping the {len(batch_samples)}-sample epoch tail: fewer than {dp_groups} DP groups"
+                    f"dropping the {len(batch_samples)}-sample epoch tail: "
+                    f"no media group has at least {dp_divisor} samples for DP alignment"
                 )
                 batch_samples = []
         return batch_samples, rollout_metrics, prompts_dispatched, exhausted

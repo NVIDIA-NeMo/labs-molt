@@ -33,7 +33,7 @@ gradient is mean-all-reduced over the DP(+CP) group once, right before the step.
 import os
 import time
 from contextlib import ExitStack
-from typing import Dict
+from typing import Dict, Optional
 
 import ray
 import torch
@@ -114,7 +114,7 @@ class CriticTrainer:
             self.replay_buffer,
             batch_size=self.replay_buffer.sample_batch_size,
             shuffle=should_shuffle,
-            drop_last=True,
+            drop_last=False,
             pin_memory=self.dataloader_pin_memory,
             collate_fn=self.replay_buffer.collate_fn,
         )
@@ -142,9 +142,12 @@ class CriticTrainer:
             if self.args.train.force_on_policy and not dynamic:
                 accum_steps = max(max_steps, 1)
             elif not dynamic:
-                remainder = max_steps % accum_steps
-                if remainder:
-                    max_steps -= remainder
+                if 0 < max_steps < accum_steps:
+                    accum_steps = max_steps
+                else:
+                    remainder = max_steps % accum_steps
+                    if remainder:
+                        max_steps -= remainder
 
             # Same window / global-token-mean contract as PolicyTrainer.policy_train.
             window = []
@@ -159,6 +162,8 @@ class CriticTrainer:
                     continue
                 local_tokens = sum(exp.action_mask.sum() for exp in window)
                 batch_num_tokens = self.strategy.global_token_count(local_tokens)
+                last_media_step = {key: i for i, exp in enumerate(window) for key in exp.media_keys}
+                sync_steps = set(last_media_step.values()) | {len(window) - 1}
                 for idx, exp in enumerate(window):
                     exp.to_device(device)
                     # Full per-sequence lengths drive the FLOP estimate (the forward
@@ -168,7 +173,11 @@ class CriticTrainer:
                     local_token_sum += float(seqlens.sum())
                     is_optimizer_step = idx == len(window) - 1
                     value_loss, clip_frac, grad_norm = self.training_step(
-                        exp, batch_num_tokens, len(window), is_optimizer_step
+                        exp,
+                        batch_num_tokens,
+                        len(window),
+                        is_optimizer_step,
+                        sync_gradients=(idx in sync_steps),
                     )
                     n_tok = float(exp.action_mask.sum().item())
                     loss_sum += value_loss * n_tok
@@ -200,7 +209,14 @@ class CriticTrainer:
         )
         return status
 
-    def training_step(self, experience: Experience, batch_num_tokens, num_microbatches: int, is_optimizer_step: bool):
+    def training_step(
+        self,
+        experience: Experience,
+        batch_num_tokens,
+        num_microbatches: int,
+        is_optimizer_step: bool,
+        sync_gradients: Optional[bool] = None,
+    ):
         self.critic.train()
 
         multimodal_inputs = {}
@@ -232,7 +248,11 @@ class CriticTrainer:
                 accumulate=not self.args.train.dynamic_batch_enable,
                 scale_loss_by_accumulation=False,
                 num_microbatches=num_microbatches,
-                sync_gradients=(is_optimizer_step if self._defer_grad_sync else True),
+                sync_gradients=(
+                    (is_optimizer_step if sync_gradients is None else sync_gradients)
+                    if self._defer_grad_sync
+                    else True
+                ),
             )
         finally:
             cp_context_stack.close()

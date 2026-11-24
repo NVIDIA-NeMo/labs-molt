@@ -14,8 +14,9 @@
 # limitations under the License.
 
 import itertools
+import math
 from dataclasses import dataclass, field, fields
-from typing import Any, List, Union
+from typing import Any, List, Optional, Union
 
 import ray
 import torch
@@ -314,20 +315,96 @@ def remove_padding_in_sequences(items: List[Experience]) -> List[Experience]:
     return items
 
 
-def balance_experiences(experiences, args):
+def get_dp_divisor(args, align_dp_ranks: Optional[int] = None) -> int:
+    """Return the DP alignment divisor shared across the actor and (if active) reference model."""
+    mp_size = get_model_parallel_size(args)
+    actor_dp = (args.actor.num_nodes * args.actor.num_gpus_per_node) // mp_size
+    if actor_dp <= 0:
+        raise ValueError(f"Invalid effective actor count: {actor_dp}")
+    ref_dp = align_dp_ranks
+    if ref_dp is None:
+        algo = getattr(args, "algo", None)
+        ref = getattr(args, "ref", None)
+        kl = getattr(algo, "kl", None)
+        if (
+            ref is not None
+            and kl is not None
+            and getattr(kl, "init_coef", 0) > 0
+            and getattr(kl, "ref", None) == "model"
+        ):
+            ref_dp = (ref.num_nodes * ref.num_gpus_per_node) // mp_size
+    if ref_dp is not None:
+        if ref_dp <= 0:
+            raise ValueError(f"Invalid effective reference count: {ref_dp}")
+        return math.lcm(actor_dp, ref_dp)
+    return actor_dp
+
+
+def _select_divisible_groups(groups: List[List[int]], divisor: int) -> List[int]:
+    """Return the largest-sample subset of whole groups whose total length divides ``divisor``."""
+    total = sum(len(group) for group in groups)
+    if total % divisor == 0:
+        return [idx for group in groups for idx in group]
+    if all(len(group) == 1 for group in groups):
+        keep = total // divisor * divisor
+        return [group[0] for group in groups[:keep]]
+
+    # Exact subset-sum DP over remainders mod divisor; keeps earliest groups on ties.
+    best: dict[int, tuple[int, List[int]]] = {0: (0, [])}
+    for group_pos, group in enumerate(groups):
+        size = len(group)
+        next_best = dict(best)
+        for rem, (count, chosen) in best.items():
+            nrem = (rem + size) % divisor
+            ncount = count + size
+            if nrem not in next_best or ncount > next_best[nrem][0]:
+                next_best[nrem] = (ncount, chosen + [group_pos])
+        best = next_best
+    return [idx for group_pos in best[0][1] for idx in groups[group_pos]]
+
+
+def _group_indices(experiences, indices: List[int], attr: str) -> List[List[int]]:
+    grouped: dict[Any, List[int]] = {}
+    for idx in indices:
+        ids = getattr(experiences[idx], attr, None)
+        key = ("id", ids[0]) if ids else ("singleton", idx)
+        grouped.setdefault(key, []).append(idx)
+    return list(grouped.values())
+
+
+def balance_experiences(
+    experiences,
+    args,
+    *,
+    num_dp_ranks: Optional[int] = None,
+    align_dp_ranks: Optional[int] = None,
+):
     """Return equal DP blocks with the same media inputs at each position.
 
     FSDP's parameter collectives must agree even when a VLM batch mixes
     vision and text-only samples. Balance lengths within each set of media
     keys, using only metadata while heavy tensors are offloaded.
+
+    When a non-colocated reference model has a different DP size from the actor,
+    each media group is aligned to ``lcm(actor_dp, ref_dp)`` so both groups can
+    shard the batch evenly without cross-rank media mismatch. Whole prompt groups
+    (``group_ids``) are preserved whenever at least one media bucket can form a
+    divisible subset of complete groups; single-prompt batches that cannot do so
+    fall back to whole rollouts (``rollout_ids``) and then sample prefix truncation.
     """
-    actor_world_size = args.actor.num_nodes * args.actor.num_gpus_per_node
-    effective_num = actor_world_size // get_model_parallel_size(args)
-    if effective_num <= 0:
-        raise ValueError(f"Invalid effective actor count: {effective_num}")
-    if len(experiences) < effective_num:
+    if num_dp_ranks is not None:
+        effective_num = num_dp_ranks
+        divisor = num_dp_ranks
+        if effective_num <= 0:
+            raise ValueError(f"Invalid effective actor count: {effective_num}")
+    else:
+        actor_world_size = args.actor.num_nodes * args.actor.num_gpus_per_node
+        effective_num = actor_world_size // get_model_parallel_size(args)
+        divisor = get_dp_divisor(args, align_dp_ranks=align_dp_ranks)
+
+    if len(experiences) < divisor:
         raise ValueError(
-            f"Cannot balance {len(experiences)} samples across {effective_num} DP ranks. "
+            f"Cannot balance {len(experiences)} samples across {divisor} DP ranks. "
             "Increase rollout.batch_size/n_samples_per_prompt or drop the final partial batch."
         )
 
@@ -337,30 +414,41 @@ def balance_experiences(experiences, args):
         lengths.append(int(length.item() if isinstance(length, torch.Tensor) else length))
         by_media.setdefault(exp.media_keys, []).append(i)
 
+    # First pass: keep only complete prompt groups (GRPO/RLOO baseline semantics).
+    selected_by_media = {
+        media: _select_divisible_groups(_group_indices(experiences, indices, "group_ids"), divisor)
+        for media, indices in by_media.items()
+    }
+    if not any(selected_by_media.values()):
+        # Single-prompt small batch (e.g., 1 prompt group whose size is not divisible
+        # by divisor): preserve whole multi-turn rollouts before slicing samples.
+        selected_by_media = {
+            media: _select_divisible_groups(_group_indices(experiences, indices, "rollout_ids"), divisor)
+            or indices[: len(indices) // divisor * divisor]
+            for media, indices in by_media.items()
+        }
+
     # Put text first so deferred gradient sync includes the vision tower on the
     # last microbatch of a mixed update (including DP=1 with CP>1).
     blocks = [[] for _ in range(effective_num)]
     block_totals = [0] * effective_num
     for media in sorted(by_media):
-        indices = by_media[media]
-        keep = len(indices) // effective_num * effective_num
-        if not keep:
+        kept = selected_by_media[media]
+        if not kept:
             continue
-        partitions = get_seqlen_balanced_partitions(
-            [lengths[i] for i in indices[:keep]], effective_num, equal_size=True
-        )
-        partitions_desc = sorted(partitions, key=lambda part: sum(lengths[indices[i]] for i in part), reverse=True)
+        partitions = get_seqlen_balanced_partitions([lengths[i] for i in kept], effective_num, equal_size=True)
+        partitions_desc = sorted(partitions, key=lambda part: sum(lengths[kept[i]] for i in part), reverse=True)
         block_order = sorted(range(effective_num), key=block_totals.__getitem__)
         for block_idx, partition in zip(block_order, partitions_desc, strict=True):
-            longest_first = sorted((indices[i] for i in partition), key=lengths.__getitem__, reverse=True)
+            longest_first = sorted((kept[i] for i in partition), key=lengths.__getitem__, reverse=True)
             blocks[block_idx].extend(experiences[i] for i in longest_first)
             block_totals[block_idx] += sum(lengths[i] for i in longest_first)
     if not blocks[0]:
-        raise ValueError(f"Cannot give each of {effective_num} DP ranks a sample with the same media inputs.")
+        raise ValueError(f"Cannot give each of {divisor} DP ranks a sample with the same media inputs.")
     dropped = len(experiences) - effective_num * len(blocks[0])
     if dropped:
         logger.warning(
             f"[balance_experiences] dropping {dropped} trailing sample(s) to align media and counts "
-            f"across {effective_num} DP ranks."
+            f"across {divisor} DP ranks."
         )
     return list(itertools.chain.from_iterable(blocks))

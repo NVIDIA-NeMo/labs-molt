@@ -280,6 +280,10 @@ class RayActorGroup:
             refs.append(method.remote(*args, **kwargs))
         return refs
 
+    @property
+    def dp_size(self) -> int:
+        return len(self._actor_handlers) // self.duplicate_actors
+
     def async_run_method_batch(self, method_name, **kwargs):
         """Run method on all actors with batched input data asynchronously using round-robin scheduling.
         Each actor processes one chunk of data at a time. Actors in the same ring / tensor parallel group process the same chunk.
@@ -308,8 +312,7 @@ class RayActorGroup:
                 )
 
         # Calculate chunk size based on number of effective actors (considering ring groups)
-        num_actors = len(self._actor_handlers)
-        effective_actors = num_actors // self.duplicate_actors
+        effective_actors = self.dp_size
         if total_length == 0 or total_length < effective_actors:
             raise ValueError(
                 f"Insufficient batch size for async_run_method_batch: total_length={total_length}, "

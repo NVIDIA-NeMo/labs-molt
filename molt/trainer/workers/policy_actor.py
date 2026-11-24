@@ -265,7 +265,10 @@ class PolicyTrainer:
             self.replay_buffer,
             batch_size=self.replay_buffer.sample_batch_size,
             shuffle=should_shuffle,
-            drop_last=True,
+            # Every DP rank holds identical sample counts and media order from
+            # balance_experiences, so keep any partial trailing microbatch rather
+            # than silently dropping vision samples placed at the tail.
+            drop_last=False,
             pin_memory=self.dataloader_pin_memory,
             collate_fn=self.replay_buffer.collate_fn,
         )
@@ -296,15 +299,24 @@ class PolicyTrainer:
                 # generated. max_epochs is asserted == 1, so this is one step.
                 accum_steps = max(max_steps, 1)
             elif not dynamic:
-                # Only run complete accumulation windows; partial windows leave
-                # gradients live because optimizer_step() has not stepped yet.
-                remainder = max_steps % accum_steps
-                if remainder:
-                    max_steps -= remainder
+                if 0 < max_steps < accum_steps:
+                    # Per-media remainder trimming (or a short epoch tail) can leave fewer
+                    # microbatches than one configured grad-accum window; run one shorter
+                    # optimizer step instead of dropping the whole rollout to 0 steps.
                     self.strategy.print(
-                        f"[PolicyRL] dropping {remainder} trailing actor microbatches "
-                        f"(< grad_accum={accum_steps}) to avoid partial gradients."
+                        f"[PolicyRL] shortening actor grad_accum from {accum_steps} to {max_steps} for trimmed batch."
                     )
+                    accum_steps = max_steps
+                else:
+                    # Only run complete accumulation windows; partial windows leave
+                    # gradients live because optimizer_step() has not stepped yet.
+                    remainder = max_steps % accum_steps
+                    if remainder:
+                        max_steps -= remainder
+                        self.strategy.print(
+                            f"[PolicyRL] dropping {remainder} trailing actor microbatches "
+                            f"(< grad_accum={accum_steps}) to avoid partial gradients."
+                        )
             # slime global token-mean: every microbatch of one optimizer-step
             # batch ("window") shares a single token denominator summed over all
             # its microbatches and all DP ranks. Buffer the window, count its
@@ -342,6 +354,11 @@ class PolicyTrainer:
                     prompt_token_counts = [
                         torch.tensor([counts[key] for key in exp.group_ids], device=device) for exp in window
                     ]
+                # Sync on the window's final microbatch, plus the last microbatch carrying
+                # each media key so independent media encoders still reduce-scatter when
+                # MOLT_DEFER_GRAD_SYNC=1 and a window mixes multiple non-empty modalities.
+                last_media_step = {key: i for i, exp in enumerate(window) for key in exp.media_keys}
+                sync_steps = set(last_media_step.values()) | {len(window) - 1}
                 for idx, exp in enumerate(window):
                     exp.to_device(device)
                     # Full per-sequence lengths drive the FLOP estimate (forward
@@ -358,6 +375,7 @@ class PolicyTrainer:
                         is_optimizer_step,
                         batch_num_seqs,
                         prompt_token_counts[idx],
+                        sync_gradients=(idx in sync_steps),
                     )
                     self._record_status(status, status_list, pbar)
                     if force_on_policy and self.replay_buffer.cpu_offload:
@@ -399,6 +417,7 @@ class PolicyTrainer:
         is_optimizer_step: bool,
         batch_num_seqs: Optional[torch.Tensor] = None,
         prompt_token_counts: Optional[torch.Tensor] = None,
+        sync_gradients: Optional[bool] = None,
     ) -> Dict[str, object]:
         self.actor.train()
 
@@ -588,9 +607,14 @@ class PolicyTrainer:
                 accumulate=not self.args.train.dynamic_batch_enable,
                 scale_loss_by_accumulation=False,
                 num_microbatches=num_microbatches,
-                # Defer the grad reduce-scatter to the optimizer-step microbatch (default);
-                # MOLT_DEFER_GRAD_SYNC=0 syncs every microbatch. See _defer_grad_sync.
-                sync_gradients=(is_optimizer_step if self._defer_grad_sync else True),
+                # Defer the grad reduce-scatter to the optimizer-step microbatch (and the
+                # last microbatch of each independent media key); MOLT_DEFER_GRAD_SYNC=0
+                # syncs every microbatch. See _defer_grad_sync.
+                sync_gradients=(
+                    (is_optimizer_step if sync_gradients is None else sync_gradients)
+                    if self._defer_grad_sync
+                    else True
+                ),
             )
         finally:
             cp_context_stack.close()

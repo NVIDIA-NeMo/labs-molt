@@ -270,6 +270,63 @@ def test_generate_samples_drops_epoch_tail_smaller_than_dp_groups(monkeypatch):
     assert third == [] and exhausted is True
 
 
+def test_generate_samples_drops_mixed_media_epoch_tail_below_dp_divisor(monkeypatch):
+    """A mixed epoch tail whose total >= dp_groups still drops when no media group reaches dp."""
+    generator = object.__new__(SamplesGenerator)
+    generator.args = SimpleNamespace(
+        rollout=SimpleNamespace(batch_size=5, n_samples_per_prompt=1, vllm_generate_batch_size=5),
+        algo=SimpleNamespace(
+            dynamic_filtering_enable=False,
+            kl=SimpleNamespace(init_coef=0.0, ref="model"),
+        ),
+        ckpt=SimpleNamespace(warm_resume_rollouts=False),
+        actor=SimpleNamespace(num_nodes=1, num_gpus_per_node=4),
+        fsdp=SimpleNamespace(cp_size=1, tp_size=1),
+    )
+    generator.prompts_dataloader = _prompt_loader(9)  # 5 full + 4 tail (2 text + 2 vision)
+    vision = ("image_grid_thw", "pixel_values")
+
+    def _mixed_sample(prompt):
+        idx = int(prompt[1:])
+        return SimpleNamespace(
+            group_ids=[prompt],
+            scores=None,
+            media_keys=vision if idx >= 7 else (),
+        )
+
+    _wire_fake_vllm(generator, monkeypatch, _mixed_sample)
+
+    first, *_ = generator.generate_samples()
+    second, _, _, exhausted = generator.generate_samples()
+    assert len(first) == 5
+    # Tail has 2 text + 2 vision = 4 samples (>= dp=4), but neither media group reaches 4.
+    assert second == [] and exhausted is True
+
+    # Also applies when ref_dp > actor_dp raises the alignment divisor (actor_dp=2, ref_dp=4 -> lcm=4):
+    # a 3-text tail (>= actor_dp=2, < lcm=4) must be dropped instead of crashing balance_experiences.
+    generator.args = SimpleNamespace(
+        rollout=SimpleNamespace(batch_size=5, n_samples_per_prompt=1, vllm_generate_batch_size=5),
+        algo=SimpleNamespace(
+            dynamic_filtering_enable=False,
+            kl=SimpleNamespace(init_coef=0.1, ref="model"),
+        ),
+        ckpt=SimpleNamespace(warm_resume_rollouts=False),
+        actor=SimpleNamespace(num_nodes=1, num_gpus_per_node=2),
+        ref=SimpleNamespace(num_nodes=1, num_gpus_per_node=4),
+        fsdp=SimpleNamespace(cp_size=1, tp_size=1),
+    )
+    generator.prompts_dataloader = _prompt_loader(8)  # 5 full + 3 text tail
+    _wire_fake_vllm(
+        generator,
+        monkeypatch,
+        lambda prompt: SimpleNamespace(group_ids=[prompt], scores=None, media_keys=()),
+    )
+    first_ref, *_ = generator.generate_samples()
+    second_ref, _, _, exhausted_ref = generator.generate_samples()
+    assert len(first_ref) == 5
+    assert second_ref == [] and exhausted_ref is True
+
+
 def test_generator_keeps_no_checkpoint_state_and_resumes_from_dataloader(monkeypatch):
     """The in-flight pool is intentionally NOT persisted.
 

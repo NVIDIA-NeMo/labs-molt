@@ -111,10 +111,18 @@ class NaiveReplayBuffer:
             num_steps = 1 if sample_lengths else 0
         else:
             local_train_batch_size = args.train.batch_size // dp_size
-            # Async generation can deliver a short buffer at episode boundaries.
-            # Also, multi-turn agents may flatten to a variable number of samples
-            # per prompt — use the actual buffer size, not the formula.
-            num_steps = len(sample_lengths) // local_train_batch_size
+            # Async generation can deliver a short buffer at episode boundaries, and
+            # per-media DP alignment can trim a single-step rollout below one full batch.
+            # Run one shorter step rather than silently dropping the entire batch to 0 steps.
+            if 0 < len(sample_lengths) < local_train_batch_size:
+                strategy.print(
+                    f"[ReplayBuffer] shortening train batch per rank from {local_train_batch_size} "
+                    f"to {len(sample_lengths)} for trimmed buffer."
+                )
+                local_train_batch_size = len(sample_lengths)
+                num_steps = 1
+            else:
+                num_steps = len(sample_lengths) // local_train_batch_size
             # balance_experiences only equalizes the per-rank count to a multiple
             # of dp_size, not of local_train_batch_size, so a remainder here is
             # dropped from this update. Surface it instead of dropping silently.
