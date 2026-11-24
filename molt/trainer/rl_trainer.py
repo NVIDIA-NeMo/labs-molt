@@ -20,7 +20,8 @@ import os
 import statistics
 import time
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
+from uuid import uuid4
 
 import ray
 import torch
@@ -585,6 +586,62 @@ class BaseRLTrainer:
         }
 
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _fingerprint_path(raw: str) -> str:
+    """Content-fingerprint a local file or directory so identical staged copies match."""
+    path = Path(raw)
+    if path.is_file():
+        return _sha256_file(path)
+    if path.is_dir():
+        digest = hashlib.sha256()
+        files = sorted(
+            p for p in path.rglob("*") if p.is_file() and "__pycache__" not in p.parts and p.suffix != ".pyc"
+        )
+        for file_path in files:
+            rel = file_path.relative_to(path).as_posix().encode("utf-8")
+            size = file_path.stat().st_size
+            digest.update(rel + b"\0" + str(size).encode("ascii") + b"\0")
+            with open(file_path, "rb") as stream:
+                if size <= (1 << 20):
+                    digest.update(stream.read())
+                else:
+                    digest.update(stream.read(65536))
+                    stream.seek(-65536, os.SEEK_END)
+                    digest.update(stream.read(65536))
+        return f"dir:{digest.hexdigest()}"
+    return raw
+
+
+def _legacy_checkpoint_run_id(ckpt_path: Optional[str], global_step: int) -> str:
+    """Derive a stable run_id for legacy checkpoints saved without ``warm_run_id``."""
+    if ckpt_path:
+        actor_root = Path(ckpt_path.rstrip("/")) / "_actor"
+        candidates = []
+        latest = actor_root / "latest"
+        if latest.is_file():
+            try:
+                tag = latest.read_text().strip()
+                if tag:
+                    candidates.append(actor_root / tag / "extra_state.pt")
+            except OSError:
+                pass
+        candidates.append(actor_root / f"global_step{global_step}" / "extra_state.pt")
+        for extra_pt in candidates:
+            if extra_pt.is_file():
+                try:
+                    return f"legacy-{_sha256_file(extra_pt)[:16]}"
+                except OSError:
+                    pass
+    return f"legacy-step-{global_step}"
+
+
 @ray.remote(num_cpus=0)
 class VLLMLock:
     """Cross-actor mutex for vLLM critical sections."""
@@ -667,31 +724,59 @@ class GenerateSamplesActor:
         self.samples_generator.load_state_dict(rollout_generator_state_dict)
 
     def _build_rollout_recipe(self) -> dict:
-        data = vars(self.args.data).copy()
+        data = {k: v for k, v in vars(self.args.data).items() if k != "dataloader_num_workers"}
+        train = self.args.train
+        algo = self.args.algo
+        adv = getattr(algo, "advantage", None)
+        kl = getattr(algo, "kl", None)
+        want_logprobs = (
+            getattr(adv, "is_correction_level", "off") != "off"
+            or bool(getattr(adv, "score_centering_top_k", 0))
+            or (getattr(kl, "init_coef", 0) > 0 and getattr(kl, "ref", None) == "rollout")
+        )
         recipe = {
             "model": self.args.actor.model_name_or_path,
-            "agent": self.args.train.agent_path,
-            "seed": self.args.train.seed,
+            "agent": train.agent_path,
+            "seed": train.seed,
+            "train": {
+                "partial_rollout_enable": bool(getattr(train, "partial_rollout_enable", False)),
+                "force_sync_mode": bool(getattr(train, "force_sync_mode", False)),
+                "routing_replay": bool(getattr(train, "routing_replay", False)),
+                "full_determinism_enable": bool(getattr(train, "full_determinism_enable", False)),
+            },
+            "logprobs_mode": "processed_logprobs" if want_logprobs else None,
+            "max_logprobs": int(getattr(adv, "score_centering_top_k", 0) or 0),
             "data": data,
             "rollout": {
                 k: v
                 for k, v in vars(self.args.rollout).items()
                 if k not in {"num_runners", "vllm_generate_batch_size"}
             },
-            "vllm": {k: v for k, v in vars(self.args.vllm).items() if k not in {"num_engines", "router_policy"}},
+            "vllm": {
+                k: v
+                for k, v in vars(self.args.vllm).items()
+                if k not in {"num_engines", "router_policy", "router_balance_abs", "router_balance_rel"}
+            },
             "reward": vars(self.args.reward),
-            "filter": (self.args.algo.dynamic_filtering_enable, self.args.algo.dynamic_filtering_range),
+            "filter": (algo.dynamic_filtering_enable, algo.dynamic_filtering_range),
             "sampling": self.generate_kwargs,
         }
         # Launchers can stage identical inputs in distinct run directories.
-        for section, key in ((data, "prompt_dataset"), (recipe, "agent")):
-            path = section.get(key)
-            if path and Path(path).is_file():
-                with open(path, "rb") as stream:
-                    section[key] = hashlib.file_digest(stream, "sha256").hexdigest()
+        if data.get("prompt_dataset"):
+            data["prompt_dataset"] = ",".join(
+                _fingerprint_path(part.strip()) for part in str(data["prompt_dataset"]).split(",")
+            )
+        if recipe.get("agent"):
+            recipe["agent"] = _fingerprint_path(str(recipe["agent"]))
         return recipe
 
-    def fit(self, episode: int, total_consumed_prompts: int) -> None:
+    def fit(
+        self,
+        episode: int,
+        total_consumed_prompts: int,
+        global_step: Optional[int] = None,
+        warm_run_id: Optional[str] = None,
+    ) -> None:
         eval_steps = self.args.eval.steps
         # eval_at_start must fire only on a genuinely FRESH run. The
         # GenerateSamplesActor transiently reads global_step 0 at startup even on
@@ -699,7 +784,8 @@ class GenerateSamplesActor:
         # so gating on global_step alone would also eval@0 on resume. The
         # consumed-prompt counter is 0 only on a fresh start (>0 once a checkpoint
         # is loaded), so it's the reliable fresh-run signal.
-        fresh_start = total_consumed_prompts == 0
+        start_global_step = global_step
+        fresh_start = total_consumed_prompts == 0 and not start_global_step
         ckpt_args = getattr(self.args, "ckpt", None)
         warm_enabled = (
             bool(getattr(ckpt_args, "warm_resume_rollouts", False))
@@ -708,6 +794,13 @@ class GenerateSamplesActor:
         )
         warm_recipe = self._build_rollout_recipe() if warm_enabled else None
         warm_restore_attempted = fresh_start
+        produced_batches = 0
+        seen_warm_cursors: set[tuple[int, int]] = set()
+        max_policy_lag = (
+            0
+            if getattr(self.args.train, "force_sync_mode", False)
+            else int(getattr(self.args.train, "async_queue_size", 1))
+        )
         # On resume, _next_eval_step was re-init to eval_steps (< the restored
         # global_step), so the catch-up `global_step >= _next_eval_step` would fire
         # one off-cadence eval at the resumed step every resubmit. Sync the threshold
@@ -735,23 +828,23 @@ class GenerateSamplesActor:
                 # slot (training slower than generation). This is the true vLLM-idle signal,
                 # which the wall-clock generation_time alone cannot show.
                 _slot_wait_t0 = time.time()
-                global_step = self.rollout_slots.get(block=True)
+                slot_step = self.rollout_slots.get(block=True)
                 vllm_idle_wait = time.time() - _slot_wait_t0
 
                 # Resume sync (once): advance the eval threshold to the next eval_steps
                 # multiple after the restored step, so a resubmit doesn't trigger an
                 # off-cadence eval at the resumed global_step.
-                if not eval_synced and global_step > 0 and eval_steps > 0 and eval_steps != float("inf"):
-                    self._next_eval_step = (global_step // eval_steps + 1) * eval_steps
+                if not eval_synced and slot_step > 0 and eval_steps > 0 and eval_steps != float("inf"):
+                    self._next_eval_step = (slot_step // eval_steps + 1) * eval_steps
                     eval_synced = True
 
                 should_eval = (
                     self.eval_dataloader is not None
                     and eval_steps != float("inf")
-                    and global_step != self._last_eval_step
+                    and slot_step != self._last_eval_step
                     and (
-                        global_step >= self._next_eval_step
-                        if global_step > 0
+                        slot_step >= self._next_eval_step
+                        if slot_step > 0
                         # step-0 baseline (fresh run only): measure the pre-RL model
                         # so later gains are attributable. After it fires, the normal
                         # cadence resumes (_next_eval_step advances to eval_steps).
@@ -759,9 +852,9 @@ class GenerateSamplesActor:
                     )
                 )
                 if should_eval:
-                    self._last_eval_step = global_step
-                    self._next_eval_step = (global_step // eval_steps + 1) * eval_steps
-                    logger.info(f"Starting async evaluation at step {global_step}...")
+                    self._last_eval_step = slot_step
+                    self._next_eval_step = (slot_step // eval_steps + 1) * eval_steps
+                    logger.info(f"Starting async evaluation at step {slot_step}...")
                     # Under partial rollout the rollout path (below) deliberately
                     # skips vllm_lock so the trainer's broadcast_to_vllm refit can
                     # interleave via pause/resume. Eval must follow the same
@@ -776,10 +869,12 @@ class GenerateSamplesActor:
                         if not self._partial_rollout:
                             ray.get(self.vllm_lock.release.remote())
                     logger.info(f"Async evaluation completed: {eval_metrics}")
-                    self.rollout_queue.put(("eval", global_step, eval_metrics), block=True)
+                    self.rollout_queue.put(("eval", slot_step, eval_metrics), block=True)
                     continue
 
                 batch_start_consumed = total_consumed_prompts
+                batch_step = (start_global_step + produced_batches) if start_global_step is not None else None
+                policy_step = max(slot_step, start_global_step) if start_global_step is not None else slot_step
                 warm_writer = None
                 if warm_enabled and not warm_restore_attempted:
                     warm_restore_attempted = True
@@ -788,11 +883,16 @@ class GenerateSamplesActor:
                         episode=ep,
                         consumed_prompts=batch_start_consumed,
                         recipe=warm_recipe,
+                        global_step=batch_step,
+                        run_id=warm_run_id,
+                        max_policy_lag=max_policy_lag,
                     )
                     if warm_hit is not None:
                         if warm_hit["complete"]:
                             samples = warm_hit["samples"]
-                            client_states = warm_hit["client_states"]
+                            client_states = dict(warm_hit["client_states"])
+                            if warm_run_id is not None:
+                                client_states["warm_run_id"] = warm_run_id
                             next_cursor = client_states["total_consumed_prompts"]
                             next_ep = client_states.get("episode", ep)
                             if hasattr(self.samples_generator, "seed_resumed_samples"):
@@ -808,6 +908,8 @@ class GenerateSamplesActor:
                                     self.prompts_dataloader.next_iter_state = None
                             elif dl_state:
                                 self.prompts_dataloader.load_state_dict(dl_state)
+                            if next_ep == ep and client_states.get("rollout_generator_state_dict"):
+                                self.samples_generator.load_state_dict(client_states["rollout_generator_state_dict"])
                             if next_cursor > total_consumed_prompts:
                                 pbar.update(next_cursor - total_consumed_prompts)
                             total_consumed_prompts = next_cursor
@@ -817,6 +919,7 @@ class GenerateSamplesActor:
                                 f"[warm_resume] loaded complete batch ({len(samples)} samples, "
                                 f"cursor {batch_start_consumed} -> {total_consumed_prompts}) from {warm_hit['dir']}"
                             )
+                            produced_batches += 1
                             self.rollout_queue.put(
                                 (samples, client_states, warm_hit["metrics"], 0.0, vllm_idle_wait),
                                 block=True,
@@ -824,36 +927,48 @@ class GenerateSamplesActor:
                             if next_ep > ep:
                                 break
                             continue
-                        dispatched = int(warm_hit.get("prompts_dispatched", 0))
-                        dl_state = warm_hit.get("data_loader_state_dict") or {}
-                        if dl_state:
-                            self.prompts_dataloader.load_state_dict(dl_state)
-                        if dispatched > 0:
-                            pbar.update(dispatched)
-                            total_consumed_prompts += dispatched
+                        completed_offsets = list(warm_hit.get("completed_offsets") or [])
+                        # Keep prompts_dataloader at the exact checkpoint cursor and skip only
+                        # the specific prompt offsets already persisted, so unfinished inflight
+                        # prompts from the killed run are regenerated rather than skipped.
                         if hasattr(self.samples_generator, "seed_resumed_samples"):
-                            self.samples_generator.seed_resumed_samples(warm_hit["samples"])
+                            self.samples_generator.seed_resumed_samples(
+                                warm_hit["samples"],
+                                skip_prompt_offsets=completed_offsets,
+                            )
                         else:
                             self.samples_generator._resumed_samples = list(warm_hit["samples"])
+                        prior_policy_step = warm_hit.get("source_policy_step")
+                        writer_policy_step = (
+                            min(prior_policy_step, policy_step)
+                            if isinstance(prior_policy_step, int) and not isinstance(prior_policy_step, bool)
+                            else policy_step
+                        )
                         warm_writer = WarmRolloutWriter(
                             ckpt_args.path,
                             source_episode=ep,
                             source_consumed_prompts=batch_start_consumed,
                             recipe=warm_recipe,
+                            source_global_step=batch_step,
+                            source_policy_step=writer_policy_step,
+                            run_id=warm_run_id,
                             existing_dir=warm_hit["dir"],
                             existing_group_files=warm_hit["group_files"],
-                            prior_dispatched=dispatched,
+                            prior_completed_offsets=completed_offsets,
                         )
+                        if batch_step is None:
+                            seen_warm_cursors.add((ep, batch_start_consumed))
                         logger.info(
                             f"[warm_resume] restored partial batch ({warm_hit['group_count']}/"
-                            f"{self.args.rollout.batch_size} groups, +{dispatched} prompts) from {warm_hit['dir']}"
+                            f"{self.args.rollout.batch_size} groups, {len(completed_offsets)} completed offsets) "
+                            f"from {warm_hit['dir']}"
                         )
 
                 if self.args.train.rollout_replay_dir:
                     # Debug: replay dumped rollout batches (train-only) to iterate on the
                     # training/refit path without regenerating. When the dumps run out, report
                     # exhaustion so the normal end-of-data path (below) stops the run cleanly.
-                    replay_path = os.path.join(self.args.train.rollout_replay_dir, f"rollout_step{global_step}.pt")
+                    replay_path = os.path.join(self.args.train.rollout_replay_dir, f"rollout_step{slot_step}.pt")
                     rollout_metrics, prompts_consumed, generation_time = {}, 0, 0.0
                     is_exhausted = not os.path.exists(replay_path)
                     rollout_samples = None if is_exhausted else torch.load(replay_path, weights_only=False)
@@ -863,13 +978,30 @@ class GenerateSamplesActor:
                         else f"[rollout_replay] loaded {len(rollout_samples)} samples from {replay_path}"
                     )
                 else:
-                    if warm_enabled and warm_writer is None:
+                    # Do not snapshot post-drain inflight flushes: the batch that drained the
+                    # dataloader already pointed checkpoints at episode+1, so flushing batches
+                    # at the spent cursor can never be resumed and would only collide/evict.
+                    flushing_drained_epoch = (
+                        not getattr(self.samples_generator, "_round_exhausted", True)
+                        and self.samples_generator.prompts_drained
+                    )
+                    if (
+                        warm_enabled
+                        and warm_writer is None
+                        and not flushing_drained_epoch
+                        and (batch_step is not None or (ep, batch_start_consumed) not in seen_warm_cursors)
+                    ):
                         warm_writer = WarmRolloutWriter(
                             ckpt_args.path,
                             source_episode=ep,
                             source_consumed_prompts=batch_start_consumed,
                             recipe=warm_recipe,
+                            source_global_step=batch_step,
+                            source_policy_step=policy_step,
+                            run_id=warm_run_id,
                         )
+                        if batch_step is None:
+                            seen_warm_cursors.add((ep, batch_start_consumed))
                     if warm_writer is not None:
                         self.samples_generator._warm_writer = warm_writer
                     if not self._partial_rollout:
@@ -888,7 +1020,7 @@ class GenerateSamplesActor:
                             ray.get(self.vllm_lock.release.remote())
                     if self.args.train.rollout_dump_dir and rollout_samples:
                         os.makedirs(self.args.train.rollout_dump_dir, exist_ok=True)
-                        dump_path = os.path.join(self.args.train.rollout_dump_dir, f"rollout_step{global_step}.pt")
+                        dump_path = os.path.join(self.args.train.rollout_dump_dir, f"rollout_step{slot_step}.pt")
                         # The samples are lazy Experiences whose tensors live in the runners' object
                         # stores (heavy_ref); those handles die with this job, so materialize local
                         # copies first — the dump must replay in another job (and offline).
@@ -905,12 +1037,15 @@ class GenerateSamplesActor:
                         "data_loader_state_dict": {} if drained else self.prompts_dataloader.state_dict(),
                         "rollout_generator_state_dict": self.samples_generator.state_dict(),
                     }
+                    if warm_run_id is not None:
+                        client_states["warm_run_id"] = warm_run_id
                     if warm_writer is not None:
                         warm_writer.finalize(
                             client_states=client_states,
                             metrics=rollout_metrics,
                             fallback_samples=rollout_samples,
                         )
+                    produced_batches += 1
                     self.rollout_queue.put(
                         (rollout_samples, client_states, rollout_metrics, generation_time, vllm_idle_wait),
                         block=True,
@@ -918,8 +1053,10 @@ class GenerateSamplesActor:
                     if prompts_consumed:
                         pbar.update(prompts_consumed)
                 else:
+                    if warm_writer is not None:
+                        warm_writer.discard()
                     # Nothing enqueued => trainer will never consume this slot.
-                    self.rollout_slots.put(global_step, block=True)
+                    self.rollout_slots.put(slot_step, block=True)
 
                 if is_exhausted:
                     break
@@ -1087,6 +1224,7 @@ class RLTrainer:
         router_url: str = None,
         **generate_kwargs,
     ) -> None:
+        self.args = strategy.args
         if strategy.args.eval.steps == -1:
             strategy.args.eval.steps = float("inf")
         if strategy.args.ckpt.save_steps == -1:
@@ -1142,7 +1280,9 @@ class RLTrainer:
         start_episode = checkpoint_states.get("episode", 0)
         global_step = checkpoint_states.get("global_step", 0)
         total_consumed_prompts = checkpoint_states.get("total_consumed_prompts", 0)
+        ckpt_path = getattr(getattr(self.args, "ckpt", None), "path", None)
         if global_step > 0:
+            warm_run_id = checkpoint_states.get("warm_run_id") or _legacy_checkpoint_run_id(ckpt_path, global_step)
             ray.get(
                 [
                     self.generator_actor.load_dataloader_state_dict.remote(
@@ -1152,10 +1292,17 @@ class RLTrainer:
                     self.trainer_actor.broadcast_to_vllm.remote(),
                 ]
             )
+        else:
+            warm_run_id = uuid4().hex
 
         ray.get(
             [
-                self.generator_actor.fit.remote(episode=start_episode, total_consumed_prompts=total_consumed_prompts),
+                self.generator_actor.fit.remote(
+                    episode=start_episode,
+                    total_consumed_prompts=total_consumed_prompts,
+                    global_step=global_step,
+                    warm_run_id=warm_run_id,
+                ),
                 self.trainer_actor.fit.remote(global_step=global_step),
             ]
         )
