@@ -44,6 +44,7 @@ jobs:
     # PyPI Trusted Publishing (OIDC): the id-token permission replaces any API token,
     # and one publish job avoids the parallel first-upload race on a new project.
     name: upload to PyPI
+    environment: pypi
     needs: build
     runs-on: ubuntu-24.04
     permissions:
@@ -55,4 +56,4 @@ jobs:
         name: wheel
         path: dist
 
-    - uses: pypa/gh-action-pypi-publish@release/v1
+    - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
