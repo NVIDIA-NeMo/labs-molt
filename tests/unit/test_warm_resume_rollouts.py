@@ -59,7 +59,6 @@ def _make_generator_actor(
     ckpt_name: str = "checkpoints",
     dataset_path: Path | None = None,
     wait_fn=None,
-    slot_step_fn=None,
     monkeypatch,
 ):
     if dataset_path is None:
@@ -138,17 +137,7 @@ def _make_generator_actor(
     actor.vllm_lock = SimpleNamespace(acquire=SimpleNamespace(remote=Mock()), release=SimpleNamespace(remote=Mock()))
     payloads = []
     actor.rollout_queue = SimpleNamespace(put=lambda item, *, block: payloads.append(item))
-
-    slot_counter = {"n": 0}
-
-    def _default_slot_step(*, block):
-        idx = slot_counter["n"]
-        slot_counter["n"] += 1
-        if slot_step_fn is not None:
-            return slot_step_fn(idx)
-        return idx if force_sync_mode else max(0, idx - 1)
-
-    actor.rollout_slots = SimpleNamespace(get=_default_slot_step, put=lambda *_a, **_kw: None)
+    actor.rollout_slots = SimpleNamespace(get=lambda *, block: 0, put=lambda *_a, **_kw: None)
     actor._dispatched_prompts = dispatched_prompts
     return actor, payloads
 
@@ -158,7 +147,7 @@ def test_full_batch_warm_resume_under_partial_rollout(tmp_path, monkeypatch):
     actor1, payloads1 = _make_generator_actor(
         tmp_path, dataset_len=8, batch_size=2, inflight_capacity=3, monkeypatch=monkeypatch
     )
-    actor1.fit(episode=0, total_consumed_prompts=0, global_step=0, warm_run_id="run-1")
+    actor1.fit(episode=0, total_consumed_prompts=0, start_step=0, warm_run_id="run-1")
 
     # Batches produced: step 1 (0,1), step 2 (2,3), step 3 (4,5), step 4 (6,7), then "done".
     assert payloads1[-1] == "done"
@@ -185,7 +174,7 @@ def test_full_batch_warm_resume_under_partial_rollout(tmp_path, monkeypatch):
     actor2.fit(
         episode=step1_cs["episode"],
         total_consumed_prompts=step1_cs["total_consumed_prompts"],
-        global_step=1,
+        start_step=1,
         warm_run_id="run-1",
     )
 
@@ -227,7 +216,7 @@ def test_partial_mid_batch_warm_resume_after_walltime_kill(tmp_path, monkeypatch
 
     monkeypatch.setattr(WarmRolloutWriter, "append_group", crash_after_two)
     with pytest.raises(RuntimeError, match="simulated walltime SIGKILL"):
-        actor1.fit(episode=0, total_consumed_prompts=2, global_step=1, warm_run_id="run-1")
+        actor1.fit(episode=0, total_consumed_prompts=2, start_step=1, warm_run_id="run-1")
 
     # Restore normal append_group and resume from step-1 checkpoint (cursor=2).
     monkeypatch.setattr(WarmRolloutWriter, "append_group", orig_append)
@@ -235,7 +224,7 @@ def test_partial_mid_batch_warm_resume_after_walltime_kill(tmp_path, monkeypatch
         tmp_path, dataset_len=10, batch_size=4, inflight_capacity=4, monkeypatch=monkeypatch
     )
     actor2.prompts_dataloader.load_state_dict(saved_dl)
-    actor2.fit(episode=0, total_consumed_prompts=2, global_step=1, warm_run_id="run-1")
+    actor2.fit(episode=0, total_consumed_prompts=2, start_step=1, warm_run_id="run-1")
 
     # Batch 2 must contain restored (2, 3) + regenerated unfinished (4, 5) — NEVER skipping 4, 5, 6!
     first_batch_ids = [s.sequences.item() for s in payloads2[0][0]]
@@ -252,7 +241,6 @@ def test_partial_mid_batch_warm_resume_after_walltime_kill(tmp_path, monkeypatch
         consumed_prompts=2,
         global_step=1,
         run_id="run-1",
-        max_policy_lag=1,
         recipe=actor2._build_rollout_recipe(),
     )
     assert hit is not None and hit["complete"] is True
@@ -296,7 +284,7 @@ def test_partial_resume_out_of_order_completion_does_not_skip_or_duplicate(tmp_p
 
     monkeypatch.setattr(WarmRolloutWriter, "append_group", crash_after_two)
     with pytest.raises(RuntimeError, match="walltime SIGKILL"):
-        actor1.fit(episode=0, total_consumed_prompts=2, global_step=1, warm_run_id="run-ooo")
+        actor1.fit(episode=0, total_consumed_prompts=2, start_step=1, warm_run_id="run-ooo")
 
     # Resume with normal FIFO completion: must restore [5, 3], regenerate ONLY [2, 4],
     # advance cursor past already-completed trailing offset (prompt 5) to 6, then emit [6, 7, 8, 9].
@@ -310,7 +298,7 @@ def test_partial_resume_out_of_order_completion_does_not_skip_or_duplicate(tmp_p
         monkeypatch=monkeypatch,
     )
     actor2.prompts_dataloader.load_state_dict(saved_dl)
-    actor2.fit(episode=0, total_consumed_prompts=2, global_step=1, warm_run_id="run-ooo")
+    actor2.fit(episode=0, total_consumed_prompts=2, start_step=1, warm_run_id="run-ooo")
 
     batches = [[s.sequences.item() for s in item[0]] for item in payloads2[:-1]]
     assert batches == [[5, 3, 2, 4], [6, 7, 8, 9]]
@@ -354,7 +342,7 @@ def test_partial_resume_survives_two_consecutive_restarts(tmp_path, monkeypatch)
 
     monkeypatch.setattr(WarmRolloutWriter, "append_group", kill_1)
     with pytest.raises(RuntimeError, match="kill #1"):
-        actor1.fit(episode=0, total_consumed_prompts=2, global_step=1, warm_run_id="run-2x")
+        actor1.fit(episode=0, total_consumed_prompts=2, start_step=1, warm_run_id="run-2x")
 
     # Run 2: restores [5, 4] (offsets [2, 3]); dispatches [2, 3]; highest-first completes 3 (offset 1) -> KILL #2.
     actor2, _ = _make_generator_actor(
@@ -377,7 +365,7 @@ def test_partial_resume_survives_two_consecutive_restarts(tmp_path, monkeypatch)
 
     monkeypatch.setattr(WarmRolloutWriter, "append_group", kill_2)
     with pytest.raises(RuntimeError, match="kill #2"):
-        actor2.fit(episode=0, total_consumed_prompts=2, global_step=1, warm_run_id="run-2x")
+        actor2.fit(episode=0, total_consumed_prompts=2, start_step=1, warm_run_id="run-2x")
     assert actor2._dispatched_prompts == [2, 3]
 
     # Run 3: restores [5, 4, 3] (offsets [1, 2, 3]); dispatches ONLY [2], advances cursor to 6, then [6, 7, 8, 9].
@@ -391,7 +379,7 @@ def test_partial_resume_survives_two_consecutive_restarts(tmp_path, monkeypatch)
         monkeypatch=monkeypatch,
     )
     actor3.prompts_dataloader.load_state_dict(saved_dl)
-    actor3.fit(episode=0, total_consumed_prompts=2, global_step=1, warm_run_id="run-2x")
+    actor3.fit(episode=0, total_consumed_prompts=2, start_step=1, warm_run_id="run-2x")
 
     batches = [[s.sequences.item() for s in item[0]] for item in payloads3[:-1]]
     assert batches == [[5, 4, 3, 2], [6, 7, 8, 9]]
@@ -404,7 +392,7 @@ def test_complete_warm_resume_at_episode_boundary_starts_next_episode_from_zero(
     actor1, payloads1 = _make_generator_actor(
         tmp_path, dataset_len=4, batch_size=2, inflight_capacity=2, num_episodes=1, monkeypatch=monkeypatch
     )
-    actor1.fit(episode=0, total_consumed_prompts=0, global_step=0, warm_run_id="run-ep")
+    actor1.fit(episode=0, total_consumed_prompts=0, start_step=0, warm_run_id="run-ep")
     step1_cs = payloads1[0][1]
     # Under partial_rollout with inflight_capacity=2: iter1 dispatches 0,1 & finishes 0; iter2 refills 2 & finishes 1.
     assert step1_cs["episode"] == 0 and step1_cs["total_consumed_prompts"] == 3
@@ -419,7 +407,7 @@ def test_complete_warm_resume_at_episode_boundary_starts_next_episode_from_zero(
     actor2.fit(
         episode=0,
         total_consumed_prompts=step1_cs["total_consumed_prompts"],
-        global_step=1,
+        start_step=1,
         warm_run_id="run-ep",
     )
 
@@ -441,7 +429,7 @@ def test_epoch_tail_and_same_cursor_snapshots_never_clobber_or_evict(tmp_path, m
         ckpt_name="ckpt_drain",
         monkeypatch=monkeypatch,
     )
-    actor_drain.fit(episode=0, total_consumed_prompts=0, global_step=0, warm_run_id="run-drain")
+    actor_drain.fit(episode=0, total_consumed_prompts=0, start_step=0, warm_run_id="run-drain")
     assert len(payloads_drain) == 4  # 3 batches + "done"
     drain_dirs = sorted(p.name for p in _warm_root(actor_drain.args.ckpt.path).iterdir() if p.is_dir())
     assert drain_dirs == ["step_ep0_cursor0_step0"]
@@ -464,7 +452,7 @@ def test_epoch_tail_and_same_cursor_snapshots_never_clobber_or_evict(tmp_path, m
         ckpt_name="ckpt_probe",
         monkeypatch=monkeypatch,
     )
-    actor_probe.fit(episode=0, total_consumed_prompts=0, global_step=0, warm_run_id="run-probe")
+    actor_probe.fit(episode=0, total_consumed_prompts=0, start_step=0, warm_run_id="run-probe")
     assert len(payloads_probe) == 3  # 2 batches + "done"
     probe_dirs = sorted(p.name for p in _warm_root(actor_probe.args.ckpt.path).iterdir() if p.is_dir())
     assert probe_dirs == ["step_ep0_cursor0_step0", "step_ep0_cursor2_step1"]
@@ -481,7 +469,7 @@ def test_epoch_tail_and_same_cursor_snapshots_never_clobber_or_evict(tmp_path, m
         ckpt_name="ckpt_drop",
         monkeypatch=monkeypatch,
     )
-    actor_drop.fit(episode=0, total_consumed_prompts=0, global_step=0, warm_run_id="run-drop")
+    actor_drop.fit(episode=0, total_consumed_prompts=0, start_step=0, warm_run_id="run-drop")
     assert len(payloads_drop) == 2  # batch [0..3] + "done" (1-sample tail dropped since < dp=2)
     drop_dirs = sorted(p.name for p in _warm_root(actor_drop.args.ckpt.path).iterdir() if p.is_dir())
     assert drop_dirs == ["step_ep0_cursor0_step0"]
@@ -518,7 +506,7 @@ def test_epoch_tail_and_same_cursor_snapshots_never_clobber_or_evict(tmp_path, m
 
     monkeypatch.setattr(WarmRolloutWriter, "append_group", kill_after_one)
     with pytest.raises(RuntimeError, match="tail kill"):
-        actor_tail1.fit(episode=0, total_consumed_prompts=2, global_step=1, warm_run_id="run-tail")
+        actor_tail1.fit(episode=0, total_consumed_prompts=2, start_step=1, warm_run_id="run-tail")
 
     monkeypatch.setattr(WarmRolloutWriter, "append_group", orig_append)
     actor_tail2, payloads_tail2 = _make_generator_actor(
@@ -531,7 +519,7 @@ def test_epoch_tail_and_same_cursor_snapshots_never_clobber_or_evict(tmp_path, m
         monkeypatch=monkeypatch,
     )
     actor_tail2.prompts_dataloader.load_state_dict(saved_dl)
-    actor_tail2.fit(episode=0, total_consumed_prompts=2, global_step=1, warm_run_id="run-tail")
+    actor_tail2.fit(episode=0, total_consumed_prompts=2, start_step=1, warm_run_id="run-tail")
     assert [s.sequences.item() for s in payloads_tail2[0][0]] == [4, 2, 3]
     assert payloads_tail2[0][1]["episode"] == 1
     assert actor_tail2._dispatched_prompts == [2, 3]
@@ -571,7 +559,7 @@ def test_legacy_buffer_groups_are_persisted_and_survive_double_interrupt(tmp_pat
 
     monkeypatch.setattr(WarmRolloutWriter, "append_group", kill_after_legacy_plus_one)
     with pytest.raises(RuntimeError, match="legacy mid-batch kill"):
-        actor1.fit(episode=0, total_consumed_prompts=2, global_step=1, warm_run_id="legacy-step-1")
+        actor1.fit(episode=0, total_consumed_prompts=2, start_step=1, warm_run_id="legacy-step-1")
 
     # Partial manifest on disk must already contain BOTH legacy [90] and generated [2] (offset 0).
     partial_hit = load_warm_rollout(
@@ -580,7 +568,6 @@ def test_legacy_buffer_groups_are_persisted_and_survive_double_interrupt(tmp_pat
         consumed_prompts=2,
         global_step=1,
         run_id="legacy-step-1",
-        max_policy_lag=1,
         recipe=actor1._build_rollout_recipe(),
     )
     assert partial_hit is not None and partial_hit["complete"] is False
@@ -599,7 +586,7 @@ def test_legacy_buffer_groups_are_persisted_and_survive_double_interrupt(tmp_pat
         monkeypatch=monkeypatch,
     )
     actor2.load_dataloader_state_dict(saved_dl, legacy_rg_state)
-    actor2.fit(episode=0, total_consumed_prompts=2, global_step=1, warm_run_id="legacy-step-1")
+    actor2.fit(episode=0, total_consumed_prompts=2, start_step=1, warm_run_id="legacy-step-1")
 
     assert [s.sequences.item() for s in payloads2[0][0]] == [90, 2, 3]
     assert actor2._dispatched_prompts[:1] == [3]  # prompt 2 was skipped; prompt 3 completed the batch
@@ -611,7 +598,6 @@ def test_legacy_buffer_groups_are_persisted_and_survive_double_interrupt(tmp_pat
         consumed_prompts=2,
         global_step=1,
         run_id="legacy-step-1",
-        max_policy_lag=1,
         recipe=actor2._build_rollout_recipe(),
     )
     assert full_hit is not None and full_hit["complete"] is True
@@ -630,7 +616,6 @@ def test_sibling_checkpoints_under_same_parent_are_isolated(tmp_path, monkeypatc
         source_episode=0,
         source_consumed_prompts=10,
         source_global_step=1,
-        source_policy_step=1,
         run_id="run-a",
         recipe=recipe,
         keep_batches=2,
@@ -653,7 +638,6 @@ def test_sibling_checkpoints_under_same_parent_are_isolated(tmp_path, monkeypatc
             source_episode=0,
             source_consumed_prompts=10 + step * 2,
             source_global_step=step + 1,
-            source_policy_step=step + 1,
             run_id="run-b",
             recipe=recipe,
             keep_batches=2,
@@ -673,16 +657,11 @@ def test_sibling_checkpoints_under_same_parent_are_isolated(tmp_path, monkeypatc
     assert not (tmp_path / "rollout_warm").exists()
 
     # Run A's warm snapshot and legacy buffer remain completely intact, and Run B cannot read Run A.
-    hit_a = load_warm_rollout(
-        ckpt_a, episode=0, consumed_prompts=10, global_step=1, run_id="run-a", max_policy_lag=1, recipe=recipe
-    )
+    hit_a = load_warm_rollout(ckpt_a, episode=0, consumed_prompts=10, global_step=1, run_id="run-a", recipe=recipe)
     assert hit_a is not None and [s.sequences.item() for s in hit_a["samples"]] == [1]
     assert Path(sd_a["buffer_file"]).is_file()
     assert (
-        load_warm_rollout(
-            ckpt_b, episode=0, consumed_prompts=10, global_step=1, run_id="run-a", max_policy_lag=1, recipe=recipe
-        )
-        is None
+        load_warm_rollout(ckpt_b, episode=0, consumed_prompts=10, global_step=1, run_id="run-a", recipe=recipe) is None
     )
 
 
@@ -704,14 +683,13 @@ def test_warm_resume_checks_recipe_policy_and_checkpoint_identity(tmp_path, monk
         dataset_path=ds_dir_a,
         monkeypatch=monkeypatch,
     )
-    actor1.fit(episode=0, total_consumed_prompts=0, global_step=0, warm_run_id="run-1")
+    actor1.fit(episode=0, total_consumed_prompts=0, start_step=0, warm_run_id="run-1")
     step1_cs = payloads1[0][1]
     base_kwargs = dict(
         episode=0,
         consumed_prompts=step1_cs["total_consumed_prompts"],
         global_step=1,
         run_id="run-1",
-        max_policy_lag=1,
     )
 
     # Identical staged dataset directory in a different path still hits!
@@ -757,11 +735,10 @@ def test_warm_resume_checks_recipe_policy_and_checkpoint_identity(tmp_path, monk
             is None
         )
 
-    # Policy/checkpoint identity mismatches (run_id, global_step, strict policy lag=0 vs async policy_step=0).
+    # Policy/checkpoint identity mismatches (run_id, global_step).
     recipe = actor1._build_rollout_recipe()
     assert load_warm_rollout(actor1.args.ckpt.path, recipe=recipe, **{**base_kwargs, "run_id": "other-run"}) is None
     assert load_warm_rollout(actor1.args.ckpt.path, recipe=recipe, **{**base_kwargs, "global_step": 2}) is None
-    assert load_warm_rollout(actor1.args.ckpt.path, recipe=recipe, **{**base_kwargs, "max_policy_lag": 0}) is None
 
     # End-to-end safe fallback on recipe change regenerates cleanly.
     actor2, _ = _make_generator_actor(
@@ -779,22 +756,10 @@ def test_warm_resume_checks_recipe_policy_and_checkpoint_identity(tmp_path, monk
     actor2.fit(
         episode=step1_cs["episode"],
         total_consumed_prompts=step1_cs["total_consumed_prompts"],
-        global_step=1,
+        start_step=1,
         warm_run_id="run-1",
     )
     assert gen_spy.call_count == 2
-
-    # Legacy checkpoint run_id helper is deterministic for the same extra_state.pt and changes if overwritten.
-    actor_ckpt_dir = tmp_path / "legacy_run" / "_actor" / "global_step3"
-    actor_ckpt_dir.mkdir(parents=True)
-    (tmp_path / "legacy_run" / "_actor" / "latest").write_text("global_step3")
-    torch.save({"client_state": {"global_step": 3}}, actor_ckpt_dir / "extra_state.pt")
-    id1 = rl_trainer._legacy_checkpoint_run_id(str(tmp_path / "legacy_run"), 3)
-    id2 = rl_trainer._legacy_checkpoint_run_id(str(tmp_path / "legacy_run"), 3)
-    assert id1 == id2
-    torch.save({"client_state": {"global_step": 3, "episode": 1}}, actor_ckpt_dir / "extra_state.pt")
-    id3 = rl_trainer._legacy_checkpoint_run_id(str(tmp_path / "legacy_run"), 3)
-    assert id3 != id1
 
     # Missing group file degrades gracefully to None without crashing.
     warm_dir = _warm_root(actor1.args.ckpt.path) / f"step_ep0_cursor{step1_cs['total_consumed_prompts']}_step1"
@@ -814,7 +779,6 @@ def test_warm_resume_checks_recipe_policy_and_checkpoint_identity(tmp_path, monk
             "source_episode": 0,
             "source_consumed_prompts": 99,
             "source_global_step": 1,
-            "source_policy_step": 1,
             "group_files": ["group_0000.pt"],
         },
         bad_partial / "manifest.pt",
@@ -826,27 +790,20 @@ def test_warm_resume_checks_recipe_policy_and_checkpoint_identity(tmp_path, monk
             consumed_prompts=99,
             global_step=1,
             run_id="run-1",
-            max_policy_lag=1,
             recipe=recipe,
         )
         is None
     )
 
-    # RLTrainer.fit() generates a fresh warm_run_id on fresh start and preserves checkpoint warm_run_id on resume.
+    # RLTrainer.fit() generates a fresh warm_run_id on fresh start, preserves checkpoint warm_run_id
+    # on resume, and hashes legacy extra_state.pt deterministically when warm_run_id is absent.
+    actor_ckpt_dir = tmp_path / "legacy_run" / "_actor" / "global_step3"
+    actor_ckpt_dir.mkdir(parents=True)
+    torch.save({"client_state": {"global_step": 3}}, actor_ckpt_dir / "extra_state.pt")
+
     rl_cls = rl_trainer.RLTrainer.__ray_metadata__.modified_class
-    for ckpt_state, expect_id in (
-        ({"episode": 0, "global_step": 0, "total_consumed_prompts": 0, "data_loader_state_dict": {}}, None),
-        (
-            {
-                "episode": 0,
-                "global_step": 4,
-                "total_consumed_prompts": 16,
-                "data_loader_state_dict": {"k": 1},
-                "warm_run_id": "persisted-run-id",
-            },
-            "persisted-run-id",
-        ),
-    ):
+
+    def _run_controller(ckpt_state):
         controller = object.__new__(rl_cls)
         controller.args = SimpleNamespace(ckpt=SimpleNamespace(path=str(tmp_path / "legacy_run")))
         gen_fit = Mock()
@@ -861,12 +818,30 @@ def test_warm_resume_checks_recipe_policy_and_checkpoint_identity(tmp_path, monk
             fit=SimpleNamespace(remote=Mock()),
         )
         controller.fit()
-        call_kw = gen_fit.call_args.kwargs
-        assert call_kw["global_step"] == ckpt_state["global_step"]
-        if expect_id is not None:
-            assert call_kw["warm_run_id"] == expect_id
-        else:
-            assert isinstance(call_kw["warm_run_id"], str) and len(call_kw["warm_run_id"]) == 32
+        return gen_fit.call_args.kwargs
+
+    fresh_kw = _run_controller(
+        {"episode": 0, "global_step": 0, "total_consumed_prompts": 0, "data_loader_state_dict": {}}
+    )
+    assert fresh_kw["start_step"] == 0 and len(fresh_kw["warm_run_id"]) == 32
+
+    resumed_kw = _run_controller(
+        {
+            "episode": 0,
+            "global_step": 4,
+            "total_consumed_prompts": 16,
+            "data_loader_state_dict": {"k": 1},
+            "warm_run_id": "persisted-run-id",
+        }
+    )
+    assert resumed_kw["start_step"] == 4 and resumed_kw["warm_run_id"] == "persisted-run-id"
+
+    legacy_state = {"episode": 0, "global_step": 3, "total_consumed_prompts": 12, "data_loader_state_dict": {"k": 1}}
+    legacy_id1 = _run_controller(legacy_state)["warm_run_id"]
+    legacy_id2 = _run_controller(legacy_state)["warm_run_id"]
+    assert legacy_id1 == legacy_id2 and legacy_id1.startswith("legacy-")
+    torch.save({"client_state": {"global_step": 3, "episode": 1}}, actor_ckpt_dir / "extra_state.pt")
+    assert _run_controller(legacy_state)["warm_run_id"] != legacy_id1
 
 
 def test_warm_writer_prunes_old_batches_and_preserves_lazy_experience(tmp_path, monkeypatch):
@@ -884,7 +859,6 @@ def test_warm_writer_prunes_old_batches_and_preserves_lazy_experience(tmp_path, 
             source_episode=0,
             source_consumed_prompts=cursor,
             source_global_step=step,
-            source_policy_step=step,
             run_id="run-prune",
             recipe=recipe,
             keep_batches=3,
@@ -903,7 +877,7 @@ def test_warm_writer_prunes_old_batches_and_preserves_lazy_experience(tmp_path, 
     assert warm_dirs == ["step_ep0_cursor30_step3", "step_ep0_cursor40_step4", "step_ep0_cursor50_step5"]
 
     hit = load_warm_rollout(
-        ckpt_path, episode=0, consumed_prompts=50, global_step=5, run_id="run-prune", max_policy_lag=1, recipe=recipe
+        ckpt_path, episode=0, consumed_prompts=50, global_step=5, run_id="run-prune", recipe=recipe
     )
     assert hit is not None and hit["complete"] is True
     assert hit["samples"][0].heavy_ref is None
