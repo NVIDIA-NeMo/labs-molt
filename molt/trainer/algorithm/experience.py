@@ -315,25 +315,16 @@ def remove_padding_in_sequences(items: List[Experience]) -> List[Experience]:
     return items
 
 
-def get_dp_divisor(args, align_dp_ranks: Optional[int] = None) -> int:
+def get_dp_divisor(args) -> int:
     """Return the DP alignment divisor shared across the actor and (if active) reference model."""
     mp_size = get_model_parallel_size(args)
     actor_dp = (args.actor.num_nodes * args.actor.num_gpus_per_node) // mp_size
     if actor_dp <= 0:
         raise ValueError(f"Invalid effective actor count: {actor_dp}")
-    ref_dp = align_dp_ranks
-    if ref_dp is None:
-        algo = getattr(args, "algo", None)
-        ref = getattr(args, "ref", None)
-        kl = getattr(algo, "kl", None)
-        if (
-            ref is not None
-            and kl is not None
-            and getattr(kl, "init_coef", 0) > 0
-            and getattr(kl, "ref", None) == "model"
-        ):
-            ref_dp = (ref.num_nodes * ref.num_gpus_per_node) // mp_size
-    if ref_dp is not None:
+    kl = getattr(getattr(args, "algo", None), "kl", None)
+    ref = getattr(args, "ref", None)
+    if ref is not None and kl is not None and getattr(kl, "init_coef", 0) > 0 and getattr(kl, "ref", None) == "model":
+        ref_dp = (ref.num_nodes * ref.num_gpus_per_node) // mp_size
         if ref_dp <= 0:
             raise ValueError(f"Invalid effective reference count: {ref_dp}")
         return math.lcm(actor_dp, ref_dp)
@@ -377,7 +368,6 @@ def balance_experiences(
     args,
     *,
     num_dp_ranks: Optional[int] = None,
-    align_dp_ranks: Optional[int] = None,
 ):
     """Return equal DP blocks with the same media inputs at each position.
 
@@ -400,7 +390,7 @@ def balance_experiences(
     else:
         actor_world_size = args.actor.num_nodes * args.actor.num_gpus_per_node
         effective_num = actor_world_size // get_model_parallel_size(args)
-        divisor = get_dp_divisor(args, align_dp_ranks=align_dp_ranks)
+        divisor = get_dp_divisor(args)
 
     if len(experiences) < divisor:
         raise ValueError(

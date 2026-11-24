@@ -330,9 +330,7 @@ class BaseRLTrainer:
         # never concentrates on one node; the transfer is transparent (Ray resolves each handle where
         # it is used).
         t0 = time.time()
-        ref_group = getattr(self, "reference_model_group", None)
-        ref_dp = getattr(ref_group, "dp_size", None) if ref_group is not None else None
-        experiences = balance_experiences(rollout_samples, self.args, align_dp_ranks=ref_dp)
+        experiences = balance_experiences(rollout_samples, self.args)
         experiences = self.experience_maker.build_experiences(experiences)
         make_experience_time = time.time() - t0
 
