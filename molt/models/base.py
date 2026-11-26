@@ -17,6 +17,7 @@
 # Copyright (c) OpenRLHF contributors, licensed under the Apache License, Version 2.0.
 
 import inspect
+import json
 import os
 from contextlib import nullcontext
 from importlib.util import find_spec
@@ -426,6 +427,11 @@ class BaseModel(nn.Module):
             # activation checkpointing (-> CheckpointError) and destabilizes the MoE grad
             # norm. Default fp32 (matches AutoModel reference recipes). Override: MOLT_RMS_NORM.
             backend_cfg["rms_norm"] = os.environ.get("MOLT_RMS_NORM", "torch_fp32")
+            # Options of AutoModel's te_nvfp4 backend block as JSON ("{}" = Transformer Engine defaults):
+            # the experts (MOLT_MOE_EXPERTS=te) then run NVFP4 GEMMs forward and backward.
+            if os.environ.get("MOLT_TE_NVFP4"):
+                options = os.environ["MOLT_TE_NVFP4"]
+                backend_cfg["te_nvfp4"] = json.loads(Path(options).read_text() if options.startswith("/") else options)
             # Force the MoE router to fp32 (BackendConfig defaults the gate linear to
             # the bf16 bulk dtype). A bf16 router drifts from vLLM's fp32 router ->
             # rollout-vs-train logprobs diverge and vllm_kl climbs. Matches slime/verl.
@@ -475,6 +481,14 @@ class BaseModel(nn.Module):
                 "names (e.g. '*.q_proj'); a bare leaf name like 'q_proj' matches nothing."
             )
         self.model = move_model_to_cpu_for_offload(self.model, distributed_config)
+        te_quantization = backend_kwarg["backend"].te_quantization if backend_kwarg else None
+        if te_quantization is not None:
+            # prepare_modules (exclusions plus the MXFP8 layers) needs an AutoModel with te_nvfp4.mxfp8_fqns.
+            getattr(te_quantization, "prepare_modules", te_quantization.exclude_modules)(self.model)
+            # Entered once for the process: the activation-checkpointing recompute runs in backward,
+            # outside any forward-scoped context.
+            te_quantization.maybe_te_autocast().__enter__()
+            print(f"[TE] {te_quantization.name} autocast on: {te_quantization}")
         # from_pretrained may downgrade to HF even when custom was requested;
         # re-derive from the loaded class so the forward picks the right pack style.
         self._packing_style = "automodel" if is_automodel_custom_model(self.model) else "hf"

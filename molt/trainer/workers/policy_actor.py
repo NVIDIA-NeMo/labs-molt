@@ -87,6 +87,54 @@ def _lora_merge_map(model: torch.nn.Module, sd: dict) -> dict:
     return merge
 
 
+def _dither_expert_masters(actor, seed: int) -> None:
+    """Move every Transformer Engine expert master to a random position inside its rounding cell.
+
+    The released experts sit at the centres of their 4-bit cells, where small updates never change a code.
+    The spread masters quantize to the same values (checked here for every weight).
+    """
+    import re
+    import sys
+    import time
+
+    sys.path.insert(0, os.environ["MOLT_PACK_EXPERTS_DIR"])
+    import dither_masters as dm
+    import pack_experts as pe
+
+    begin = time.time()
+    first_mxfp8 = int(os.environ["MOLT_MXFP8_FIRST_LAYER"])
+    nvfp4, mxfp8 = pe.nvfp4_quantizer(), pe.mxfp8_quantizer()
+    rank = torch.distributed.get_rank()
+    generator = torch.Generator(device="cuda").manual_seed(seed * 100003 + rank)
+    weights, moved, worst = 0, 0.0, 0.0
+    with torch.no_grad():
+        for name, experts in actor.model.named_modules():
+            match = re.search(r"layers\.(\d+)\.", name)
+            if not (match and hasattr(experts, "gate_up_linear") and hasattr(experts, "down_linear")):
+                continue
+            for linear in (experts.gate_up_linear, experts.down_linear):
+                for local in range(experts.num_local_experts):
+                    parameter = getattr(linear, f"weight{local}")
+                    original = parameter.detach().float()
+                    if int(match.group(1)) >= first_mxfp8:
+                        spread = dm.dither_mxfp8(original, mxfp8, generator)
+                        before = pe.decode_mxfp8(*pe.pack_mxfp8(original, mxfp8))
+                        after = pe.decode_mxfp8(*pe.pack_mxfp8(spread, mxfp8))
+                    else:
+                        spread = dm.dither_nvfp4(original, nvfp4, generator)
+                        before = pe.decode_nvfp4(*pe.pack_nvfp4(original, nvfp4))
+                        after = pe.decode_nvfp4(*pe.pack_nvfp4(spread, nvfp4))
+                    worst = max(worst, float((after - before).abs().max()), float((before - original).abs().max()))
+                    moved += float((spread - original).abs().mean() / original.abs().mean())
+                    parameter.copy_(spread.to(parameter.dtype))
+                    weights += 1
+    print(
+        f"[dither] rank {rank}: {weights} expert weights ({parameter.dtype}) spread in {time.time() - begin:.0f} s; "
+        f"largest change of the quantized values {worst:.1e}; mean |master change| / mean |weight| {moved / max(weights, 1):.3f}",
+        flush=True,
+    )
+
+
 class PolicyTrainer:
     """Owns actor-side policy optimization on each Ray/FSDP worker."""
 
@@ -939,6 +987,8 @@ class PolicyModelActor(BaseModelActor):
             "scheduler_steps": max_steps,
         }
         self.actor, self.actor_optim, self.actor_scheduler = strategy.prepare((actor, actor_cfg))
+        if os.environ.get("MOLT_DITHER_EXPERT_MASTERS"):
+            _dither_expert_masters(self.actor, int(os.environ["MOLT_DITHER_EXPERT_MASTERS"]))
 
         # load checkpoint
         self.checkpoint_states = {}

@@ -22,6 +22,7 @@ back onto the block scales the checkpoint was released with.
 """
 
 import json
+import os
 import re
 import zlib
 from pathlib import Path
@@ -46,6 +47,9 @@ def _round_to_grid(x: torch.Tensor, grid: torch.Tensor, generator: torch.Generat
     # An unchanged weight decodes to its grid value only up to FP32 rounding: keep it there.
     position = (x - low) / (high - low) * (1 + 2e-5) - 1e-5
     threshold = torch.rand(x.shape, generator=generator, device=x.device)
+    if os.environ.get("MOLT_INKLING2_ROUNDING") in ("nearest", "te"):
+        # The trainer quantizes its own (spread) masters to nearest; encode the same way.
+        threshold = torch.full_like(threshold, 0.5)
     return torch.where(threshold < position, high, low)
 
 
@@ -88,6 +92,41 @@ def encode_experts(name: str, weight: torch.Tensor, scale: torch.Tensor, outer: 
 
 
 @torch.no_grad()
+def _te_pack(source: str, weight: torch.Tensor, released: list[torch.Tensor], nvfp4: bool) -> list[torch.Tensor]:
+    """Experts quantized by Transformer Engine's weight quantizer, in the checkpoint layout."""
+    import sys
+
+    sys.path.insert(0, os.environ["MOLT_PACK_EXPERTS_DIR"])
+    import pack_experts as pe
+
+    if nvfp4:
+        quantizer = pe.nvfp4_quantizer()
+        codes, scales, amax = (
+            torch.stack(part) for part in zip(*(pe.pack_nvfp4(x.float(), quantizer) for x in weight))
+        )
+        packed = [codes, scales, amax * (released[2] / pe.OUTER_DENOMINATOR), released[2]]
+        decoded = pe.decode_nvfp4(codes[:2], scales[:2], amax[:2])
+        fixed = pe.decode_nvfp4(
+            encode_experts(source, weight[:2], released[0][:2], (released[1] / released[2])[:2]),
+            released[0][:2],
+            released[1][:2] * (pe.OUTER_DENOMINATOR / released[2]),
+        )
+    else:
+        quantizer = pe.mxfp8_quantizer()
+        codes, exponents = (torch.stack(part) for part in zip(*(pe.pack_mxfp8(x.float(), quantizer) for x in weight)))
+        packed = [codes, exponents]
+        decoded = pe.decode_mxfp8(codes[:2], exponents[:2])
+        fixed = pe.decode_mxfp8(encode_experts(source, weight[:2], released[0][:2], None), released[0][:2])
+    if ".layers.0." in source or ".layers.19." in source or ".layers.23." in source:
+        print(
+            f"[te-pack] {source} {weight.dtype}: trainer quantization vs released-scale encoding, relative difference "
+            f"{float((decoded - fixed).norm() / decoded.norm()):.5f}; vs master {float((decoded - weight[:2].float()).norm() / decoded.norm()):.5f}",
+            flush=True,
+        )
+    return packed
+
+
+@torch.no_grad()
 def load_weights(model: torch.nn.Module, weights: list[tuple[str, torch.Tensor]], checkpoint: str) -> set[str]:
     """Assign refit tensors named as in the checkpoint; returns the vLLM parameter names assigned.
 
@@ -121,6 +160,13 @@ def load_weights(model: torch.nn.Module, weights: list[tuple[str, torch.Tensor]]
             with safe_open(Path(checkpoint) / files[source], "pt", device=str(weight.device)) as file:
                 released = [file.get_tensor(source + suffix) for suffix in suffixes]
             outer = released[1] / released[2] if nvfp4 else None
+            if os.environ.get("MOLT_INKLING2_ROUNDING") == "te":
+                # Serve the trainer's own quantization (its codes and block scales).
+                packed = _te_pack(source, weight, released, nvfp4)
+                assign(name, packed[0])
+                for suffix, tensor in zip(suffixes, packed[1:]):
+                    assign(name + suffix, tensor)
+                continue
             assign(name, encode_experts(source, weight, released[0], outer))
             for suffix, tensor in zip(suffixes, released):
                 assign(name + suffix, tensor)
