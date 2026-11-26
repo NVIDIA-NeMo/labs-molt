@@ -1031,12 +1031,14 @@ class RLTrainer:
                 ]
             )
 
+        fits = [
+            self.generator_actor.fit.remote(episode=start_episode, total_consumed_prompts=total_consumed_prompts),
+            self.trainer_actor.fit.remote(global_step=global_step),
+        ]
         ray.get(
-            [
-                self.generator_actor.fit.remote(episode=start_episode, total_consumed_prompts=total_consumed_prompts),
-                self.trainer_actor.fit.remote(global_step=global_step),
-            ]
-        )
+            ray.wait(fits, num_returns=1)[0]
+        )  # a failed trainer raises here instead of leaving the generator waiting
+        ray.get(fits)
 
     def get_max_steps(self):
         return ray.get(self.generator_actor.get_max_steps.remote())
