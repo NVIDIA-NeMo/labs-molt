@@ -509,8 +509,13 @@ class BaseModel(nn.Module):
                     gate_layer_ids.append(int(m.group(1)) if m else len(gate_layer_ids))
             if not gate_layer_ids:
                 raise RuntimeError("routing_replay is on but the model has no MoE router gates.")
-            self._num_routing_gates = len(gate_layer_ids)
-            self._moe_layer_global_ids = gate_layer_ids
+            # vLLM keeps one routing row per layer visit, in execution order. A looped model (Inkling 2)
+            # runs its core once per pass; a model without a loop is one pass over no core layers.
+            no_loop = {"core_start": 0, "core_end": 0, "num_passes": 1}
+            loop = getattr(self.model.config.get_text_config(), "loop_config", None) or no_loop
+            core = range(loop["core_start"], loop["core_end"])
+            visits = [*range(core.start), *list(core) * loop["num_passes"], *range(core.stop, max(gate_layer_ids) + 1)]
+            self._routing_rows = [[row for row, layer in enumerate(visits) if layer == gid] for gid in gate_layer_ids]
             print(
                 f"[R3] Routing replay enabled on {len(gate_layer_ids)} MoE gates at global layer ids {gate_layer_ids}."
             )
@@ -575,14 +580,14 @@ class BaseModel(nn.Module):
         ``routed_experts`` is ``(B, vllm_layers, topk, S)`` (rollout top-k expert ids per
         token, seq last). Returns one ``(num_tokens, topk)`` tensor per MoE gate, reordered
         to what the gate sees on this rank (CP-local under cp>1, pad-removed under packing,
-        else plain ``B*S``). Positions with no captured routing carry a -1 sentinel that
-        ``RouterReplay`` keeps at the live selection.
+        else plain ``B*S``); a looped layer gets ``(visits, num_tokens, topk)``. Positions
+        with no captured routing carry a -1 sentinel that ``RouterReplay`` keeps at the live
+        selection.
 
         vLLM indexes its layer dim by GLOBAL decoder-layer id, so we pick each gate's own
-        global-id row (``_moe_layer_global_ids``); uniform-MoE ids are 0..N-1 (plain order).
+        rows (``_routing_rows``); uniform-MoE ids are 0..N-1 (plain order).
         """
-        n_gates = self._num_routing_gates
-        global_ids = self._moe_layer_global_ids
+        rows = self._routing_rows
         routing = routed_experts  # (B, vllm_layers, topk, S), seq last
         # The -1 fill keeps CP pad tokens out of expert 0, so RouterReplay leaves them at
         # the live selection.
@@ -602,12 +607,9 @@ class BaseModel(nn.Module):
                     # Match the EP-equalized pack. Expert 0, not the -1 sentinel: Gate
                     # gathers routing weights before padding_mask drops these rows.
                     per_token = F.pad(per_token, (0, 0, 0, 0, 0, pad_to_tokens - per_token.shape[0]))
-        if per_token.shape[1] <= max(global_ids):
-            raise ValueError(
-                f"rollout routing has {per_token.shape[1]} layers but a MoE gate maps to global "
-                f"layer {max(global_ids)} (have {n_gates} gates at ids {global_ids})."
-            )
-        return [per_token[:, gid, :].contiguous() for gid in global_ids]
+        if per_token.shape[1] <= max(map(max, rows)):
+            raise ValueError(f"rollout routing has {per_token.shape[1]} layers but the MoE gates replay rows {rows}.")
+        return [per_token[:, gate, :].transpose(0, 1).squeeze(0).contiguous() for gate in rows]
 
     def _forward_backbone(
         self,
