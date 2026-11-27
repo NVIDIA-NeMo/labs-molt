@@ -267,7 +267,9 @@ def _parse_latex(expr: str) -> str:
     expr = expr.replace("\\tfrac", "\\frac")
     expr = expr.replace("\\dfrac", "\\frac")
     expr = expr.replace("\\frac", " \\frac")  # play nice with mixed numbers
-    expr = latex2text.LatexNodes2Text().latex_to_text(expr)
+    # Tolerant parsing repairs a missing brace, but its time doubles with each group left open
+    # (\frac{ \frac{ \frac{ ... never returns), so only short answers get it.
+    expr = latex2text.LatexNodes2Text().latex_to_text(expr, tolerant_parsing=len(expr) <= 64)
     expr = expr.replace("√", "sqrt")
     expr = expr.replace("π", "pi")
     expr = expr.replace("∞", "inf")

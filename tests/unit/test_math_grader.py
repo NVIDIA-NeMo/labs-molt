@@ -223,6 +223,13 @@ def test_answer_equivalence_sympy() -> None:
     assert not fails, "\n".join(fails)
 
 
+def test_unclosed_latex_nest_is_wrong_and_returns() -> None:
+    """Tolerant parsing takes twice as long per group left open: these 40 would not return."""
+    pytest.importorskip("pylatexenc")
+    assert not mg.answers_match(r"\boxed{ \frac{The maximum is " * 40, r"\frac{1}{4}")
+    assert mg._normalize(r"\frac{1}{2") == "1/2"  # a short answer is still repaired
+
+
 @pytest.mark.parametrize(
     "response,target,expected_prediction,expected_reward",
     [
