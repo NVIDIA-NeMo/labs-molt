@@ -20,6 +20,8 @@ import sys
 from dataclasses import dataclass
 from types import ModuleType, SimpleNamespace
 
+import pytest
+
 
 def _install_vllm_test_stub():
     vllm = ModuleType("vllm")
@@ -157,3 +159,28 @@ def test_reload_mode_reaches_vllm_through_its_environment_variable(monkeypatch):
     actor_cls = getattr(vllm_engine.RolloutRayActor, "__ray_actor_class__", vllm_engine.RolloutRayActor)
     actor_cls.__new__(actor_cls)._configure_vllm_env(full_determinism=False, reload_mode="auto")
     assert os.environ["VLLM_RELOAD_MODE"] == "auto"
+
+
+@pytest.mark.parametrize(
+    "logprobs_mode,expected",
+    [("processed_logprobs", "processed_logprobs"), (None, None)],
+)
+def test_create_vllm_engines_forwards_the_logprobs_mode(monkeypatch, logprobs_mode, expected):
+    """The caller's choice has to reach vLLM: post-temperature log-probs when it asks for them, and
+    nothing at all when it passes None for vLLM's raw default."""
+    captured = {}
+
+    def _spawn(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(ready=SimpleNamespace(remote=lambda: None))
+
+    monkeypatch.setattr(
+        vllm_engine, "RolloutRayActor", SimpleNamespace(options=lambda **_: SimpleNamespace(remote=_spawn))
+    )
+    monkeypatch.setattr(vllm_engine, "placement_group", lambda *a, **k: SimpleNamespace(ready=lambda: None))
+    monkeypatch.setattr(vllm_engine, "PlacementGroupSchedulingStrategy", lambda **k: None)
+    monkeypatch.setattr(vllm_engine.ray, "get", lambda *a, **k: None)
+
+    vllm_engine.create_vllm_engines(1, 1, "model-path", 0, False, True, 4096, logprobs_mode=logprobs_mode)
+
+    assert captured.get("logprobs_mode") == expected

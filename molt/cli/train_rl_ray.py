@@ -93,11 +93,11 @@ def train(args):
             args.vllm.enforce_eager,
             max_len,
             args.vllm.gpu_memory_utilization,
-            "processed_logprobs"
-            if args.algo.advantage.is_correction_level != "off"
-            or args.algo.advantage.score_centering_top_k
-            or (args.algo.kl.init_coef > 0 and args.algo.kl.ref == "rollout")
-            else None,
+            # The IS correction, score centering and a rollout-referenced KL consume these as the
+            # density the tokens were sampled from, which is post-temperature AND post-mask, so the
+            # engine always returns the processed ones. mismatch_metrics compares them against the
+            # forward's full-vocabulary log-probs and skips the steps a mask renormalized.
+            logprobs_mode="processed_logprobs",
             max_images_per_prompt=getattr(args.data, "max_images_per_prompt", 0),
             mm_encoder_attn_backend=args.vllm.mm_encoder_attn_backend,
             gdn_prefill_backend=args.vllm.gdn_prefill_backend,

@@ -40,10 +40,15 @@ recipes, FlashREINFORCE and REINFORCE Zero.
 | Metric | Meaning |
 |---|---|
 | `vllm_kl` | Signed mean gap between rollout and trainer log-probs |
-| `mismatch/bitwise_frac` | Fraction of response tokens whose fp32 log-prob bytes differ |
-| `mismatch/abs_diff_mean` | Mean absolute log-prob difference |
-| `mismatch/k3_kl` | k3 estimate of the KL |
+| `mismatch/bitwise_frac` | Fraction of comparable response tokens whose fp32 log-prob bytes differ |
+| `mismatch/abs_diff_mean` | Mean absolute log-prob difference over comparable tokens |
+| `mismatch/k3_kl` | k3 estimate of the KL over comparable tokens |
 | `is_filter_ratio` | Fraction of sequences removed by the IS-correction gate |
+
+Comparable tokens exclude each generation request's first token, where vLLM's `min_tokens` stop
+mask renormalizes the sampler's distribution, and every token of a request sampled with top_p below
+1 (`--rollout.top_p`, or an environment's per-turn override), which vLLM renormalizes over the
+nucleus. A step with no comparable token logs none of the three `mismatch/*` metrics.
 
 `bitwise_frac` is only meaningful in a strictly synchronous run with `--train.force_sync_mode`.
 Under any lag the rollout came from older weights, and the fraction reads about 1.

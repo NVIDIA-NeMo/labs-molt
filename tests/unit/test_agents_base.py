@@ -53,7 +53,7 @@ class _Engine:
 def test_step_env_runner_isolates_sampling_params_per_trajectory():
     """Validates list-shaped reward/score unwrap to scalars without a dedicated
     normaliser, and that two concurrent rollouts do not share sampling-param state."""
-    params = SimpleNamespace(max_tokens=8, logprobs=None)
+    params = SimpleNamespace(max_tokens=8, top_p=1.0, logprobs=None)
     engine = _Engine()
     runner = StepEnvRunner(_OneStepEnv)
 
@@ -69,6 +69,23 @@ def test_step_env_runner_isolates_sampling_params_per_trajectory():
     assert len({id(item) for item in engine.seen_sampling_params}) == 2
     assert [output.reward for output in outputs] == [2.0, 2.0]
     assert [output.scores for output in outputs] == [3.0, 3.0]
+
+
+class _NucleusSecondTurnEnv(Env):
+    async def step(self, state, **kwargs):
+        if state["sampling_params"].top_p < 1.0:
+            return Result(reward=[1.0], terminated=True)
+        return Result(reward=[0.0], terminated=False, sampling_params=SimpleNamespace(max_tokens=8, top_p=0.7))
+
+
+def test_each_action_range_records_the_top_p_its_request_sampled_with():
+    """An env can change top_p for its next turn; mismatch/* must know which turns were nucleus
+    sampled, since vLLM renormalizes every log-prob of such a turn over the kept nucleus."""
+    params = SimpleNamespace(max_tokens=8, top_p=1.0, logprobs=None)
+    runner = StepEnvRunner(_NucleusSecondTurnEnv)
+    trajectory = asyncio.run(runner.execute("p", "l", params, 64, _Tokenizer(), _Engine()))
+
+    assert trajectory.action_top_ps == [1.0, 0.7]
 
 
 def test_generation_logprobs_fail_fast_when_vllm_omits_them():
@@ -113,7 +130,7 @@ class _CloseRaisesEnv(_TerminatesEnv):
 
 
 def _execute(env_cls, max_length=64):
-    params = SimpleNamespace(max_tokens=8, logprobs=None)
+    params = SimpleNamespace(max_tokens=8, top_p=1.0, logprobs=None)
     return asyncio.run(StepEnvRunner(env_cls).execute("p", "l", params, max_length, _Tokenizer(), _Engine()))
 
 
