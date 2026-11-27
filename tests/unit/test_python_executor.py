@@ -146,6 +146,32 @@ def test_run_python_timeout_terminates_spawned_children(tmp_path):
     assert not survivor.exists()
 
 
+def test_run_python_success_terminates_background_children(tmp_path):
+    ready = tmp_path / "ready.txt"
+    survivor = tmp_path / "survived.txt"
+    child = (
+        "import time\n"
+        "from pathlib import Path\n"
+        f"Path({str(ready)!r}).touch()\n"
+        "time.sleep(1)\n"
+        f"Path({str(survivor)!r}).touch()\n"
+    )
+    code = (
+        "import os, subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, '-c', {child!r}], "
+        "stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        f"while not os.path.exists({str(ready)!r}): time.sleep(0.01)\n"
+        "print('done')\n"
+    )
+
+    out = run_python(code)
+    assert ready.exists()
+    time.sleep(1.1)
+
+    assert out == "done\n"
+    assert not survivor.exists()
+
+
 def test_run_python_timeout_does_not_wait_for_escaped_child(tmp_path):
     ready = tmp_path / "ready.txt"
     release = tmp_path / "release.txt"
